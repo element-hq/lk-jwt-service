@@ -58,7 +58,7 @@ func main() {
 
 	// Check if the key and secret are empty.
 	if key == "" || secret == "" {
-		log.Fatal("LIVEKIT_KIT and LIVEKIT_SECRET environment variables must be set")
+		log.Fatal("LIVEKIT_KEY and LIVEKIT_SECRET environment variables must be set")
 	}
 
 	handler := &Handler{
