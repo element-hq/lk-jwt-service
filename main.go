@@ -76,30 +76,39 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("Error decoding JSON: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(gomatrix.RespError{
+			err = json.NewEncoder(w).Encode(gomatrix.RespError{
 				ErrCode: "M_NOT_JSON",
 				Err:     "Error decoding JSON",
 			})
+			if err != nil {
+				log.Printf("failed to encode json error message! %v", err)
+			}
 			return
 		}
 
 		if body.Room == "" {
 			log.Printf("Request missing room")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(gomatrix.RespError{
+			err = json.NewEncoder(w).Encode(gomatrix.RespError{
 				ErrCode: "M_BAD_JSON",
 				Err:     "Missing parameters",
 			})
+			if err != nil {
+				log.Printf("failed to encode json error message! %v", err)
+			}
 			return
 		}
 
 		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(gomatrix.RespError{
+			err = json.NewEncoder(w).Encode(gomatrix.RespError{
 				ErrCode: "M_LOOKUP_FAILED",
 				Err:     "Failed to look up user info from homeserver",
 			})
+			if err != nil {
+				log.Printf("failed to encode json error message! %v", err)
+			}
 			return
 		}
 
@@ -108,17 +117,23 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		token, err := getJoinToken(h.key, h.secret, body.Room, userInfo.Sub+":"+body.DeviceID)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(gomatrix.RespError{
+			err = json.NewEncoder(w).Encode(gomatrix.RespError{
 				ErrCode: "M_UNKNOWN",
 				Err:     "Internal Server Error",
 			})
+			if err != nil {
+				log.Printf("failed to encode json error message! %v", err)
+			}
 			return
 		}
 
 		res := SFUResponse{URL: h.lk_url, JWT: token}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(res)
+		err = json.NewEncoder(w).Encode(res)
+		if err != nil {
+			log.Printf("failed to encode json response! %v", err)
+		}
 	} else {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
