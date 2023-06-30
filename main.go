@@ -18,7 +18,7 @@ import (
 )
 
 type Handler struct {
-	key, secret string
+	key, secret, lk_url string
 }
 
 type OpenIDTokenType struct {
@@ -115,7 +115,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		res := SFUResponse{URL: "http://localhost:7880/", JWT: token}
+		res := SFUResponse{URL: h.lk_url, JWT: token}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(res)
@@ -127,17 +127,19 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 func main() {
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
+	lk_url := os.Getenv("LIVEKIT_URL")
 
-	// Check if the key and secret are empty.
-	if key == "" || secret == "" {
-		log.Fatal("LIVEKIT_KEY and LIVEKIT_SECRET environment variables must be set")
+	// Check if the key, secret or url are empty.
+	if key == "" || secret == "" || lk_url == "" {
+		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
 	}
 
-	log.Printf("LIVEKIT_KEY: %s and LIVEKIT_SECRET %s", key, secret)
+	log.Printf("LIVEKIT_KEY: %s and LIVEKIT_SECRET %s, LIVEKIT_URL %s", key, secret, lk_url)
 
 	handler := &Handler{
 		key:    key,
 		secret: secret,
+		lk_url: lk_url,
 	}
 
 	http.HandleFunc("/sfu/get", handler.handle)
