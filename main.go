@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -9,6 +11,10 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/auth"
+
+	"github.com/matrix-org/gomatrix"
+	"github.com/matrix-org/gomatrixserverlib/fclient"
+	"github.com/matrix-org/gomatrixserverlib/spec"
 )
 
 type Handler struct {
@@ -16,6 +22,9 @@ type Handler struct {
 }
 
 type OpenIDTokenType struct {
+	AccessToken      string `json:"access_token"`
+	TokenType        string `json:"token_type"`
+	MatrixServerName string `json:"matrix_server_name"`
 }
 
 type SFURequest struct {
@@ -28,6 +37,25 @@ type SFURequest struct {
 type SFUResponse struct {
 	URL string `json:"url"`
 	JWT string `json:"jwt"`
+}
+
+func exchangeOIDCToken(
+	ctx context.Context, token OpenIDTokenType,
+) (*fclient.UserInfo, error) {
+	if token.AccessToken == "" || token.MatrixServerName == "" {
+		return nil, errors.New("Missing parameters in OIDC token")
+	}
+
+	client := fclient.NewClient()
+	// validate the openid token by getting the user's ID
+	userinfo, err := client.LookupUserInfo(
+		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
+	)
+	if err != nil {
+		log.Printf("Failed to look up user info: %v", err)
+		return nil, errors.New("Failed to look up user info")
+	}
+	return &userinfo, nil
 }
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
@@ -48,18 +76,42 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("Error decoding JSON: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(gomatrix.RespError{
+				ErrCode: "M_NOT_JSON",
+				Err:     "Error decoding JSON",
+			})
 			return
 		}
 
 		if body.Room == "" {
 			log.Printf("Request missing room")
 			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(gomatrix.RespError{
+				ErrCode: "M_BAD_JSON",
+				Err:     "Missing parameters",
+			})
 			return
 		}
 
-		token, err := getJoinToken(h.key, h.secret, body.Room, body.RemoveMeUserID+":"+body.DeviceID)
+		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(gomatrix.RespError{
+				ErrCode: "M_LOOKUP_FAILED",
+				Err:     "Failed to look up user info from homeserver",
+			})
+			return
+		}
+
+		log.Printf("Got user info for %s", userInfo.Sub)
+
+		token, err := getJoinToken(h.key, h.secret, body.Room, userInfo.Sub+":"+body.DeviceID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(gomatrix.RespError{
+				ErrCode: "M_UNKNOWN",
+				Err:     "Internal Server Error",
+			})
 			return
 		}
 
@@ -70,19 +122,6 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
-
-	/*
-		roomName := r.URL.Query().Get("roomName")
-		name := r.URL.Query().Get("name")
-		identity := r.URL.Query().Get("identity")
-
-		log.Printf("roomName: %s, name: %s, identity: %s", roomName, name, identity)
-
-		if roomName == "" || name == "" || identity == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-	*/
 }
 
 func main() {
