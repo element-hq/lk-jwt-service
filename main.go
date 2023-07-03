@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -9,10 +11,50 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/auth"
+
+	"github.com/matrix-org/gomatrix"
+	"github.com/matrix-org/gomatrixserverlib/fclient"
+	"github.com/matrix-org/gomatrixserverlib/spec"
 )
 
 type Handler struct {
-	key, secret string
+	key, secret, lk_url string
+}
+
+type OpenIDTokenType struct {
+	AccessToken      string `json:"access_token"`
+	TokenType        string `json:"token_type"`
+	MatrixServerName string `json:"matrix_server_name"`
+}
+
+type SFURequest struct {
+	Room        string          `json:"room"`
+	OpenIDToken OpenIDTokenType `json:"openid_token"`
+	DeviceID    string          `json:"device_id"`
+}
+
+type SFUResponse struct {
+	URL string `json:"url"`
+	JWT string `json:"jwt"`
+}
+
+func exchangeOIDCToken(
+	ctx context.Context, token OpenIDTokenType,
+) (*fclient.UserInfo, error) {
+	if token.AccessToken == "" || token.MatrixServerName == "" {
+		return nil, errors.New("Missing parameters in OIDC token")
+	}
+
+	client := fclient.NewClient()
+	// validate the openid token by getting the user's ID
+	userinfo, err := client.LookupUserInfo(
+		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
+	)
+	if err != nil {
+		log.Printf("Failed to look up user info: %v", err)
+		return nil, errors.New("Failed to look up user info")
+	}
+	return &userinfo, nil
 }
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
@@ -20,61 +62,105 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 	// Set the CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+	w.Header().Set("Access-Control-Allow-Methods", "POST")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
 	// Handle preflight request (CORS)
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
+	} else if r.Method == "POST" {
+		var body SFURequest
+		err := json.NewDecoder(r.Body).Decode(&body)
+		if err != nil {
+			log.Printf("Error decoding JSON: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			err = json.NewEncoder(w).Encode(gomatrix.RespError{
+				ErrCode: "M_NOT_JSON",
+				Err:     "Error decoding JSON",
+			})
+			if err != nil {
+				log.Printf("failed to encode json error message! %v", err)
+			}
+			return
+		}
+
+		if body.Room == "" {
+			log.Printf("Request missing room")
+			w.WriteHeader(http.StatusBadRequest)
+			err = json.NewEncoder(w).Encode(gomatrix.RespError{
+				ErrCode: "M_BAD_JSON",
+				Err:     "Missing parameters",
+			})
+			if err != nil {
+				log.Printf("failed to encode json error message! %v", err)
+			}
+			return
+		}
+
+		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			err = json.NewEncoder(w).Encode(gomatrix.RespError{
+				ErrCode: "M_LOOKUP_FAILED",
+				Err:     "Failed to look up user info from homeserver",
+			})
+			if err != nil {
+				log.Printf("failed to encode json error message! %v", err)
+			}
+			return
+		}
+
+		log.Printf("Got user info for %s", userInfo.Sub)
+
+		token, err := getJoinToken(h.key, h.secret, body.Room, userInfo.Sub+":"+body.DeviceID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			err = json.NewEncoder(w).Encode(gomatrix.RespError{
+				ErrCode: "M_UNKNOWN",
+				Err:     "Internal Server Error",
+			})
+			if err != nil {
+				log.Printf("failed to encode json error message! %v", err)
+			}
+			return
+		}
+
+		res := SFUResponse{URL: h.lk_url, JWT: token}
+
+		w.Header().Set("Content-Type", "application/json")
+		err = json.NewEncoder(w).Encode(res)
+		if err != nil {
+			log.Printf("failed to encode json response! %v", err)
+		}
+	} else {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
-
-	roomName := r.URL.Query().Get("roomName")
-	name := r.URL.Query().Get("name")
-	identity := r.URL.Query().Get("identity")
-
-	log.Printf("roomName: %s, name: %s, identity: %s", roomName, name, identity)
-
-	if roomName == "" || name == "" || identity == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	token, err := getJoinToken(h.key, h.secret, roomName, identity, name)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	res := Response{token}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
 }
 
 func main() {
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
+	lk_url := os.Getenv("LIVEKIT_URL")
 
-	// Check if the key and secret are empty.
-	if key == "" || secret == "" {
-		log.Fatal("LIVEKIT_KEY and LIVEKIT_SECRET environment variables must be set")
+	// Check if the key, secret or url are empty.
+	if key == "" || secret == "" || lk_url == "" {
+		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
 	}
+
+	log.Printf("LIVEKIT_KEY: %s and LIVEKIT_SECRET %s, LIVEKIT_URL %s", key, secret, lk_url)
 
 	handler := &Handler{
 		key:    key,
 		secret: secret,
+		lk_url: lk_url,
 	}
 
-	http.HandleFunc("/token", handler.handle)
+	http.HandleFunc("/sfu/get", handler.handle)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-type Response struct {
-	Token string `json:"accessToken"`
-}
-
-func getJoinToken(apiKey, apiSecret, room, identity, name string) (string, error) {
+func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
@@ -89,8 +175,7 @@ func getJoinToken(apiKey, apiSecret, room, identity, name string) (string, error
 
 	at.AddGrant(grant).
 		SetIdentity(identity).
-		SetValidFor(time.Hour).
-		SetName(name)
+		SetValidFor(time.Hour)
 
 	return at.ToJWT()
 }

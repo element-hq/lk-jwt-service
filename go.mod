@@ -30,6 +30,9 @@ require (
 	github.com/livekit/psrpc v0.3.0 // indirect
 	github.com/mackerelio/go-osstat v0.2.4 // indirect
 	github.com/magefile/mage v1.14.0 // indirect
+	github.com/matrix-org/gomatrix v0.0.0-20210324163249-be2af5ef2e16 // indirect
+	github.com/matrix-org/gomatrixserverlib v0.0.0-20230628151943-f6e3c7f7b093 // indirect
+	github.com/matrix-org/util v0.0.0-20200807132607-55161520e1d4 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
 	github.com/nats-io/nats.go v1.25.0 // indirect
 	github.com/nats-io/nkeys v0.4.4 // indirect
@@ -57,8 +60,13 @@ require (
 	github.com/prometheus/common v0.42.0 // indirect
 	github.com/prometheus/procfs v0.9.0 // indirect
 	github.com/redis/go-redis/v9 v9.0.4 // indirect
+	github.com/sirupsen/logrus v1.9.0 // indirect
 	github.com/stretchr/testify v1.8.3 // indirect
 	github.com/thoas/go-funk v0.9.3 // indirect
+	github.com/tidwall/gjson v1.14.3 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.0 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
