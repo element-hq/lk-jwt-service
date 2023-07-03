@@ -28,10 +28,9 @@ type OpenIDTokenType struct {
 }
 
 type SFURequest struct {
-	Room           string          `json:"room"`
-	OpenIDToken    OpenIDTokenType `json:"openid_token"`
-	DeviceID       string          `json:"device_id"`
-	RemoveMeUserID string          `json:"remove_me_user_id"` // we'll get this from OIDC
+	Room        string          `json:"room"`
+	OpenIDToken OpenIDTokenType `json:"openid_token"`
+	DeviceID    string          `json:"device_id"`
 }
 
 type SFUResponse struct {
