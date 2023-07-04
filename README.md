@@ -7,5 +7,5 @@ This service is currently used for a single reason: generate JWT tokens with a g
 To start the service locally:
 
 ```
-$ LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret go run *.go
+$ LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret go run *.go
 ```
