@@ -60,10 +60,20 @@ func exchangeOIDCToken(
 		return nil, errors.New("Missing parameters in OIDC token")
 	}
 
+	resolveResults, err := fclient.ResolveServer(ctx, spec.ServerName(token.MatrixServerName))
+	if err != nil {
+		log.Printf("Failed to resolve Matrix server name: %s %v", token.MatrixServerName, err)
+		return nil, errors.New("Failed to resolve Matrix server name")
+	}
+	if len(resolveResults) == 0 {
+		log.Printf("No results returned from server name resolution of %s!", token.MatrixServerName)
+		return nil, errors.New("No results returned from server name resolution!")
+	}
+
 	client := fclient.NewClient()
 	// validate the openid token by getting the user's ID
 	userinfo, err := client.LookupUserInfo(
-		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
+		ctx, resolveResults[0].Host, token.AccessToken,
 	)
 	if err != nil {
 		log.Printf("Failed to look up user info: %v", err)
