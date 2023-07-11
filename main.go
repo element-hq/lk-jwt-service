@@ -70,7 +70,7 @@ func exchangeOIDCToken(
 		return nil, errors.New("No results returned from server name resolution!")
 	}
 
-	client := fclient.NewClient()
+	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true))
 	// validate the openid token by getting the user's ID
 	userinfo, err := client.LookupUserInfo(
 		ctx, resolveResults[0].Host, token.AccessToken,
