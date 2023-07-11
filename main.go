@@ -22,7 +22,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 
 	"time"
 
@@ -61,25 +60,10 @@ func exchangeOIDCToken(
 		return nil, errors.New("Missing parameters in OIDC token")
 	}
 
-	resolveResults, err := fclient.ResolveServer(ctx, spec.ServerName(token.MatrixServerName))
-	if err != nil {
-		log.Printf("Failed to resolve Matrix server name: %s %v", token.MatrixServerName, err)
-		return nil, errors.New("Failed to resolve Matrix server name")
-	}
-	if len(resolveResults) == 0 {
-		log.Printf("No results returned from server name resolution of %s!", token.MatrixServerName)
-		return nil, errors.New("No results returned from server name resolution!")
-	}
-
-	// XXX: Remove trailing :443 from the hostname, otherwise the TLS cert will fail to verify
-	// because it will include the port number. This clearly is not the right way of doing this
-	// but right now I don't know what is.
-	hackHostName := spec.ServerName(strings.TrimSuffix(string(resolveResults[0].Host), ":443"))
-
-	client := fclient.NewClient()
+	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true))
 	// validate the openid token by getting the user's ID
 	userinfo, err := client.LookupUserInfo(
-		ctx, hackHostName, token.AccessToken,
+		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
 	)
 	if err != nil {
 		log.Printf("Failed to look up user info: %v", err)
