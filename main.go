@@ -72,6 +72,17 @@ func exchangeOIDCToken(
 	return &userinfo, nil
 }
 
+func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Health check from %s", r.RemoteAddr)
+
+	if r.Method == "GET" {
+		w.WriteHeader(http.StatusOK)
+		return
+	} else {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Request from %s", r.RemoteAddr)
 
@@ -172,6 +183,8 @@ func main() {
 	}
 
 	http.HandleFunc("/sfu/get", handler.handle)
+	http.HandleFunc("/healthz", handler.healthcheck)
+
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
