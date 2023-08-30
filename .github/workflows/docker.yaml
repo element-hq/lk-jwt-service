@@ -16,6 +16,10 @@ jobs:
       packages: write
 
     steps:
+      - name: Get current time
+        id: current-time
+        run: echo "unix_time=$(date +'%s')" >> $GITHUB_OUTPUT
+
       - name: Checkout repository
         uses: actions/checkout@v3
 
@@ -35,6 +39,7 @@ jobs:
             type=sha,format=short,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
+            type=raw,value=latest-ci_${{steps.current-time.outputs.unix_time}},enable={{is_default_branch}}
             latest-ci
 
       - name: Set up Docker Buildx
