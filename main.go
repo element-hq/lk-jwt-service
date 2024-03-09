@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -174,6 +175,11 @@ func main() {
 		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
 	}
 
+	lk_jwt_port := os.Getenv("LK_JWT_PORT")
+	if lk_jwt_port == "" {
+		lk_jwt_port = "8080"
+	}
+
 	log.Printf("LIVEKIT_KEY: %s and LIVEKIT_SECRET %s, LIVEKIT_URL %s", key, secret, lk_url)
 
 	handler := &Handler{
@@ -185,7 +191,7 @@ func main() {
 	http.HandleFunc("/sfu/get", handler.handle)
 	http.HandleFunc("/healthz", handler.healthcheck)
 
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), nil))
 }
 
 func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
