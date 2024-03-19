@@ -9,3 +9,5 @@ To start the service locally:
 ```
 $ LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret go run *.go
 ```
+
+The listening port is configurable via the `LK_JWT_PORT` environment variable.
