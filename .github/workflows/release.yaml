@@ -24,7 +24,7 @@ jobs:
       - name: "Upload binary as artifact"
         uses: actions/upload-artifact@v3
         with:
-          name: build
+          name: binary_${{ matrix.os }}_${{ matrix.arch }}
           path: build/lk-jwt-service_${{ matrix.os }}_${{ matrix.arch }}
 
   create-release:
