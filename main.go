@@ -62,13 +62,10 @@ func exchangeOIDCToken(
 		return nil, errors.New("Missing parameters in OIDC token")
 	}
 
-	var client *fclient.Client
 	if skipVerifyTLS {
 		log.Printf("!!! WARNING !!! Skipping TLS verification for matrix client connection to %s", token.MatrixServerName)
-		client = fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(true))
-	} else {
-		client = fclient.NewClient(fclient.WithWellKnownSRVLookups(true))
 	}
+	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
 
 	// validate the openid token by getting the user's ID
 	userinfo, err := client.LookupUserInfo(
