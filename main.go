@@ -35,6 +35,7 @@ import (
 
 type Handler struct {
 	key, secret, lk_url string
+	skipVerifyTLS bool
 }
 
 type OpenIDTokenType struct {
@@ -55,13 +56,17 @@ type SFUResponse struct {
 }
 
 func exchangeOIDCToken(
-	ctx context.Context, token OpenIDTokenType,
+	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
 ) (*fclient.UserInfo, error) {
 	if token.AccessToken == "" || token.MatrixServerName == "" {
 		return nil, errors.New("Missing parameters in OIDC token")
 	}
 
-	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true))
+	if skipVerifyTLS {
+		log.Printf("!!! WARNING !!! Skipping TLS verification for matrix client connection to %s", token.MatrixServerName)
+	}
+	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
+
 	// validate the openid token by getting the user's ID
 	userinfo, err := client.LookupUserInfo(
 		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
@@ -125,7 +130,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken)
+		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken, h.skipVerifyTLS)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -166,6 +171,15 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
+	if skipVerifyTLS {
+		log.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		log.Printf("!!! WARNING !!!  LIVEKIT_INSECURE_SKIP_VERIFY_TLS        !!! WARNING !!!")
+		log.Printf("!!! WARNING !!!  Allow to skip invalid TLS certificates  !!! WARNING !!!")
+		log.Printf("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
+		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+	}
+
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
 	lk_url := os.Getenv("LIVEKIT_URL")
@@ -180,12 +194,13 @@ func main() {
 		lk_jwt_port = "8080"
 	}
 
-	log.Printf("LIVEKIT_KEY: %s and LIVEKIT_SECRET %s, LIVEKIT_URL %s", key, secret, lk_url)
+	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s, LIVEKIT_URL: %s, LK_JWT_PORT: %s", key, secret, lk_url, lk_jwt_port)
 
 	handler := &Handler{
 		key:    key,
 		secret: secret,
 		lk_url: lk_url,
+		skipVerifyTLS: skipVerifyTLS,
 	}
 
 	http.HandleFunc("/sfu/get", handler.handle)
