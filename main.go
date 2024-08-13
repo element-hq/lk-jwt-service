@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"time"
 
@@ -35,7 +36,8 @@ import (
 
 type Handler struct {
 	key, secret, lk_url string
-	skipVerifyTLS bool
+	skipVerifyTLS       bool
+	homeserverAllowList []string
 }
 
 type OpenIDTokenType struct {
@@ -56,10 +58,24 @@ type SFUResponse struct {
 }
 
 func exchangeOIDCToken(
-	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
-) (*fclient.UserInfo, error) {
+	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool, homeserverAllowList []string) (*fclient.UserInfo, error) {
 	if token.AccessToken == "" || token.MatrixServerName == "" {
 		return nil, errors.New("missing parameters in OIDC token")
+	}
+
+	homeserverAllowed := true
+	if len(homeserverAllowList) > 0 {
+		homeserverAllowed = false
+		for _, allowed_hs := range homeserverAllowList {
+			if allowed_hs == token.MatrixServerName {
+				homeserverAllowed = true
+				break
+			}
+		}
+	}
+
+	if !homeserverAllowed {
+		return nil, fmt.Errorf("homeserver %s not allowed", token.MatrixServerName)
 	}
 
 	if skipVerifyTLS {
@@ -130,7 +146,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken, h.skipVerifyTLS)
+		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken, h.skipVerifyTLS, h.homeserverAllowList)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -184,6 +200,11 @@ func main() {
 	secret := os.Getenv("LIVEKIT_SECRET")
 	lk_url := os.Getenv("LIVEKIT_URL")
 
+	homeserverAllowList := []string{}
+	if os.Getenv("HS_ALLOWLIST") != "" {
+		homeserverAllowList = strings.Split(os.Getenv("HS_ALLOWLIST"), ",")
+	}
+
 	// Check if the key, secret or url are empty.
 	if key == "" || secret == "" || lk_url == "" {
 		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
@@ -194,13 +215,14 @@ func main() {
 		lk_jwt_port = "8080"
 	}
 
-	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s, LIVEKIT_URL: %s, LK_JWT_PORT: %s", key, secret, lk_url, lk_jwt_port)
+	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: __redacted__, LIVEKIT_URL: %s, LK_JWT_PORT: %s, HS_ALLOWLIST: %s", key, lk_url, lk_jwt_port, homeserverAllowList)
 
 	handler := &Handler{
-		key:    key,
-		secret: secret,
-		lk_url: lk_url,
-		skipVerifyTLS: skipVerifyTLS,
+		key:                 key,
+		secret:              secret,
+		lk_url:              lk_url,
+		skipVerifyTLS:       skipVerifyTLS,
+		homeserverAllowList: homeserverAllowList,
 	}
 
 	http.HandleFunc("/sfu/get", handler.handle)
