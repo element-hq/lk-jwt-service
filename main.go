@@ -59,7 +59,7 @@ func exchangeOIDCToken(
 	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
 ) (*fclient.UserInfo, error) {
 	if token.AccessToken == "" || token.MatrixServerName == "" {
-		return nil, errors.New("Missing parameters in OIDC token")
+		return nil, errors.New("missing parameters in OIDC token")
 	}
 
 	if skipVerifyTLS {
@@ -73,7 +73,7 @@ func exchangeOIDCToken(
 	)
 	if err != nil {
 		log.Printf("Failed to look up user info: %v", err)
-		return nil, errors.New("Failed to look up user info")
+		return nil, errors.New("failed to look up user info")
 	}
 	return &userinfo, nil
 }
