@@ -12,7 +12,7 @@ $ LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret go run *
 
 The listening port is configurable via the `LK_JWT_PORT` environment variable and defaults to 8080.
 
-Usage can be limited to a set of specific homeservers by setting `HS_ALLOWLIST` environment variable to a comma-separated list of server names.
+Usage can be limited to a set of specific homeservers by setting `HS_ALLOWLIST` environment variable to a comma-separated list of server names or wildcard server names, for example: `matrix.example.com, *.example.net`
 
 ## Disable TLS verification
 

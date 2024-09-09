@@ -67,14 +67,24 @@ func exchangeOIDCToken(
 	if len(homeserverAllowList) > 0 {
 		homeserverAllowed = false
 		for _, allowed_hs := range homeserverAllowList {
-			if allowed_hs == token.MatrixServerName {
-				homeserverAllowed = true
-				break
+			if strings.Contains(allowed_hs, "*.") {
+				if strings.Contains(token.MatrixServerName, strings.Replace(allowed_hs, "*.", "", -1)) {
+					homeserverAllowed = true
+					log.Printf("Token from '%s' has been accepted based on allowed wildcard entry: '%s')", token.MatrixServerName, allowed_hs)
+					break
+				}
+			} else {
+				if allowed_hs == token.MatrixServerName {
+					homeserverAllowed = true
+					log.Printf("Token from '%s' has been accepted based on allowed hostname entry: '%s'", token.MatrixServerName, allowed_hs)
+					break
+				}
 			}
 		}
 	}
 
 	if !homeserverAllowed {
+		log.Printf("Token from '%s' has been denied based on HS_ALLOWLIST", token.MatrixServerName)
 		return nil, fmt.Errorf("homeserver %s not allowed", token.MatrixServerName)
 	}
 
