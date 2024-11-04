@@ -22,7 +22,7 @@ jobs:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
       - name: "Upload binary as artifact"
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: binary_${{ matrix.os }}_${{ matrix.arch }}
           path: build/lk-jwt-service_${{ matrix.os }}_${{ matrix.arch }}
@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Fetch all binaries"
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
       - name: "Create release"
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
