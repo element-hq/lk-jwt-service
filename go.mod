@@ -8,7 +8,7 @@ require (
 	github.com/livekit/protocol v1.23.1-0.20241003084409-2406243b2f49
 	github.com/livekit/server-sdk-go/v2 v2.3.0
 	github.com/matrix-org/gomatrix v0.0.0-20210324163249-be2af5ef2e16
-	github.com/matrix-org/gomatrixserverlib v0.0.0-20230628151943-f6e3c7f7b093
+	github.com/matrix-org/gomatrixserverlib v0.0.0-20240910190622-2c764912ce93
 )
 
 require (
