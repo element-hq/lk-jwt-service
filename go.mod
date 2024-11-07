@@ -2,7 +2,7 @@ module ec-lms
 
 go 1.22.7
 
-toolchain go1.23.2
+toolchain go1.23.3
 
 require (
 	github.com/livekit/protocol v1.23.1-0.20241003084409-2406243b2f49
