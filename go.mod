@@ -5,7 +5,7 @@ go 1.23
 toolchain go1.23.4
 
 require (
-	github.com/livekit/protocol v1.28.2-0.20241128072830-b738aedbd841
+	github.com/livekit/protocol v1.29.3
 	github.com/livekit/server-sdk-go/v2 v2.4.0
 	github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
 	github.com/matrix-org/gomatrixserverlib v0.0.0-20241106185410-dbd5f31fefc0
