@@ -43,7 +43,7 @@ jobs:
             latest-ci
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@0f069ddc17b8eb78586b08a7fe335fd54649e2d3
+        uses: docker/setup-buildx-action@db63cee3de03c9e9f201f1b6213e29b58eaa560d
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
