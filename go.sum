@@ -155,6 +155,8 @@ github.com/matrix-org/gomatrixserverlib v0.0.0-20240910190622-2c764912ce93 h1:Fb
 github.com/matrix-org/gomatrixserverlib v0.0.0-20240910190622-2c764912ce93/go.mod h1:HZGsVJ3bUE+DkZtufkH9H0mlsvbhEGK5CpX0Zlavylg=
 github.com/matrix-org/gomatrixserverlib v0.0.0-20241106185410-dbd5f31fefc0 h1:yIE/BHPTjO1+ylsvaamCOjmqO8lkrhIV17gOabIDfHU=
 github.com/matrix-org/gomatrixserverlib v0.0.0-20241106185410-dbd5f31fefc0/go.mod h1:HZGsVJ3bUE+DkZtufkH9H0mlsvbhEGK5CpX0Zlavylg=
+github.com/matrix-org/gomatrixserverlib v0.0.0-20241215094829-e86ab16eabe8 h1:nC998SaawQwbZ16/V70Pil3pY3rSQwTaeLOpHWp7ZTo=
+github.com/matrix-org/gomatrixserverlib v0.0.0-20241215094829-e86ab16eabe8/go.mod h1:qil34SWn6VB6gO5312rzziCUcZtgROPjrLE+4ly/0os=
 github.com/matrix-org/util v0.0.0-20200807132607-55161520e1d4 h1:eCEHXWDv9Rm335MSuB49mFUK44bwZPFSDde3ORE3syk=
 github.com/matrix-org/util v0.0.0-20200807132607-55161520e1d4/go.mod h1:vVQlW/emklohkZnOPwD3LrZUBqdfsbiyO3p1lNV8F6U=
 github.com/matttproud/golang_protobuf_extensions v1.0.4 h1:mmDVorXM7PCGKw94cs5zkfA9PSy5pEvNWRP0ET0TIVo=
