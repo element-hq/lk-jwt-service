@@ -53,3 +53,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GO_VERSION=$(go mod edit -json | jq -r .Go)
