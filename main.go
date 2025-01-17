@@ -170,6 +170,15 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *Handler) prepareMux() (*http.ServeMux) {
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sfu/get", h.handle)
+	mux.HandleFunc("/healthz", h.healthcheck)
+
+	return mux
+}
+
 func main() {
 	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
 	if skipVerifyTLS {
@@ -203,10 +212,7 @@ func main() {
 		skipVerifyTLS: skipVerifyTLS,
 	}
 
-	http.HandleFunc("/sfu/get", handler.handle)
-	http.HandleFunc("/healthz", handler.healthcheck)
-
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), nil))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), handler.prepareMux()))
 }
 
 func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
