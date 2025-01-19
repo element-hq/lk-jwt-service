@@ -8,7 +8,7 @@ require (
 	github.com/livekit/protocol v1.29.3
 	github.com/livekit/server-sdk-go/v2 v2.4.0
 	github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
-	github.com/matrix-org/gomatrixserverlib v0.0.0-20241106185410-dbd5f31fefc0
+	github.com/matrix-org/gomatrixserverlib v0.0.0-20250119093516-0a1b2bafb5cf
 )
 
 require (
@@ -96,12 +96,12 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
-	golang.org/x/crypto v0.29.0 // indirect
+	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f // indirect
 	golang.org/x/net v0.31.0 // indirect
-	golang.org/x/sync v0.9.0 // indirect
-	golang.org/x/sys v0.27.0 // indirect
-	golang.org/x/text v0.20.0 // indirect
+	golang.org/x/sync v0.10.0 // indirect
+	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	google.golang.org/genproto v0.0.0-20231106174013-bbf56f31fb17 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
