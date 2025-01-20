@@ -1,4 +1,4 @@
-module ec-lms
+module lk-jwt-service
 
 go 1.23
 
