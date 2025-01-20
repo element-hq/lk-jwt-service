@@ -2,8 +2,14 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended",
+    "schedule:monthly",
     "helpers:pinGitHubActionDigestsToSemver",
     ":enableVulnerabilityAlertsWithLabel(security)"
   ],
-  "addLabels": ["dependency-update"]
+  "addLabels": ["dependency-update"],
+  "vulnerabilityAlerts": {
+    "schedule": [
+      "at any time"
+    ]
+  }
 }
