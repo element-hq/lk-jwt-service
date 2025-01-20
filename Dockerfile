@@ -1,6 +1,6 @@
 ARG GO_VERSION="build-arg-must-be-provided"
 
-FROM golang:${GO_VERSION}-alpine AS builder
+FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine AS builder
 
 WORKDIR /proj
 
@@ -10,7 +10,8 @@ RUN go mod download
 
 COPY *.go ./
 
-RUN go build -o lk-jwt-service
+ARG TARGETOS TARGETARCH
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o lk-jwt-service
 
 FROM scratch
 
