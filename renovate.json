@@ -12,5 +12,12 @@
       "at any time"
     ],
     "prHourlyLimit": 0
-  }
+  },
+  "packageRules": [
+    {
+      "groupName": "GitHub Actions",
+      "matchDepTypes": ["action"],
+      "pinDigests": true
+    }
+  ]
 }
