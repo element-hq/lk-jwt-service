@@ -130,6 +130,8 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// TODO: we should be sanitising the input here before using it
+		// e.g. only allowing `https://` URL scheme
 		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken, h.skipVerifyTLS)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -145,6 +147,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("Got user info for %s", userInfo.Sub)
 
+		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
 		token, err := getJoinToken(h.key, h.secret, body.Room, userInfo.Sub+":"+body.DeviceID)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -168,6 +171,15 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (h *Handler) prepareMux() (*http.ServeMux) {
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sfu/get", h.handle)
+	mux.HandleFunc("/healthz", h.healthcheck)
+
+	return mux
 }
 
 func main() {
@@ -203,10 +215,7 @@ func main() {
 		skipVerifyTLS: skipVerifyTLS,
 	}
 
-	http.HandleFunc("/sfu/get", handler.handle)
-	http.HandleFunc("/healthz", handler.healthcheck)
-
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), nil))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), handler.prepareMux()))
 }
 
 func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
