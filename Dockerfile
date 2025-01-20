@@ -1,6 +1,6 @@
-ARG GO_VERSION
+ARG GO_VERSION="build-arg-must-be-provided"
 
-FROM golang:${GO_VERSION}-alpine as builder
+FROM golang:${GO_VERSION}-alpine AS builder
 
 WORKDIR /proj
 
