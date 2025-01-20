@@ -6,7 +6,7 @@ toolchain go1.23.4
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.2.1
-	github.com/livekit/protocol v1.29.3
+	github.com/livekit/protocol v1.31.0
 	github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
 	github.com/matrix-org/gomatrixserverlib v0.0.0-20241106185410-dbd5f31fefc0
 )
@@ -19,9 +19,9 @@ require (
 	github.com/bufbuild/protovalidate-go v0.6.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-	github.com/frostbyte73/core v0.0.13 // indirect
+	github.com/frostbyte73/core v0.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
-	github.com/gammazero/deque v0.2.1 // indirect
+	github.com/gammazero/deque v1.0.0 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.3 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/google/cel-go v0.21.0 // indirect
