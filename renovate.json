@@ -2,6 +2,8 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended",
-    "helpers:pinGitHubActionDigestsToSemver"
-  ]
+    "helpers:pinGitHubActionDigestsToSemver",
+    ":enableVulnerabilityAlertsWithLabel(security)"
+  ],
+  "addLabels": ["dependency-update"]
 }
