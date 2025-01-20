@@ -42,7 +42,7 @@ jobs:
             latest-ci
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@0f069ddc17b8eb78586b08a7fe335fd54649e2d3
+        uses: docker/setup-buildx-action@6a25f988bdfa969e96a38fc9f843ea31e0b5df27
 
       - name: Get go version
         run: echo "GO_VERSION=$(go mod edit -json | jq -r .Go)" >> $GITHUB_ENV
