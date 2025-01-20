@@ -2,7 +2,6 @@ name: Build and publish Docker image
 
 on:
   push:
-    branches: [main]
 
 env:
   REGISTRY: ghcr.io
@@ -45,11 +44,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@0f069ddc17b8eb78586b08a7fe335fd54649e2d3
 
+      - name: Get go version
+        run: echo "GO_VERSION=$(go mod edit -json | jq -r .Go)" >> $GITHUB_ENV
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{github.ref == 'refs/heads/main'}} # only push on main branch
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GO_VERSION=${{ env.GO_VERSION }}
