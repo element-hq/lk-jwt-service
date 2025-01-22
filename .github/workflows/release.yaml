@@ -1,42 +1,26 @@
-name: "Create draft release with binaries after tag"
+name: "Create draft release after tag"
 on:
   push:
     tags: ["v*"]
 permissions:
-  contents: write  # to upload the binaries to the release
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: ["linux"]
-        arch: ["amd64", "arm64"]
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
-        with:
-          go-version-file: go.mod
-      - run: mkdir build
-      - run: go build -trimpath -o build/lk-jwt-service_${{ matrix.os }}_${{ matrix.arch }} ./main.go
-        env:
-          GOOS: ${{ matrix.os }}
-          GOARCH: ${{ matrix.arch }}
-      - name: "Upload binary as artifact"
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
-        with:
-          name: binary_${{ matrix.os }}_${{ matrix.arch }}
-          path: build/lk-jwt-service_${{ matrix.os }}_${{ matrix.arch }}
+  contents: write
 
+jobs:
   create-release:
-    needs: ["build"]
     runs-on: ubuntu-latest
     steps:
-      - name: "Fetch all binaries"
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      - name: "Extract version"
+        run: echo "IMAGE_VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
       - name: "Create release"
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
-          files: build/*
           draft: true
-          fail_on_unmatched_files: true
           generate_release_notes: true
+          body: |
+            ## Docker image
+
+            The service is available as a Docker image from the [GitHub Container Registry](https://github.com/element-hq/lk-jwt-service/pkgs/container/lk-jwt-service).
+
+            ```
+            docker pull ghcr.io/element-hq/lk-jwt-service:${{env.IMAGE_VERSION}}
+            ```
