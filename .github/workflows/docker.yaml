@@ -52,7 +52,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{github.ref == 'refs/heads/main'}} # only push on main branch
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }} # only push on main branch or release tag
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
