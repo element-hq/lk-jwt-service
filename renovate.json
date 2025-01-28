@@ -6,7 +6,7 @@
     "helpers:pinGitHubActionDigestsToSemver",
     ":enableVulnerabilityAlertsWithLabel(security)"
   ],
-  "addLabels": ["dependency-update"],
+  "addLabels": ["dependencies"],
   "vulnerabilityAlerts": {
     "schedule": [
       "at any time"
