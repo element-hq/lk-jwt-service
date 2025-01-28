@@ -11,7 +11,8 @@
     "schedule": [
       "at any time"
     ],
-    "prHourlyLimit": 0
+    "prHourlyLimit": 0,
+    "minimumReleaseAge": null
   },
   "packageRules": [
     {
@@ -19,5 +20,6 @@
       "matchDepTypes": ["action"],
       "pinDigests": true
     }
-  ]
+  ],
+  "minimumReleaseAge": "5 days"  
 }
