@@ -7,7 +7,7 @@ This service is currently used for a single reason: generate JWT tokens with a g
 To start the service locally:
 
 ```
-$ LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret go run *.go
+$ LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret go run main.go
 ```
 
 The listening port is configurable via the `LK_JWT_PORT` environment variable and defaults to 8080.
