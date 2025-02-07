@@ -90,7 +90,7 @@ func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Request from %s", r.RemoteAddr)
+	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
 
 	// Set the CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
