@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	"time"
@@ -147,7 +148,14 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("Got user info for %s", userInfo.Sub)
+		// Does user belong to local homeservers alongside our SFU Cluster
+		is_local_user := slices.Contains(h.local_homeservers, sfu_access_request.OpenIDToken.MatrixServerName)
+
+		log.Printf(
+			"Got Matrix user info for %s (%s)",
+			userInfo.Sub,
+			map[bool]string{true: "local", false: "remote"}[is_local_user],
+		)
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
 		token, err := getJoinToken(h.key, h.secret, sfu_access_request.Room, userInfo.Sub+":"+sfu_access_request.DeviceID)
