@@ -201,12 +201,12 @@ func main() {
 		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
 	}
 
-	lk_jwt_port := os.Getenv("LK_JWT_PORT")
+	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
 	if lk_jwt_port == "" {
 		lk_jwt_port = "8080"
 	}
 
-	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s, LIVEKIT_URL: %s, LK_JWT_PORT: %s", key, secret, lk_url, lk_jwt_port)
+	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s, LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", key, secret, lk_url, lk_jwt_port)
 
 	handler := &Handler{
 		key:    key,
