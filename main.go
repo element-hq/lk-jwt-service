@@ -102,8 +102,8 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	} else if r.Method == "POST" {
-		var body SFURequest
-		err := json.NewDecoder(r.Body).Decode(&body)
+		var sfu_access_request SFURequest
+		err := json.NewDecoder(r.Body).Decode(&sfu_access_request)
 		if err != nil {
 			log.Printf("Error decoding JSON: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -117,7 +117,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if body.Room == "" {
+		if sfu_access_request.Room == "" {
 			log.Printf("Request missing room")
 			w.WriteHeader(http.StatusBadRequest)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -132,7 +132,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 		// TODO: we should be sanitising the input here before using it
 		// e.g. only allowing `https://` URL scheme
-		userInfo, err := exchangeOIDCToken(r.Context(), body.OpenIDToken, h.skipVerifyTLS)
+		userInfo, err := exchangeOIDCToken(r.Context(), sfu_access_request.OpenIDToken, h.skipVerifyTLS)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -148,7 +148,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Got user info for %s", userInfo.Sub)
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
-		token, err := getJoinToken(h.key, h.secret, body.Room, userInfo.Sub+":"+body.DeviceID)
+		token, err := getJoinToken(h.key, h.secret, sfu_access_request.Room, userInfo.Sub+":"+sfu_access_request.DeviceID)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
