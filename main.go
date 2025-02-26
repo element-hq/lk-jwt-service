@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/auth"
+	"github.com/livekit/protocol/livekit"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 
 	"github.com/matrix-org/gomatrix"
 	"github.com/matrix-org/gomatrixserverlib/fclient"
@@ -170,6 +172,34 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 				log.Printf("failed to encode json error message! %v", err)
 			}
 			return
+		}
+
+		if is_local_user {
+			roomClient := lksdk.NewRoomServiceClient(h.lk_url, h.key, h.secret)
+			room, err := roomClient.CreateRoom(
+				context.Background(), &livekit.CreateRoomRequest{
+					Name: sfu_access_request.Room,
+					EmptyTimeout: 5 * 60, // 5 Minutes to keep the room open if no one joins
+					DepartureTimeout: 20, // number of seconds to keep the room after everyone leaves 
+					MaxParticipants: 0,   // 0 == no limitation
+				},
+			)
+
+			if err != nil {
+				log.Printf("Unable to create room %s. Error message: %v", sfu_access_request.Room, err)
+				
+				w.WriteHeader(http.StatusInternalServerError)
+				err = json.NewEncoder(w).Encode(gomatrix.RespError{
+					ErrCode: "M_UNKNOWN",
+					Err:     "Unable to create room on SFU",
+				})
+				if err != nil {
+					log.Printf("failed to encode json error message! %v", err)
+				}
+				return
+			}
+
+			log.Printf("Created LiveKit room sid: %s (alias: %s) for local Matrix user %s (LiveKit identity: %s)", room.Sid, sfu_access_request.Room, userInfo.Sub , lk_identity)
 		}
 
 		res := SFUResponse{URL: h.lk_url, JWT: token}
