@@ -214,7 +214,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) prepareMux() (*http.ServeMux) {
+func (h *Handler) prepareMux() *http.ServeMux {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sfu/get", h.handle)
