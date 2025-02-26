@@ -23,10 +23,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
+	"strings"
 
 	"time"
 
 	"github.com/livekit/protocol/auth"
+	"github.com/livekit/protocol/livekit"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 
 	"github.com/matrix-org/gomatrix"
 	"github.com/matrix-org/gomatrixserverlib/fclient"
@@ -35,7 +39,8 @@ import (
 
 type Handler struct {
 	key, secret, lk_url string
-	skipVerifyTLS bool
+	local_homeservers   []string
+	skipVerifyTLS       bool
 }
 
 type OpenIDTokenType struct {
@@ -145,10 +150,18 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("Got user info for %s", userInfo.Sub)
+		// Does user belong to local homeservers alongside our SFU Cluster
+		is_local_user := slices.Contains(h.local_homeservers, sfu_access_request.OpenIDToken.MatrixServerName)
+
+		log.Printf(
+			"Got Matrix user info for %s (%s)",
+			userInfo.Sub,
+			map[bool]string{true: "local", false: "remote"}[is_local_user],
+		)
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
-		token, err := getJoinToken(h.key, h.secret, sfu_access_request.Room, userInfo.Sub+":"+sfu_access_request.DeviceID)
+		lk_identity := userInfo.Sub + ":" + sfu_access_request.DeviceID
+		token, err := getJoinToken(is_local_user, h.key, h.secret, sfu_access_request.Room, lk_identity)		
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -159,6 +172,34 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 				log.Printf("failed to encode json error message! %v", err)
 			}
 			return
+		}
+
+		if is_local_user {
+			roomClient := lksdk.NewRoomServiceClient(h.lk_url, h.key, h.secret)
+			room, err := roomClient.CreateRoom(
+				context.Background(), &livekit.CreateRoomRequest{
+					Name: sfu_access_request.Room,
+					EmptyTimeout: 5 * 60, // 5 Minutes to keep the room open if no one joins
+					DepartureTimeout: 20, // number of seconds to keep the room after everyone leaves 
+					MaxParticipants: 0,   // 0 == no limitation
+				},
+			)
+
+			if err != nil {
+				log.Printf("Unable to create room %s. Error message: %v", sfu_access_request.Room, err)
+				
+				w.WriteHeader(http.StatusInternalServerError)
+				err = json.NewEncoder(w).Encode(gomatrix.RespError{
+					ErrCode: "M_UNKNOWN",
+					Err:     "Unable to create room on SFU",
+				})
+				if err != nil {
+					log.Printf("failed to encode json error message! %v", err)
+				}
+				return
+			}
+
+			log.Printf("Created LiveKit room sid: %s (alias: %s) for local Matrix user %s (LiveKit identity: %s)", room.Sid, sfu_access_request.Room, userInfo.Sub , lk_identity)
 		}
 
 		res := SFUResponse{URL: h.lk_url, JWT: token}
@@ -173,7 +214,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) prepareMux() (*http.ServeMux) {
+func (h *Handler) prepareMux() *http.ServeMux {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sfu/get", h.handle)
@@ -201,31 +242,39 @@ func main() {
 		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
 	}
 
+	local_homeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
+	if len(local_homeservers) == 0 {
+		log.Fatal("LIVEKIT_LOCAL_HOMESERVERS environment variables must be set")
+	}
+
 	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
 	if lk_jwt_port == "" {
 		lk_jwt_port = "8080"
 	}
 
-	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s, LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", key, secret, lk_url, lk_jwt_port)
+	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s", key, secret)
+	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
+	log.Printf("LIVEKIT_LOCAL_HOMESERVERS: %v", local_homeservers)
 
 	handler := &Handler{
-		key:    key,
-		secret: secret,
-		lk_url: lk_url,
-		skipVerifyTLS: skipVerifyTLS,
+		key:               key,
+		secret:            secret,
+		lk_url:            lk_url,
+		skipVerifyTLS:     skipVerifyTLS,
+		local_homeservers: strings.Split(local_homeservers, ","),
 	}
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), handler.prepareMux()))
 }
 
-func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
+func getJoinToken(is_local_user bool, apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
 	canSubscribe := true
 	grant := &auth.VideoGrant{
 		RoomJoin:     true,
-		RoomCreate:   true,
+		RoomCreate:   is_local_user,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
 		Room:         room,
