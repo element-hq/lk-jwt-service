@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"time"
 
@@ -35,7 +36,8 @@ import (
 
 type Handler struct {
 	key, secret, lk_url string
-	skipVerifyTLS bool
+	local_homeservers   []string
+	skipVerifyTLS       bool
 }
 
 type OpenIDTokenType struct {
@@ -201,18 +203,26 @@ func main() {
 		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
 	}
 
+	local_homeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
+	if len(local_homeservers) == 0 {
+		log.Fatal("LIVEKIT_LOCAL_HOMESERVERS environment variables must be set")
+	}
+
 	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
 	if lk_jwt_port == "" {
 		lk_jwt_port = "8080"
 	}
 
-	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s, LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", key, secret, lk_url, lk_jwt_port)
+	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s", key, secret)
+	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
+	log.Printf("LIVEKIT_LOCAL_HOMESERVERS: %v", local_homeservers)
 
 	handler := &Handler{
-		key:    key,
-		secret: secret,
-		lk_url: lk_url,
-		skipVerifyTLS: skipVerifyTLS,
+		key:               key,
+		secret:            secret,
+		lk_url:            lk_url,
+		skipVerifyTLS:     skipVerifyTLS,
+		local_homeservers: strings.Split(local_homeservers, ","),
 	}
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), handler.prepareMux()))
