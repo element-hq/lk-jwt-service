@@ -1,16 +1,22 @@
 # LiveKit Token Management Service
 
-This service is currently used for a single reason: generate JWT tokens with a given identity for a given room, so that users can use them to authenticate against LiveKit SFU.
+This service is used for two reasons:
+- generate JWT tokens with a given LiveKit identity for a given LiveKit room, so that users can use them to authenticate against LiveKit SFU,
+- In case of local Matrix users which belong to the same deployment, the corresponding LiveKit room on the SFU will be created if necessary.
 
 It works by allowing a token obtained via the Matrix Client-Server API [OpenID endpoint](https://spec.matrix.org/v1.13/client-server-api/#openid) to be exchanged for a LiveKit JWT token which can be used to access a LiveKit SFU.
 
 This functionality is defined by [MSC4195: MatrixRTC using LiveKit backend](https://github.com/matrix-org/matrix-spec-proposals/pull/4195).
 
+Only for Matrix users of homeservers belonging to the same deployment (called local users) corresponding rooms on the LiveKit SFU will be automatically created. Hence, local homeservers need to be declared via the `LIVEKIT_LOCAL_HOMESERVERS` environment variable (see below).
+
+Note access to LiveKit SFU is restricted for remote users (not belonging to the same deployment). Those users can join existing LiveKit SFU rooms, but missing rooms will not be automatically created to prevent misuse of infrastructure. Due to the SFU selection algorithm and the order of events this will NOT limit or prevent video conferences across Matrix federation.
+
 ## Usage
 
 This service is used when hosting the [Element Call](https://github.com/element-hq/element-call) video conferencing application against a LiveKit backend.
 
-Alongside this service, you will need to a [LiveKit SFU](https://github.com/livekit/livekit) and the [Element Call](https://github.com/element-hq/element-call) web application.
+Alongside this service, you will need a [LiveKit SFU](https://github.com/livekit/livekit) and the [Element Call](https://github.com/element-hq/element-call) web application.
 
 ## Installation
 
@@ -55,6 +61,13 @@ Variable | Description | Required
 `LIVEKIT_KEY` or `LIVEKIT_KEY_FILE` | The API key or key file path for the LiveKit SFU | Yes
 `LIVEKIT_SECRET` or `LIVEKIT_SECRET_FILE` | The secret or secret file path for the LiveKit SFU | Yes
 `LIVEKIT_JWT_PORT` | The port the service listens on | No - defaults to 8080
+`LIVEKIT_LOCAL_HOMESERVERS` | Comma seperated list of homeservers belonging to the same deployment | Yes
+
+Please double check that LiveKit SFU room default settings ([config.yaml](https://github.com/livekit/livekit/blob/7350e9933107ecdea4ada8f8bcb0d6ca78b3f8f7/config-sample.yaml#L170)) are configured as
+```
+room:
+  auto_create: false
+```
 
 ## Disable TLS verification
 
