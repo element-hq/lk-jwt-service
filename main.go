@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"time"
 
@@ -35,6 +36,7 @@ import (
 
 type Handler struct {
 	key, secret, lk_url string
+	local_homeservers   []string
 	skipVerifyTLS       bool
 }
 
@@ -215,7 +217,19 @@ func main() {
 		log.Printf("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
 		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 	}
+
+	key, secret := readKeySecret()
 	lk_url := os.Getenv("LIVEKIT_URL")
+
+	// Check if the key, secret or url are empty.
+	if key == "" || secret == "" || lk_url == "" {
+		log.Fatal("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
+	}
+
+	local_homeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
+	if len(local_homeservers) == 0 {
+		log.Fatal("LIVEKIT_LOCAL_HOMESERVERS environment variables must be set")
+	}
 
 	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
 	if lk_jwt_port == "" {
@@ -223,18 +237,14 @@ func main() {
 	}
 
 	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
-	key, secret := readKeySecret()
-
-	// Check if the key, secret or url are empty.
-	if key == "" || secret == "" || lk_url == "" {
-		log.Fatal("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
-	}
+	log.Printf("LIVEKIT_LOCAL_HOMESERVERS: %v", local_homeservers)
 
 	handler := &Handler{
-		key:           key,
-		secret:        secret,
-		lk_url:        lk_url,
-		skipVerifyTLS: skipVerifyTLS,
+		key:               key,
+		secret:            secret,
+		lk_url:            lk_url,
+		skipVerifyTLS:     skipVerifyTLS,
+		local_homeservers: strings.Split(local_homeservers, ","),
 	}
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), handler.prepareMux()))
