@@ -158,7 +158,8 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		)
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
-		token, err := getJoinToken(h.key, h.secret, sfu_access_request.Room, userInfo.Sub+":"+sfu_access_request.DeviceID)
+		lk_identity := userInfo.Sub + ":" + sfu_access_request.DeviceID
+		token, err := getJoinToken(is_local_user, h.key, h.secret, sfu_access_request.Room, lk_identity)		
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -258,14 +259,14 @@ func main() {
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), handler.prepareMux()))
 }
 
-func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
+func getJoinToken(is_local_user bool, apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
 	canSubscribe := true
 	grant := &auth.VideoGrant{
 		RoomJoin:     true,
-		RoomCreate:   true,
+		RoomCreate:   is_local_user,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
 		Room:         room,
