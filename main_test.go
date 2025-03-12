@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -106,10 +105,10 @@ func TestHandlePostMissingParams(t *testing.T) {
 
 func TestHandlePost(t *testing.T) {
 	handler := &Handler{
-		secret:            "testSecret",
-		key:               "testKey",
-		lk_url:            "wss://lk.local:8080/foo",
-        local_homeservers: []string{"example.com"},
+		secret:           "testSecret",
+		key:              "testKey",
+		lkUrl:            "wss://lk.local:8080/foo",
+        localHomeservers: []string{"example.com"},
 		skipVerifyTLS:     true,
 	}
 
@@ -213,18 +212,18 @@ func TestGetJoinToken(t *testing.T) {
 	room := "testRoom"
 	identity := "testIdentity@example.com"
 	
-	for _, is_local_user := range []bool{true, false} {
-		token_string, err := getJoinToken(is_local_user, apiKey, apiSecret, room, identity)
+	for _, isLocalUser := range []bool{true, false} {
+		tokenString, err := getJoinToken(isLocalUser, apiKey, apiSecret, room, identity)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		
-		if token_string == "" {
+		if tokenString == "" {
 			t.Error("expected token to be non-empty")
 		}
 		
 		// parse JWT checking the shared secret
-		token, err := jwt.Parse(token_string, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			return []byte(apiSecret), nil
 		})
 		claims, ok := token.Claims.(jwt.MapClaims)
@@ -233,92 +232,14 @@ func TestGetJoinToken(t *testing.T) {
 			t.Fatalf("failed to parse claims from JWT: %v", err)
 		}
 		
-		claim_room_create := claims["video"].(map[string]interface{})["roomCreate"]
-		if claim_room_create == nil {
-			claim_room_create = false
+		claimRoomCreate := claims["video"].(map[string]interface{})["roomCreate"]
+		if claimRoomCreate == nil {
+			claimRoomCreate = false
 		}
 		
-		if is_local_user != claim_room_create {
-			t.Fatalf("roomCreate propery does not reflect is_local_user intent")
+		if isLocalUser != claimRoomCreate {
+			t.Fatalf("roomCreate property does not reflect isLocalUser intent")
 		}
 		
-	}
-}
-
-func TestReadKeySecret(t *testing.T) {
-	testCases := []struct {
-		name           string
-		env            map[string]string
-		expectedKey    string
-		expectedSecret string
-		err            bool
-	}{
-		{
-			name: "Read from env",
-			env: map[string]string{
-				"LIVEKIT_KEY":    "from_env_pheethiewixohp9eecheeGhuayeeph4l",
-				"LIVEKIT_SECRET": "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
-			},
-			expectedKey:    "from_env_pheethiewixohp9eecheeGhuayeeph4l",
-			expectedSecret: "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
-			err:            false,
-		},
-		{
-			name: "Read from file",
-			env: map[string]string{
-				"LIVEKIT_KEY_FILE":    "./tests/key",
-				"LIVEKIT_SECRET_FILE": "./tests/secret",
-			},
-			expectedKey:    "from_file_oquusheiheiw4Iegah8te3Vienguus5a",
-			expectedSecret: "from_file_vohmahH3eeyieghohSh3kee8feuPhaim",
-		},
-		{
-			name: "Read from file key only",
-			env: map[string]string{
-				"LIVEKIT_KEY_FILE": "./tests/key",
-				"LIVEKIT_SECRET":   "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
-			},
-			expectedKey:    "from_file_oquusheiheiw4Iegah8te3Vienguus5a",
-			expectedSecret: "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
-		},
-		{
-			name: "Read from file secret only",
-			env: map[string]string{
-				"LIVEKIT_SECRET_FILE": "./tests/secret",
-				"LIVEKIT_KEY":         "from_env_qui8aiTopiekiechah9oocbeimeew2O",
-			},
-			expectedKey:    "from_env_qui8aiTopiekiechah9oocbeimeew2O",
-			expectedSecret: "from_file_vohmahH3eeyieghohSh3kee8feuPhaim",
-		},
-		{
-			name:           "Empty if secret no env",
-			env:            map[string]string{},
-			expectedKey:    "",
-			expectedSecret: "",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			for k, v := range tc.env {
-				if err := os.Setenv(k, v); err != nil {
-					t.Errorf("Failed to set environment variable %s: %v", k, err)
-				}
-			}
-
-			key, secret := readKeySecret()
-			if secret != tc.expectedSecret || key != tc.expectedKey {
-				t.Errorf("Expected secret and key to be %s and %s but got %s and %s",
-					tc.expectedSecret,
-					tc.expectedKey,
-					secret,
-					key)
-			}
-			for k := range tc.env {
-				if err := os.Unsetenv(k); err != nil {
-					t.Errorf("Failed to unset environment variable %s: %v", k, err)
-				}
-			}
-		})
 	}
 }

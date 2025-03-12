@@ -38,8 +38,8 @@ import (
 )
 
 type Handler struct {
-	key, secret, lk_url string
-	local_homeservers   []string
+	key, secret, lkUrl string
+	localHomeservers   []string
 	skipVerifyTLS       bool
 }
 
@@ -64,7 +64,7 @@ func exchangeOIDCToken(
 	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
 ) (*fclient.UserInfo, error) {
 	if token.AccessToken == "" || token.MatrixServerName == "" {
-		return nil, errors.New("Missing parameters in OIDC token")
+		return nil, errors.New("missing parameters in OIDC token")
 	}
 
 	if skipVerifyTLS {
@@ -78,7 +78,7 @@ func exchangeOIDCToken(
 	)
 	if err != nil {
 		log.Printf("Failed to look up user info: %v", err)
-		return nil, errors.New("Failed to look up user info")
+		return nil, errors.New("failed to look up user info")
 	}
 	return &userinfo, nil
 }
@@ -107,8 +107,8 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	} else if r.Method == "POST" {
-		var sfu_access_request SFURequest
-		err := json.NewDecoder(r.Body).Decode(&sfu_access_request)
+		var sfuAccessRequest SFURequest
+		err := json.NewDecoder(r.Body).Decode(&sfuAccessRequest)
 		if err != nil {
 			log.Printf("Error decoding JSON: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -122,7 +122,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if sfu_access_request.Room == "" {
+		if sfuAccessRequest.Room == "" {
 			log.Printf("Request missing room")
 			w.WriteHeader(http.StatusBadRequest)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -137,7 +137,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 		// TODO: we should be sanitising the input here before using it
 		// e.g. only allowing `https://` URL scheme
-		userInfo, err := exchangeOIDCToken(r.Context(), sfu_access_request.OpenIDToken, h.skipVerifyTLS)
+		userInfo, err := exchangeOIDCToken(r.Context(), sfuAccessRequest.OpenIDToken, h.skipVerifyTLS)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -151,17 +151,17 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Does user belong to local homeservers alongside our SFU Cluster
-		is_local_user := slices.Contains(h.local_homeservers, sfu_access_request.OpenIDToken.MatrixServerName)
+		isLocalUser := slices.Contains(h.localHomeservers, sfuAccessRequest.OpenIDToken.MatrixServerName)
 
 		log.Printf(
 			"Got Matrix user info for %s (%s)",
 			userInfo.Sub,
-			map[bool]string{true: "local", false: "remote"}[is_local_user],
+			map[bool]string{true: "local", false: "remote"}[isLocalUser],
 		)
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
-		lk_identity := userInfo.Sub + ":" + sfu_access_request.DeviceID
-		token, err := getJoinToken(is_local_user, h.key, h.secret, sfu_access_request.Room, lk_identity)		
+		lkIdentity := userInfo.Sub + ":" + sfuAccessRequest.DeviceID
+		token, err := getJoinToken(isLocalUser, h.key, h.secret, sfuAccessRequest.Room, lkIdentity)		
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -174,11 +174,11 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if is_local_user {
-			roomClient := lksdk.NewRoomServiceClient(h.lk_url, h.key, h.secret)
+		if isLocalUser {
+			roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
 			room, err := roomClient.CreateRoom(
 				context.Background(), &livekit.CreateRoomRequest{
-					Name: sfu_access_request.Room,
+					Name: sfuAccessRequest.Room,
 					EmptyTimeout: 5 * 60, // 5 Minutes to keep the room open if no one joins
 					DepartureTimeout: 20, // number of seconds to keep the room after everyone leaves 
 					MaxParticipants: 0,   // 0 == no limitation
@@ -186,7 +186,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			)
 
 			if err != nil {
-				log.Printf("Unable to create room %s. Error message: %v", sfu_access_request.Room, err)
+				log.Printf("Unable to create room %s. Error message: %v", sfuAccessRequest.Room, err)
 				
 				w.WriteHeader(http.StatusInternalServerError)
 				err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -199,10 +199,10 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			log.Printf("Created LiveKit room sid: %s (alias: %s) for local Matrix user %s (LiveKit identity: %s)", room.Sid, sfu_access_request.Room, userInfo.Sub , lk_identity)
+			log.Printf("Created LiveKit room sid: %s (alias: %s) for local Matrix user %s (LiveKit identity: %s)", room.Sid, sfuAccessRequest.Room, userInfo.Sub , lkIdentity)
 		}
 
-		res := SFUResponse{URL: h.lk_url, JWT: token}
+		res := SFUResponse{URL: h.lkUrl, JWT: token}
 
 		w.Header().Set("Content-Type", "application/json")
 		err = json.NewEncoder(w).Encode(res)
@@ -258,45 +258,45 @@ func main() {
 	}
 
 	key, secret := readKeySecret()
-	lk_url := os.Getenv("LIVEKIT_URL")
+	lkUrl := os.Getenv("LIVEKIT_URL")
 
 	// Check if the key, secret or url are empty.
-	if key == "" || secret == "" || lk_url == "" {
+	if key == "" || secret == "" || lkUrl == "" {
 		log.Fatal("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
 	}
 
-	local_homeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
-	if len(local_homeservers) == 0 {
+	localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
+	if len(localHomeservers) == 0 {
 		log.Fatal("LIVEKIT_LOCAL_HOMESERVERS environment variables must be set")
 	}
 
-	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
-	if lk_jwt_port == "" {
-		lk_jwt_port = "8080"
+	lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
+	if lkJwtPort == "" {
+		lkJwtPort = "8080"
 	}
 
-	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
-	log.Printf("LIVEKIT_LOCAL_HOMESERVERS: %v", local_homeservers)
+	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lkUrl, lkJwtPort)
+	log.Printf("LIVEKIT_LOCAL_HOMESERVERS: %v", localHomeservers)
 
 	handler := &Handler{
 		key:               key,
 		secret:            secret,
-		lk_url:            lk_url,
+		lkUrl:            lkUrl,
 		skipVerifyTLS:     skipVerifyTLS,
-		local_homeservers: strings.Split(local_homeservers, ","),
+		localHomeservers:  strings.Split(localHomeservers, ","),
 	}
 
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lk_jwt_port), handler.prepareMux()))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lkJwtPort), handler.prepareMux()))
 }
 
-func getJoinToken(is_local_user bool, apiKey, apiSecret, room, identity string) (string, error) {
+func getJoinToken(isLocalUser bool, apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
 	canSubscribe := true
 	grant := &auth.VideoGrant{
 		RoomJoin:     true,
-		RoomCreate:   is_local_user,
+		RoomCreate:   isLocalUser,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
 		Room:         room,
