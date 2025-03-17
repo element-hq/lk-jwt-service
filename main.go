@@ -206,7 +206,7 @@ func main() {
 		lk_jwt_port = "8080"
 	}
 
-	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s, LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", key, secret, lk_url, lk_jwt_port)
+	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
 
 	handler := &Handler{
 		key:    key,
