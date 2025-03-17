@@ -252,7 +252,6 @@ func main() {
 		lkJwtPort = "8080"
 	}
 
-	log.Printf("LIVEKIT_KEY: %s, LIVEKIT_SECRET: %s", key, secret)
 	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lkUrl, lkJwtPort)
 	log.Printf("LIVEKIT_LOCAL_HOMESERVERS: %v", localHomeservers)
 
