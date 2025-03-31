@@ -196,9 +196,12 @@ func main() {
 	secret := os.Getenv("LIVEKIT_SECRET")
 	lk_url := os.Getenv("LIVEKIT_URL")
 
+	key_path := os.Getenv("LIVEKIT_KEY_PATH")
+	secret_path := os.Getenv("LIVEKIT_SECRET_PATH")
+
 	// Check if the key, secret or url are empty.
-	if key == "" || secret == "" || lk_url == "" {
-		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
+	if (key == "" && key_path == "") || (secret == "" && secret_path == "") || lk_url == "" {
+		log.Fatal("LIVEKIT_KEY[_PATH], LIVEKIT_SECRET[_PATH] and LIVEKIT_URL environment variables must be set")
 	}
 
 	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
@@ -207,6 +210,22 @@ func main() {
 	}
 
 	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
+
+	if key_path != "" {
+		if keyBytes, err := os.ReadFile(key_path); err != nil {
+			log.Fatal(err)
+		} else {
+			key = string(keyBytes)
+		}
+	}
+
+	if secret_path != "" {
+		if secretBytes, err := os.ReadFile(secret_path); err != nil {
+			log.Fatal(err)
+		} else {
+			secret = string(secretBytes)
+		}
+	}
 
 	handler := &Handler{
 		key:    key,
