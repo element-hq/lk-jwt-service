@@ -60,11 +60,11 @@ type SFUResponse struct {
 	JWT string `json:"jwt"`
 }
 
-func exchangeOIDCToken(
+func exchangeOpenIdUserInfo(
 	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
 ) (*fclient.UserInfo, error) {
 	if token.AccessToken == "" || token.MatrixServerName == "" {
-		return nil, errors.New("missing parameters in OIDC token")
+		return nil, errors.New("missing parameters in openid token")
 	}
 
 	if skipVerifyTLS {
@@ -137,7 +137,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 		// TODO: we should be sanitising the input here before using it
 		// e.g. only allowing `https://` URL scheme
-		userInfo, err := exchangeOIDCToken(r.Context(), sfuAccessRequest.OpenIDToken, h.skipVerifyTLS)
+		userInfo, err := exchangeOpenIdUserInfo(r.Context(), sfuAccessRequest.OpenIDToken, h.skipVerifyTLS)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
