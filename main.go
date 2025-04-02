@@ -35,7 +35,7 @@ import (
 
 type Handler struct {
 	key, secret, lk_url string
-	skipVerifyTLS bool
+	skipVerifyTLS       bool
 }
 
 type OpenIDTokenType struct {
@@ -173,13 +173,37 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) prepareMux() (*http.ServeMux) {
+func (h *Handler) prepareMux() *http.ServeMux {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sfu/get", h.handle)
 	mux.HandleFunc("/healthz", h.healthcheck)
 
 	return mux
+}
+
+func readKeySecret() (string, string) {
+	key := os.Getenv("LIVEKIT_KEY")
+	secret := os.Getenv("LIVEKIT_SECRET")
+	key_path := os.Getenv("LIVEKIT_KEY_FILE")
+	secret_path := os.Getenv("LIVEKIT_SECRET_FILE")
+	if key_path != "" {
+		if keyBytes, err := os.ReadFile(key_path); err != nil {
+			log.Fatal(err)
+		} else {
+			key = string(keyBytes)
+		}
+	}
+
+	if secret_path != "" {
+		if secretBytes, err := os.ReadFile(secret_path); err != nil {
+			log.Fatal(err)
+		} else {
+			secret = string(secretBytes)
+		}
+	}
+
+	return key, secret
 }
 
 func main() {
@@ -191,15 +215,7 @@ func main() {
 		log.Printf("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
 		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 	}
-
-	key := os.Getenv("LIVEKIT_KEY")
-	secret := os.Getenv("LIVEKIT_SECRET")
 	lk_url := os.Getenv("LIVEKIT_URL")
-
-	// Check if the key, secret or url are empty.
-	if key == "" || secret == "" || lk_url == "" {
-		log.Fatal("LIVEKIT_KEY, LIVEKIT_SECRET and LIVEKIT_URL environment variables must be set")
-	}
 
 	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
 	if lk_jwt_port == "" {
@@ -207,11 +223,17 @@ func main() {
 	}
 
 	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
+	key, secret := readKeySecret()
+
+	// Check if the key, secret or url are empty.
+	if key == "" || secret == "" || lk_url == "" {
+		log.Fatal("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
+	}
 
 	handler := &Handler{
-		key:    key,
-		secret: secret,
-		lk_url: lk_url,
+		key:           key,
+		secret:        secret,
+		lk_url:        lk_url,
 		skipVerifyTLS: skipVerifyTLS,
 	}
 
