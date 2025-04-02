@@ -182,35 +182,12 @@ func (h *Handler) prepareMux() (*http.ServeMux) {
 	return mux
 }
 
-func main() {
-	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
-	if skipVerifyTLS {
-		log.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		log.Printf("!!! WARNING !!!  LIVEKIT_INSECURE_SKIP_VERIFY_TLS        !!! WARNING !!!")
-		log.Printf("!!! WARNING !!!  Allow to skip invalid TLS certificates  !!! WARNING !!!")
-		log.Printf("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
-		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-	}
 
+func readKeySecret() (string, string) {
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
-	lk_url := os.Getenv("LIVEKIT_URL")
-
 	key_path := os.Getenv("LIVEKIT_KEY_PATH")
 	secret_path := os.Getenv("LIVEKIT_SECRET_PATH")
-
-	// Check if the key, secret or url are empty.
-	if (key == "" && key_path == "") || (secret == "" && secret_path == "") || lk_url == "" {
-		log.Fatal("LIVEKIT_KEY[_PATH], LIVEKIT_SECRET[_PATH] and LIVEKIT_URL environment variables must be set")
-	}
-
-	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
-	if lk_jwt_port == "" {
-		lk_jwt_port = "8080"
-	}
-
-	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
-
 	if key_path != "" {
 		if keyBytes, err := os.ReadFile(key_path); err != nil {
 			log.Fatal(err)
@@ -225,6 +202,34 @@ func main() {
 		} else {
 			secret = string(secretBytes)
 		}
+	}
+
+	return key, secret
+}
+
+
+func main() {
+	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
+	if skipVerifyTLS {
+		log.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		log.Printf("!!! WARNING !!!  LIVEKIT_INSECURE_SKIP_VERIFY_TLS        !!! WARNING !!!")
+		log.Printf("!!! WARNING !!!  Allow to skip invalid TLS certificates  !!! WARNING !!!")
+		log.Printf("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
+		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+	}
+	lk_url := os.Getenv("LIVEKIT_URL")
+
+	lk_jwt_port := os.Getenv("LIVEKIT_JWT_PORT")
+	if lk_jwt_port == "" {
+		lk_jwt_port = "8080"
+	}
+
+	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lk_url, lk_jwt_port)
+	key, secret := readKeySecret();
+
+	// Check if the key, secret or url are empty.
+	if key == "" || secret == "" || lk_url == "" {
+		log.Fatal("LIVEKIT_KEY[_PATH], LIVEKIT_SECRET[_PATH] and LIVEKIT_URL environment variables must be set")
 	}
 
 	handler := &Handler{
