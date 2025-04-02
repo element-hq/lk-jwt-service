@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -241,5 +242,83 @@ func TestGetJoinToken(t *testing.T) {
 			t.Fatalf("roomCreate property does not reflect isLocalUser intent")
 		}
 		
+	}
+}
+
+func TestReadKeySecret(t *testing.T) {
+	testCases := []struct {
+		name           string
+		env            map[string]string
+		expectedKey    string
+		expectedSecret string
+		err            bool
+	}{
+		{
+			name: "Read from env",
+			env: map[string]string{
+				"LIVEKIT_KEY":    "from_env_pheethiewixohp9eecheeGhuayeeph4l",
+				"LIVEKIT_SECRET": "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
+			},
+			expectedKey:    "from_env_pheethiewixohp9eecheeGhuayeeph4l",
+			expectedSecret: "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
+			err:            false,
+		},
+		{
+			name: "Read from file",
+			env: map[string]string{
+				"LIVEKIT_KEY_FILE":    "./tests/key",
+				"LIVEKIT_SECRET_FILE": "./tests/secret",
+			},
+			expectedKey:    "from_file_oquusheiheiw4Iegah8te3Vienguus5a",
+			expectedSecret: "from_file_vohmahH3eeyieghohSh3kee8feuPhaim",
+		},
+		{
+			name: "Read from file key only",
+			env: map[string]string{
+				"LIVEKIT_KEY_FILE": "./tests/key",
+				"LIVEKIT_SECRET":   "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
+			},
+			expectedKey:    "from_file_oquusheiheiw4Iegah8te3Vienguus5a",
+			expectedSecret: "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
+		},
+		{
+			name: "Read from file secret only",
+			env: map[string]string{
+				"LIVEKIT_SECRET_FILE": "./tests/secret",
+				"LIVEKIT_KEY":         "from_env_qui8aiTopiekiechah9oocbeimeew2O",
+			},
+			expectedKey:    "from_env_qui8aiTopiekiechah9oocbeimeew2O",
+			expectedSecret: "from_file_vohmahH3eeyieghohSh3kee8feuPhaim",
+		},
+		{
+			name:           "Empty if secret no env",
+			env:            map[string]string{},
+			expectedKey:    "",
+			expectedSecret: "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				if err := os.Setenv(k, v); err != nil {
+					t.Errorf("Failed to set environment variable %s: %v", k, err)
+				}
+			}
+
+			key, secret := readKeySecret()
+			if secret != tc.expectedSecret || key != tc.expectedKey {
+				t.Errorf("Expected secret and key to be %s and %s but got %s and %s",
+					tc.expectedSecret,
+					tc.expectedKey,
+					secret,
+					key)
+			}
+			for k := range tc.env {
+				if err := os.Unsetenv(k); err != nil {
+					t.Errorf("Failed to unset environment variable %s: %v", k, err)
+				}
+			}
+		})
 	}
 }
