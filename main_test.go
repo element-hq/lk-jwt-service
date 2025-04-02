@@ -109,7 +109,7 @@ func TestHandlePost(t *testing.T) {
 		secret:           "testSecret",
 		key:              "testKey",
 		lkUrl:            "wss://lk.local:8080/foo",
-        localHomeservers: []string{"example.com"},
+		localHomeservers: []string{"example.com"},
 		skipVerifyTLS:     true,
 	}
 
