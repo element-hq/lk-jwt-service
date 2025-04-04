@@ -189,9 +189,9 @@ func (h *Handler) prepareMux() *http.ServeMux {
 func readKeySecret() (string, string) {
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
-	key_path := os.Getenv("LIVEKIT_KEY_FILE")
-	secret_path := os.Getenv("LIVEKIT_SECRET_FILE")
-	key_secret_path := os.Getenv("LIVEKIT_KEY_SECRET_FILE")
+	key_path := os.Getenv("LIVEKIT_KEY_FROM_FILE")
+	secret_path := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
+	key_secret_path := os.Getenv("LIVEKIT_KEY_FILE")
 	if key_secret_path != "" {
 		if keySecretBytes, err := os.ReadFile(key_secret_path); err != nil {
 			log.Fatal(err)
