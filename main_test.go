@@ -241,6 +241,14 @@ func TestReadKeySecret(t *testing.T) {
 			err:            false,
 		},
 		{
+			name: "Read from livekit keysecret",
+			env: map[string]string{
+				"LIVEKIT_KEY_SECRET_FILE":    "./tests/keysecret.yaml",
+			},
+			expectedKey:    "keysecret_iethuB2LeLiNuishiaKeephei9jaatio",
+			expectedSecret: "keysecret_xefaingo4oos6ohla9phiMieBu3ohJi2",
+		},
+		{
 			name: "Read from file",
 			env: map[string]string{
 				"LIVEKIT_KEY_FILE":    "./tests/key",

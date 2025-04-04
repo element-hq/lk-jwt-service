@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"crypto/tls"
+	"strings"
 
 	"time"
 
@@ -190,23 +191,38 @@ func readKeySecret() (string, string) {
 	secret := os.Getenv("LIVEKIT_SECRET")
 	key_path := os.Getenv("LIVEKIT_KEY_FILE")
 	secret_path := os.Getenv("LIVEKIT_SECRET_FILE")
-	if key_path != "" {
-		if keyBytes, err := os.ReadFile(key_path); err != nil {
+	key_secret_path := os.Getenv("LIVEKIT_KEY_SECRET_FILE")
+	if key_secret_path != "" {
+		if keySecretBytes, err := os.ReadFile(key_secret_path); err != nil {
 			log.Fatal(err)
 		} else {
-			key = string(keyBytes)
+			key_secrets := strings.Split(string(keySecretBytes), ":")
+			if len(key_secrets) != 2 {
+				log.Fatalf("invalid key secret file format!")
+			}
+			key = key_secrets[0]
+			secret = key_secrets[1]
 		}
+	} else {
+		if key_path != "" {
+			if keyBytes, err := os.ReadFile(key_path); err != nil {
+				log.Fatal(err)
+			} else {
+				key = string(keyBytes)
+			}
+		}
+
+		if secret_path != "" {
+			if secretBytes, err := os.ReadFile(secret_path); err != nil {
+				log.Fatal(err)
+			} else {
+				secret = string(secretBytes)
+			}
+		}
+
 	}
 
-	if secret_path != "" {
-		if secretBytes, err := os.ReadFile(secret_path); err != nil {
-			log.Fatal(err)
-		} else {
-			secret = string(secretBytes)
-		}
-	}
-
-	return key, secret
+	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
 func main() {
