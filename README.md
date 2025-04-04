@@ -54,6 +54,7 @@ Variable | Description | Required
 `LIVEKIT_URL` | The websocket URL of the LiveKit SFU | Yes
 `LIVEKIT_KEY` or `LIVEKIT_KEY_FROM_FILE` | The API key or key file path for the LiveKit SFU | Yes
 `LIVEKIT_SECRET` or `LIVEKIT_SECRET_FROM_FILE` | The secret or secret file path for the LiveKit SFU | Yes
+`LIVEKIT_KEY_FILE` | file path to LiveKit SFU key-file format (`APIkey: secret`) | mutually exclusive with `LIVEKIT_KEY` and `LIVEKIT_SECRET`
 `LIVEKIT_JWT_PORT` | The port the service listens on | No - defaults to 8080
 
 ## Disable TLS verification
