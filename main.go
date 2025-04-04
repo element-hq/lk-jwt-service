@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"crypto/tls"
+	"strings"
 
 	"time"
 
@@ -186,27 +187,49 @@ func (h *Handler) prepareMux() *http.ServeMux {
 }
 
 func readKeySecret() (string, string) {
+	// We initialize keys & secrets from environment variables
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
-	key_path := os.Getenv("LIVEKIT_KEY_FILE")
-	secret_path := os.Getenv("LIVEKIT_SECRET_FILE")
-	if key_path != "" {
-		if keyBytes, err := os.ReadFile(key_path); err != nil {
+	// We initialize potential key & secret path from environment variables
+	keyPath := os.Getenv("LIVEKIT_KEY_FROM_FILE")
+	secretPath := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
+	keySecretPath := os.Getenv("LIVEKIT_KEY_FILE")
+
+	// If keySecretPath is set we read the file and split it into two parts
+	// It takes over any other initialization
+	if keySecretPath != "" {
+		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
 			log.Fatal(err)
 		} else {
-			key = string(keyBytes)
+			key_secrets := strings.Split(string(keySecretBytes), ":")
+			if len(key_secrets) != 2 {
+				log.Fatalf("invalid key secret file format!")
+			}
+			key = key_secrets[0]
+			secret = key_secrets[1]
 		}
+	} else {
+		// If keySecretPath is not set, we try to read the key and secret from files
+		// If those files are not set, we return the key & secret from the environment variables
+		if keyPath != "" {
+			if keyBytes, err := os.ReadFile(keyPath); err != nil {
+				log.Fatal(err)
+			} else {
+				key = string(keyBytes)
+			}
+		}
+
+		if secretPath != "" {
+			if secretBytes, err := os.ReadFile(secretPath); err != nil {
+				log.Fatal(err)
+			} else {
+				secret = string(secretBytes)
+			}
+		}
+
 	}
 
-	if secret_path != "" {
-		if secretBytes, err := os.ReadFile(secret_path); err != nil {
-			log.Fatal(err)
-		} else {
-			secret = string(secretBytes)
-		}
-	}
-
-	return key, secret
+	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
 func main() {

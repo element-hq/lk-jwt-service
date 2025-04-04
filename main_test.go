@@ -241,10 +241,18 @@ func TestReadKeySecret(t *testing.T) {
 			err:            false,
 		},
 		{
+			name: "Read from livekit keysecret",
+			env: map[string]string{
+				"LIVEKIT_KEY_FILE": "./tests/keysecret.yaml",
+			},
+			expectedKey:    "keysecret_iethuB2LeLiNuishiaKeephei9jaatio",
+			expectedSecret: "keysecret_xefaingo4oos6ohla9phiMieBu3ohJi2",
+		},
+		{
 			name: "Read from file",
 			env: map[string]string{
-				"LIVEKIT_KEY_FILE":    "./tests/key",
-				"LIVEKIT_SECRET_FILE": "./tests/secret",
+				"LIVEKIT_KEY_FROM_FILE":    "./tests/key",
+				"LIVEKIT_SECRET_FROM_FILE": "./tests/secret",
 			},
 			expectedKey:    "from_file_oquusheiheiw4Iegah8te3Vienguus5a",
 			expectedSecret: "from_file_vohmahH3eeyieghohSh3kee8feuPhaim",
@@ -252,8 +260,8 @@ func TestReadKeySecret(t *testing.T) {
 		{
 			name: "Read from file key only",
 			env: map[string]string{
-				"LIVEKIT_KEY_FILE": "./tests/key",
-				"LIVEKIT_SECRET":   "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
+				"LIVEKIT_KEY_FROM_FILE": "./tests/key",
+				"LIVEKIT_SECRET":        "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
 			},
 			expectedKey:    "from_file_oquusheiheiw4Iegah8te3Vienguus5a",
 			expectedSecret: "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
@@ -261,8 +269,8 @@ func TestReadKeySecret(t *testing.T) {
 		{
 			name: "Read from file secret only",
 			env: map[string]string{
-				"LIVEKIT_SECRET_FILE": "./tests/secret",
-				"LIVEKIT_KEY":         "from_env_qui8aiTopiekiechah9oocbeimeew2O",
+				"LIVEKIT_SECRET_FROM_FILE": "./tests/secret",
+				"LIVEKIT_KEY":              "from_env_qui8aiTopiekiechah9oocbeimeew2O",
 			},
 			expectedKey:    "from_env_qui8aiTopiekiechah9oocbeimeew2O",
 			expectedSecret: "from_file_vohmahH3eeyieghohSh3kee8feuPhaim",
