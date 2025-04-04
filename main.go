@@ -191,14 +191,14 @@ func readKeySecret() (string, string) {
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
 	// We initialize potential key & secret path from environment variables
-	key_path := os.Getenv("LIVEKIT_KEY_FROM_FILE")
-	secret_path := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
-	key_secret_path := os.Getenv("LIVEKIT_KEY_FILE")
+	keyPath := os.Getenv("LIVEKIT_KEY_FROM_FILE")
+	secretPath := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
+	keySecretPath := os.Getenv("LIVEKIT_KEY_FILE")
 
-	// If key_secret_path is set we read the file and split it into two parts
+	// If keySecretPath is set we read the file and split it into two parts
 	// It takes over any other initialization
-	if key_secret_path != "" {
-		if keySecretBytes, err := os.ReadFile(key_secret_path); err != nil {
+	if keySecretPath != "" {
+		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
 			log.Fatal(err)
 		} else {
 			key_secrets := strings.Split(string(keySecretBytes), ":")
@@ -209,18 +209,18 @@ func readKeySecret() (string, string) {
 			secret = key_secrets[1]
 		}
 	} else {
-		// If key_secret_path, we try to read the key and secret from files
+		// If keySecretPath is not set, we try to read the key and secret from files
 		// If those files are not set, we return the key & secret from the environment variables
-		if key_path != "" {
-			if keyBytes, err := os.ReadFile(key_path); err != nil {
+		if keyPath != "" {
+			if keyBytes, err := os.ReadFile(keyPath); err != nil {
 				log.Fatal(err)
 			} else {
 				key = string(keyBytes)
 			}
 		}
 
-		if secret_path != "" {
-			if secretBytes, err := os.ReadFile(secret_path); err != nil {
+		if secretPath != "" {
+			if secretBytes, err := os.ReadFile(secretPath); err != nil {
 				log.Fatal(err)
 			} else {
 				secret = string(secretBytes)
