@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"crypto/tls"
 
 	"time"
 
@@ -64,6 +65,8 @@ func exchangeOIDCToken(
 
 	if skipVerifyTLS {
 		log.Printf("!!! WARNING !!! Skipping TLS verification for matrix client connection to %s", token.MatrixServerName)
+		// Disable TLS verification on the default HTTP Transport for the well-known lookup
+		http.DefaultTransport.(*http.Transport).TLSClientConfig  = &tls.Config{ InsecureSkipVerify: true }
 	}
 	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
 
