@@ -241,12 +241,12 @@ func readKeySecret() (string, string) {
 		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
 			log.Fatal(err)
 		} else {
-			key_secrets := strings.Split(string(keySecretBytes), ":")
-			if len(key_secrets) != 2 {
+			keySecrets := strings.Split(string(keySecretBytes), ":")
+			if len(keySecrets) != 2 {
 				log.Fatalf("invalid key secret file format!")
 			}
-			key = key_secrets[0]
-			secret = key_secrets[1]
+			key = keySecrets[0]
+			secret = keySecrets[1]
 		}
 	} else {
 		// If keySecretPath is not set, we try to read the key and secret from files
@@ -269,6 +269,8 @@ func readKeySecret() (string, string) {
 
 	}
 
+	// remove white spaces, new lines and carriage returns
+	// from key and secret
 	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
