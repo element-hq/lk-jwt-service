@@ -118,7 +118,7 @@ func TestHandlePost(t *testing.T) {
 		// Mock response
 		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(fmt.Sprintf(`{"sub": "@user:%s"}`, matrixServerName)))
+		_, err := fmt.Fprintf(w, `{"sub": "@user:%s"}`, matrixServerName)
 		if err != nil {
 			t.Fatalf("failed to write response: %v", err)
 		}
