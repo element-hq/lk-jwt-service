@@ -93,10 +93,11 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
 	// Handle preflight request (CORS)
-	if r.Method == "OPTIONS" {
+	switch r.Method {
+	case "OPTIONS":
 		w.WriteHeader(http.StatusOK)
 		return
-	} else if r.Method == "POST" {
+	case "POST":
 		var sfu_access_request SFURequest
 		err := json.NewDecoder(r.Body).Decode(&sfu_access_request)
 		if err != nil {
@@ -163,7 +164,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("failed to encode json response! %v", err)
 		}
-	} else {
+	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
