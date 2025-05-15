@@ -96,10 +96,11 @@ func TestHandlePostMissingParams(t *testing.T) {
 
 func TestHandlePost(t *testing.T) {
 	handler := &Handler{
-		secret:        "testSecret",
-		key:           "testKey",
-		lk_url:        "wss://lk.local:8080/foo",
-		skipVerifyTLS: true,
+		secret:           "testSecret",
+		key:              "testKey",
+		lkUrl:            "wss://lk.local:8080/foo",
+		localHomeservers: []string{"example.com"},
+		skipVerifyTLS:     true,
 	}
 
 	var matrixServerName = ""
@@ -201,14 +202,36 @@ func TestGetJoinToken(t *testing.T) {
 	apiSecret := "testSecret"
 	room := "testRoom"
 	identity := "testIdentity@example.com"
-
-	token, err := getJoinToken(apiKey, apiSecret, room, identity)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if token == "" {
-		t.Error("expected token to be non-empty")
+	
+	for _, isLocalUser := range []bool{true, false} {
+		tokenString, err := getJoinToken(isLocalUser, apiKey, apiSecret, room, identity)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		
+		if tokenString == "" {
+			t.Error("expected token to be non-empty")
+		}
+		
+		// parse JWT checking the shared secret
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			return []byte(apiSecret), nil
+		})
+		claims, ok := token.Claims.(jwt.MapClaims)
+		
+		if !ok || !token.Valid {
+			t.Fatalf("failed to parse claims from JWT: %v", err)
+		}
+		
+		claimRoomCreate := claims["video"].(map[string]interface{})["roomCreate"]
+		if claimRoomCreate == nil {
+			claimRoomCreate = false
+		}
+		
+		if isLocalUser != claimRoomCreate {
+			t.Fatalf("roomCreate property does not reflect isLocalUser intent")
+		}
+		
 	}
 }
 
