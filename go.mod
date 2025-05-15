@@ -2,11 +2,12 @@ module lk-jwt-service
 
 go 1.23.0
 
-toolchain go1.24.1
+toolchain go1.24.3
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/livekit/protocol v1.34.0
+	github.com/livekit/server-sdk-go/v2 v2.5.0
 	github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
 	github.com/matrix-org/gomatrixserverlib v0.0.0-20250324075430-479c9abf1ca5
 )
@@ -39,7 +40,6 @@ require (
 	github.com/livekit/mageutil v0.0.0-20230125210925-54e8a70427c1 // indirect
 	github.com/livekit/mediatransportutil v0.0.0-20241220010243-a2bdee945564 // indirect
 	github.com/livekit/psrpc v0.6.1-0.20250205181828-a0beed2e4126 // indirect
-	github.com/livekit/server-sdk-go/v2 v2.5.0 // indirect
 	github.com/magefile/mage v1.15.0 // indirect
 	github.com/matrix-org/util v0.0.0-20200807132607-55161520e1d4 // indirect
 	github.com/nats-io/nats.go v1.38.0 // indirect
@@ -76,12 +76,12 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
-	golang.org/x/crypto v0.35.0 // indirect
+	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/exp v0.0.0-20250207012021-f9890c6ad9f3 // indirect
-	golang.org/x/net v0.36.0 // indirect
-	golang.org/x/sync v0.11.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
+	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/sync v0.12.0 // indirect
+	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20241202173237-19429a94021a // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250204164813-702378808489 // indirect
 	google.golang.org/grpc v1.70.0 // indirect

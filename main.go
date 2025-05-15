@@ -1,17 +1,8 @@
 // Copyright 2023 New Vector Ltd
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2025 New Vector Ltd
+//
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
+// Please see LICENSE files in the repository root for full details.
 
 package main
 
@@ -106,10 +97,11 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
 	// Handle preflight request (CORS)
-	if r.Method == "OPTIONS" {
+	switch r.Method {
+	case "OPTIONS":
 		w.WriteHeader(http.StatusOK)
 		return
-	} else if r.Method == "POST" {
+	case "POST":
 		var sfuAccessRequest SFURequest
 		err := json.NewDecoder(r.Body).Decode(&sfuAccessRequest)
 		if err != nil {
@@ -212,7 +204,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("failed to encode json response! %v", err)
 		}
-	} else {
+	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
