@@ -10,7 +10,7 @@ This functionality is defined by [MSC4195: MatrixRTC using LiveKit backend](http
 
 This service is used when hosting the [Element Call](https://github.com/element-hq/element-call) video conferencing application against a LiveKit backend.
 
-Alongside this service, you will need the [LiveKit SFU](https://github.com/livekit/livekit) application and for standalone applications the [Element Call](https://github.com/element-hq/element-call) web application.
+Alongside this service, you will need the [LiveKit SFU](https://github.com/livekit/livekit) and for single page applications (SPA) the [Element Call](https://github.com/element-hq/element-call) web application.
 
 ## Installation
 
