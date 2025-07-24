@@ -247,35 +247,32 @@ func TestGetJoinToken(t *testing.T) {
 	room := "testRoom"
 	identity := "testIdentity@example.com"
 	
-	for _, isFullAccessUser := range []bool{true, false} {
-		tokenString, err := getJoinToken(isFullAccessUser, apiKey, apiSecret, room, identity)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		
-		if tokenString == "" {
-			t.Error("expected token to be non-empty")
-		}
-		
-		// parse JWT checking the shared secret
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			return []byte(apiSecret), nil
-		})
-		claims, ok := token.Claims.(jwt.MapClaims)
-		
-		if !ok || !token.Valid {
-			t.Fatalf("failed to parse claims from JWT: %v", err)
-		}
-		
-		claimRoomCreate := claims["video"].(map[string]interface{})["roomCreate"]
-		if claimRoomCreate == nil {
-			claimRoomCreate = false
-		}
-		
-		if isFullAccessUser != claimRoomCreate {
-			t.Fatalf("roomCreate property does not reflect isLocalUser intent")
-		}
-		
+	tokenString, err := getJoinToken(apiKey, apiSecret, room, identity)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	
+	if tokenString == "" {
+		t.Error("expected token to be non-empty")
+	}
+	
+	// parse JWT checking the shared secret
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		return []byte(apiSecret), nil
+	})
+	claims, ok := token.Claims.(jwt.MapClaims)
+	
+	if !ok || !token.Valid {
+		t.Fatalf("failed to parse claims from JWT: %v", err)
+	}
+	
+	claimRoomCreate := claims["video"].(map[string]interface{})["roomCreate"]
+	if claimRoomCreate == nil {
+		claimRoomCreate = false
+	}
+	
+	if claimRoomCreate == true {
+		t.Fatalf("roomCreate property needs to be false, since the lk-jwt-service creates the room")
 	}
 }
 

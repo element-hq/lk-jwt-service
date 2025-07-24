@@ -100,14 +100,14 @@ func readKeySecret() (string, string) {
 	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
-func getJoinToken(isFullAccessUser bool, apiKey, apiSecret, room, identity string) (string, error) {
+func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
 	canSubscribe := true
 	grant := &auth.VideoGrant{
 		RoomJoin:     true,
-		RoomCreate:   isFullAccessUser,
+		RoomCreate:   false,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
 		Room:         room,
@@ -244,7 +244,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
 		lkIdentity := userInfo.Sub + ":" + sfuAccessRequest.DeviceID
-		token, err := getJoinToken(isFullAccessUser, h.key, h.secret, sfuAccessRequest.Room, lkIdentity)		
+		token, err := getJoinToken(h.key, h.secret, sfuAccessRequest.Room, lkIdentity)		
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
