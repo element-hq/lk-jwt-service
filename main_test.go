@@ -96,10 +96,10 @@ func TestHandlePostMissingParams(t *testing.T) {
 
 func TestHandlePost(t *testing.T) {
 	handler := &Handler{
-		secret:           "testSecret",
-		key:              "testKey",
-		lkUrl:            "wss://lk.local:8080/foo",
-		localHomeservers: []string{"example.com"},
+		secret:                "testSecret",
+		key:                   "testKey",
+		lkUrl:                 "wss://lk.local:8080/foo",
+		fullAccessHomeservers: []string{"example.com"},
 		skipVerifyTLS:     true,
 	}
 
@@ -197,14 +197,50 @@ func TestHandlePost(t *testing.T) {
 	}
 }
 
+func TestIsFullAccessUser(t *testing.T) {
+	handler := &Handler{
+		secret:                "testSecret",
+		key:                   "testKey",
+		lkUrl:                 "wss://lk.local:8080/foo",
+		fullAccessHomeservers: []string{"example.com", "another.example.com"},
+		skipVerifyTLS:     true,
+	}
+
+	// Test cases for full access users
+	if handler.isFullAccessUser("example.com") {
+		t.Log("User has full access")
+	} else {
+		t.Errorf("User has restricted access")
+	}
+
+    if handler.isFullAccessUser("another.example.com") {
+		t.Log("User has full access")
+	} else {
+		t.Errorf("User has restricted access")
+	}
+
+	// Test cases for restricted access users
+    if handler.isFullAccessUser("aanother.example.com") {
+		t.Errorf("User has full access")
+	} else {
+		t.Log("User has restricted access")
+	}
+
+    if handler.isFullAccessUser("matrix.example.com") {
+		t.Errorf("User has full access")
+	} else {
+		t.Log("User has restricted access")
+	}
+}
+
 func TestGetJoinToken(t *testing.T) {
 	apiKey := "testKey"
 	apiSecret := "testSecret"
 	room := "testRoom"
 	identity := "testIdentity@example.com"
 	
-	for _, isLocalUser := range []bool{true, false} {
-		tokenString, err := getJoinToken(isLocalUser, apiKey, apiSecret, room, identity)
+	for _, isFullAccessUser := range []bool{true, false} {
+		tokenString, err := getJoinToken(isFullAccessUser, apiKey, apiSecret, room, identity)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -228,7 +264,7 @@ func TestGetJoinToken(t *testing.T) {
 			claimRoomCreate = false
 		}
 		
-		if isLocalUser != claimRoomCreate {
+		if isFullAccessUser != claimRoomCreate {
 			t.Fatalf("roomCreate property does not reflect isLocalUser intent")
 		}
 		

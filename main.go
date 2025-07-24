@@ -145,13 +145,13 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Does user belong to local homeservers alongside our SFU Cluster
-		isFullAccessUser := slices.Contains(h.fullAccessHomeservers, sfuAccessRequest.OpenIDToken.MatrixServerName)
+		// Does the user belong to homeservers granted full access
+		isFullAccessUser := h.isFullAccessUser(sfuAccessRequest.OpenIDToken.MatrixServerName)
 
 		log.Printf(
 			"Got Matrix user info for %s (%s)",
 			userInfo.Sub,
-			map[bool]string{true: "local", false: "remote"}[isFullAccessUser],
+			map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
 		)
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
@@ -207,6 +207,10 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (h *Handler) isFullAccessUser(matrixServerName string) bool {
+    return slices.Contains(h.fullAccessHomeservers, matrixServerName)
 }
 
 func (h *Handler) prepareMux() *http.ServeMux {
@@ -306,11 +310,11 @@ func main() {
 	log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS: %v", fullAccessHomeservers)
 
 	handler := &Handler{
-		key:               key,
-		secret:            secret,
-		lkUrl:            lkUrl,
-		skipVerifyTLS:     skipVerifyTLS,
-		fullAccessHomeservers:  strings.Split(fullAccessHomeservers, ","),
+		key:                   key,
+		secret:                secret,
+		lkUrl:                 lkUrl,
+		skipVerifyTLS:         skipVerifyTLS,
+		fullAccessHomeservers: strings.Split(fullAccessHomeservers, ","),
 	}
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lkJwtPort), handler.prepareMux()))
