@@ -210,7 +210,13 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) isFullAccessUser(matrixServerName string) bool {
-    return slices.Contains(h.fullAccessHomeservers, matrixServerName)
+	// Wildcard allows full access for homeservers
+	if len(h.fullAccessHomeservers) == 1 && h.fullAccessHomeservers[0] == "*" {
+		return true
+	}
+
+	// Check if the matrixServerName is in the list of full access homeservers
+	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
 }
 
 func (h *Handler) prepareMux() *http.ServeMux {

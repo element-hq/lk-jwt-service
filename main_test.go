@@ -210,26 +210,34 @@ func TestIsFullAccessUser(t *testing.T) {
 	if handler.isFullAccessUser("example.com") {
 		t.Log("User has full access")
 	} else {
-		t.Errorf("User has restricted access")
+		t.Error("User has restricted access")
 	}
 
     if handler.isFullAccessUser("another.example.com") {
 		t.Log("User has full access")
 	} else {
-		t.Errorf("User has restricted access")
+		t.Error("User has restricted access")
 	}
 
 	// Test cases for restricted access users
     if handler.isFullAccessUser("aanother.example.com") {
-		t.Errorf("User has full access")
+		t.Error("User has full access")
 	} else {
 		t.Log("User has restricted access")
 	}
 
     if handler.isFullAccessUser("matrix.example.com") {
-		t.Errorf("User has full access")
+		t.Error("User has full access")
 	} else {
 		t.Log("User has restricted access")
+	}
+
+	// test wildcard access
+	handler.fullAccessHomeservers = []string{"*"}
+    if handler.isFullAccessUser("other.com") {
+		t.Log("User has full access")
+	} else {
+		t.Error("User has restricted access")
 	}
 }
 
