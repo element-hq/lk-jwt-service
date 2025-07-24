@@ -52,6 +52,74 @@ type SFUResponse struct {
 	JWT string `json:"jwt"`
 }
 
+func readKeySecret() (string, string) {
+	// We initialize keys & secrets from environment variables
+	key := os.Getenv("LIVEKIT_KEY")
+	secret := os.Getenv("LIVEKIT_SECRET")
+	// We initialize potential key & secret path from environment variables
+	keyPath := os.Getenv("LIVEKIT_KEY_FROM_FILE")
+	secretPath := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
+	keySecretPath := os.Getenv("LIVEKIT_KEY_FILE")
+
+	// If keySecretPath is set we read the file and split it into two parts
+	// It takes over any other initialization
+	if keySecretPath != "" {
+		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
+			log.Fatal(err)
+		} else {
+			keySecrets := strings.Split(string(keySecretBytes), ":")
+			if len(keySecrets) != 2 {
+				log.Fatalf("invalid key secret file format!")
+			}
+			key = keySecrets[0]
+			secret = keySecrets[1]
+		}
+	} else {
+		// If keySecretPath is not set, we try to read the key and secret from files
+		// If those files are not set, we return the key & secret from the environment variables
+		if keyPath != "" {
+			if keyBytes, err := os.ReadFile(keyPath); err != nil {
+				log.Fatal(err)
+			} else {
+				key = string(keyBytes)
+			}
+		}
+
+		if secretPath != "" {
+			if secretBytes, err := os.ReadFile(secretPath); err != nil {
+				log.Fatal(err)
+			} else {
+				secret = string(secretBytes)
+			}
+		}
+
+	}
+
+	// remove white spaces, new lines and carriage returns
+	// from key and secret
+	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
+}
+
+func getJoinToken(isFullAccessUser bool, apiKey, apiSecret, room, identity string) (string, error) {
+	at := auth.NewAccessToken(apiKey, apiSecret)
+
+	canPublish := true
+	canSubscribe := true
+	grant := &auth.VideoGrant{
+		RoomJoin:     true,
+		RoomCreate:   isFullAccessUser,
+		CanPublish:   &canPublish,
+		CanSubscribe: &canSubscribe,
+		Room:         room,
+	}
+
+	at.SetVideoGrant(grant).
+		SetIdentity(identity).
+		SetValidFor(time.Hour)
+
+	return at.ToJWT()
+}
+
 func exchangeOpenIdUserInfo(
 	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
 ) (*fclient.UserInfo, error) {
@@ -76,6 +144,26 @@ func exchangeOpenIdUserInfo(
 	}
 	return &userinfo, nil
 }
+
+func (h *Handler) isFullAccessUser(matrixServerName string) bool {
+	// Wildcard allows full access for homeservers
+	if len(h.fullAccessHomeservers) == 1 && h.fullAccessHomeservers[0] == "*" {
+		return true
+	}
+
+	// Check if the matrixServerName is in the list of full access homeservers
+	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
+}
+
+func (h *Handler) prepareMux() *http.ServeMux {
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sfu/get", h.handle)
+	mux.HandleFunc("/healthz", h.healthcheck)
+
+	return mux
+}
+
 
 func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Health check from %s", r.RemoteAddr)
@@ -209,73 +297,6 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) isFullAccessUser(matrixServerName string) bool {
-	// Wildcard allows full access for homeservers
-	if len(h.fullAccessHomeservers) == 1 && h.fullAccessHomeservers[0] == "*" {
-		return true
-	}
-
-	// Check if the matrixServerName is in the list of full access homeservers
-	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
-}
-
-func (h *Handler) prepareMux() *http.ServeMux {
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/sfu/get", h.handle)
-	mux.HandleFunc("/healthz", h.healthcheck)
-
-	return mux
-}
-
-func readKeySecret() (string, string) {
-	// We initialize keys & secrets from environment variables
-	key := os.Getenv("LIVEKIT_KEY")
-	secret := os.Getenv("LIVEKIT_SECRET")
-	// We initialize potential key & secret path from environment variables
-	keyPath := os.Getenv("LIVEKIT_KEY_FROM_FILE")
-	secretPath := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
-	keySecretPath := os.Getenv("LIVEKIT_KEY_FILE")
-
-	// If keySecretPath is set we read the file and split it into two parts
-	// It takes over any other initialization
-	if keySecretPath != "" {
-		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
-			log.Fatal(err)
-		} else {
-			keySecrets := strings.Split(string(keySecretBytes), ":")
-			if len(keySecrets) != 2 {
-				log.Fatalf("invalid key secret file format!")
-			}
-			key = keySecrets[0]
-			secret = keySecrets[1]
-		}
-	} else {
-		// If keySecretPath is not set, we try to read the key and secret from files
-		// If those files are not set, we return the key & secret from the environment variables
-		if keyPath != "" {
-			if keyBytes, err := os.ReadFile(keyPath); err != nil {
-				log.Fatal(err)
-			} else {
-				key = string(keyBytes)
-			}
-		}
-
-		if secretPath != "" {
-			if secretBytes, err := os.ReadFile(secretPath); err != nil {
-				log.Fatal(err)
-			} else {
-				secret = string(secretBytes)
-			}
-		}
-
-	}
-
-	// remove white spaces, new lines and carriage returns
-	// from key and secret
-	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
-}
-
 func main() {
 	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
 	if skipVerifyTLS {
@@ -328,24 +349,4 @@ func main() {
 	}
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lkJwtPort), handler.prepareMux()))
-}
-
-func getJoinToken(isFullAccessUser bool, apiKey, apiSecret, room, identity string) (string, error) {
-	at := auth.NewAccessToken(apiKey, apiSecret)
-
-	canPublish := true
-	canSubscribe := true
-	grant := &auth.VideoGrant{
-		RoomJoin:     true,
-		RoomCreate:   isFullAccessUser,
-		CanPublish:   &canPublish,
-		CanSubscribe: &canSubscribe,
-		Room:         room,
-	}
-
-	at.SetVideoGrant(grant).
-		SetIdentity(identity).
-		SetValidFor(time.Hour)
-
-	return at.ToJWT()
 }
