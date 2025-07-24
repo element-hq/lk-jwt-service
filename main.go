@@ -30,9 +30,9 @@ import (
 )
 
 type Handler struct {
-	key, secret, lkUrl string
-	localHomeservers   []string
-	skipVerifyTLS       bool
+	key, secret, lkUrl    string
+	fullAccessHomeservers []string
+	skipVerifyTLS         bool
 }
 
 type OpenIDTokenType struct {
@@ -146,17 +146,17 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Does user belong to local homeservers alongside our SFU Cluster
-		isLocalUser := slices.Contains(h.localHomeservers, sfuAccessRequest.OpenIDToken.MatrixServerName)
+		isFullAccessUser := slices.Contains(h.fullAccessHomeservers, sfuAccessRequest.OpenIDToken.MatrixServerName)
 
 		log.Printf(
 			"Got Matrix user info for %s (%s)",
 			userInfo.Sub,
-			map[bool]string{true: "local", false: "remote"}[isLocalUser],
+			map[bool]string{true: "local", false: "remote"}[isFullAccessUser],
 		)
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
 		lkIdentity := userInfo.Sub + ":" + sfuAccessRequest.DeviceID
-		token, err := getJoinToken(isLocalUser, h.key, h.secret, sfuAccessRequest.Room, lkIdentity)		
+		token, err := getJoinToken(isFullAccessUser, h.key, h.secret, sfuAccessRequest.Room, lkIdentity)		
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -169,7 +169,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if isLocalUser {
+		if isFullAccessUser {
 			roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
 			room, err := roomClient.CreateRoom(
 				context.Background(), &livekit.CreateRoomRequest{
@@ -284,9 +284,17 @@ func main() {
 		log.Fatal("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
 	}
 
-	localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
-	if len(localHomeservers) == 0 {
-		log.Fatal("LIVEKIT_LOCAL_HOMESERVERS environment variables must be set")
+	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
+	
+	if len(fullAccessHomeservers) == 0 {
+		// for backward compatibility we also check for LIVEKIT_LOCAL_HOMESERVERS
+		localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
+		if len(localHomeservers) > 0 {
+			log.Printf("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, please use LIVEKIT_FULL_ACCESS_HOMESERVERS instead !!!")
+			fullAccessHomeservers = localHomeservers
+		} else {
+			log.Fatal("LIVEKIT_FULL_ACCESS_HOMESERVERS environment variables must be set")
+		}
 	}
 
 	lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
@@ -295,27 +303,27 @@ func main() {
 	}
 
 	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lkUrl, lkJwtPort)
-	log.Printf("LIVEKIT_LOCAL_HOMESERVERS: %v", localHomeservers)
+	log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS: %v", fullAccessHomeservers)
 
 	handler := &Handler{
 		key:               key,
 		secret:            secret,
 		lkUrl:            lkUrl,
 		skipVerifyTLS:     skipVerifyTLS,
-		localHomeservers:  strings.Split(localHomeservers, ","),
+		fullAccessHomeservers:  strings.Split(fullAccessHomeservers, ","),
 	}
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lkJwtPort), handler.prepareMux()))
 }
 
-func getJoinToken(isLocalUser bool, apiKey, apiSecret, room, identity string) (string, error) {
+func getJoinToken(isFullAccessUser bool, apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
 	canSubscribe := true
 	grant := &auth.VideoGrant{
 		RoomJoin:     true,
-		RoomCreate:   isLocalUser,
+		RoomCreate:   isFullAccessUser,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
 		Room:         room,
