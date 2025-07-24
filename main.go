@@ -297,13 +297,17 @@ func main() {
 	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
 	
 	if len(fullAccessHomeservers) == 0 {
-		// for backward compatibility we also check for LIVEKIT_LOCAL_HOMESERVERS
+		// For backward compatibility we also check for LIVEKIT_LOCAL_HOMESERVERS
+		// TODO: Remove this backward compatibility in the near future.
 		localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
 		if len(localHomeservers) > 0 {
 			log.Printf("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, please use LIVEKIT_FULL_ACCESS_HOMESERVERS instead !!!")
 			fullAccessHomeservers = localHomeservers
 		} else {
-			log.Fatal("LIVEKIT_FULL_ACCESS_HOMESERVERS environment variables must be set")
+			// If no full access homeservers are set, we default to wildcard '*' to mimic the previous behavior.
+			// TODO: Remove defaulting to wildcard '*' (aka full-access for all users) in the near future.
+			log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*) for full access")
+			fullAccessHomeservers = "*"
 		}
 	}
 
