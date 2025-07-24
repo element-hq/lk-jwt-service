@@ -259,6 +259,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 		if isFullAccessUser {
 			roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
+			creationStart := time.Now().Unix()
 			room, err := roomClient.CreateRoom(
 				context.Background(), &livekit.CreateRoomRequest{
 					Name: sfuAccessRequest.Room,
@@ -282,7 +283,13 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			log.Printf("Created LiveKit room sid: %s (alias: %s) for local Matrix user %s (LiveKit identity: %s)", room.Sid, sfuAccessRequest.Room, userInfo.Sub , lkIdentity)
+			// Log the room creation time and the user info
+			isNewRoom := room.GetCreationTime() >= creationStart && room.GetCreationTime() <=  time.Now().Unix()
+			log.Printf(
+				"%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
+				map[bool]string{true: "Created", false: "Using"}[isNewRoom],
+				room.Sid, sfuAccessRequest.Room, userInfo.Sub , lkIdentity,
+			)
 		}
 
 		res := SFUResponse{URL: h.lkUrl, JWT: token}
