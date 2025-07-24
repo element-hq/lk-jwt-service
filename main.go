@@ -146,12 +146,12 @@ func exchangeOpenIdUserInfo(
 }
 
 func (h *Handler) isFullAccessUser(matrixServerName string) bool {
-	// Wildcard allows full access for homeservers
+	// Grant full access if wildcard '*' is present as the only entry
 	if len(h.fullAccessHomeservers) == 1 && h.fullAccessHomeservers[0] == "*" {
 		return true
 	}
 
-	// Check if the matrixServerName is in the list of full access homeservers
+	// Check if the matrixServerName is in the list of full-access homeservers
 	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
 }
 
