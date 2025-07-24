@@ -8,7 +8,7 @@ It works by allowing a token obtained via the Matrix Client-Server API [OpenID e
 
 This functionality is defined by [MSC4195: MatrixRTC using LiveKit backend](https://github.com/matrix-org/matrix-spec-proposals/pull/4195).
 
-Only for Matrix users of homeservers belonging to the same deployment (called local users) corresponding rooms on the LiveKit SFU will be automatically created. Hence, local homeservers need to be declared via the `LIVEKIT_LOCAL_HOMESERVERS` environment variable (see below).
+Only for Matrix users of homeservers belonging to the same deployment (called local users) corresponding rooms on the LiveKit SFU will be automatically created. Hence, local homeservers need to be declared via the `LIVEKIT_FULL_ACCESS_HOMESERVERS` environment variable (see below).
 
 Note access to LiveKit SFU is restricted for remote users (not belonging to the same deployment). Those users can join existing LiveKit SFU rooms, but missing rooms will not be automatically created to prevent misuse of infrastructure. Due to the SFU selection algorithm and the order of events this will NOT limit or prevent video conferences across Matrix federation.
 
@@ -16,7 +16,7 @@ Note access to LiveKit SFU is restricted for remote users (not belonging to the 
 
 This service is used when hosting the [Element Call](https://github.com/element-hq/element-call) video conferencing application against a LiveKit backend.
 
-Alongside this service, you will need a [LiveKit SFU](https://github.com/livekit/livekit) and the [Element Call](https://github.com/element-hq/element-call) web application.
+Alongside this service, you will need the [LiveKit SFU](https://github.com/livekit/livekit) and for single page applications (SPA) the [Element Call](https://github.com/element-hq/element-call) web application.
 
 ## Installation
 
@@ -51,7 +51,7 @@ go build -o lk-jwt-service .
 LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret ./lk-jwt-service
 ```
 
-## Configuration
+### Configuration
 
 The service is configured via environment variables:
 
@@ -69,6 +69,36 @@ Please double check that LiveKit SFU room default settings ([config.yaml](https:
 room:
   auto_create: false
 ```
+
+### Reverse Proxy and well-known requirements
+
+A sample Caddy reverse proxy and well-known configuration (the MAS authenticaion is not required for lk-jwt-service but included for information.):
+
+```
+livekit-jwt.domain.tld {
+        bind xx.xx.xx.xx
+        reverse_proxy  localhost:8080
+}
+```
+```
+    handle /.well-known/matrix/* {
+        header Content-Type application/json
+        header Access-Control-Allow-Origin *  # Only needed if accessed via browser JS
+
+        respond /client `{
+            "m.homeserver": {"base_url": "https://matrix-domain.tld"},
+            "org.matrix.msc4143.rtc_foci": [{
+                "type": "livekit",
+                "livekit_service_url": "https://livekit-jwt.domain.tld"
+            }],
+            "org.matrix.msc2965.authentication": {
+                "issuer": "https://auth.domain.tld/",
+                "account": "https://auth.domain.tld/account"
+            }
+        }`
+```
+The service is configured via environment variables:
+
 
 ## Disable TLS verification
 
