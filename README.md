@@ -1,8 +1,8 @@
 # LiveKit Token Management Service
 
-This service is currently used for a single reason: generate JWT tokens with a given identity for a given room, so that users can use them to authenticate against LiveKit SFU.
+This service is currently used for a single purpose, to generate JWT tokens with a given identity for a given room, so that users can use them to authenticate against a LiveKit SFU.
 
-It works by allowing a token obtained via the Matrix Client-Server API [OpenID endpoint](https://spec.matrix.org/v1.13/client-server-api/#openid) to be exchanged for a LiveKit JWT token which can be used to access a LiveKit SFU.
+It works by allowing a token obtained via the Matrix Client-Server API [OpenID endpoint](https://spec.matrix.org/v1.13/client-server-api/#openid) to be exchanged for a LiveKit JWT token, which can then be used to access a LiveKit SFU.
 
 This functionality is defined by [MSC4195: MatrixRTC using LiveKit backend](https://github.com/matrix-org/matrix-spec-proposals/pull/4195).
 
@@ -10,11 +10,11 @@ This functionality is defined by [MSC4195: MatrixRTC using LiveKit backend](http
 
 This service is used when hosting the [Element Call](https://github.com/element-hq/element-call) video conferencing application against a LiveKit backend.
 
-Alongside this service, you will need the [LiveKit SFU](https://github.com/livekit/livekit) and for single page applications (SPA) the [Element Call](https://github.com/element-hq/element-call) web application.
+In addition to this service, you will need the [LiveKit SFU](https://github.com/livekit/livekit),  and for single page applications (SPAs), the [Element Call](https://github.com/element-hq/element-call) web application.
 
 ## Installation
 
-The available releases can be found [here](https://github.com/element-hq/lk-jwt-service/releases).
+Releases are available [here](https://github.com/element-hq/lk-jwt-service/releases).
 
 ### From docker image
 
@@ -89,4 +89,4 @@ The service is configured via environment variables:
 
 ## Disable TLS verification
 
-For testing and debugging (e.g. in the absence of trusted certificates while testing in a lab) you can disable TLS verification for the outgoing connection to the Matrix homeserver by setting the environment variable `LIVEKIT_INSECURE_SKIP_VERIFY_TLS` to `YES_I_KNOW_WHAT_I_AM_DOING`.
+For testing and debugging (e.g. in the absence of trusted certificates while testing in a lab), you can disable TLS verification for the outgoing connection to the Matrix homeserver by setting the environment variable `LIVEKIT_INSECURE_SKIP_VERIFY_TLS` to `YES_I_KNOW_WHAT_I_AM_DOING`.
