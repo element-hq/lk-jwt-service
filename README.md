@@ -62,7 +62,7 @@ Variable | Description | Required
 `LIVEKIT_SECRET` or `LIVEKIT_SECRET_FROM_FILE` | The secret or secret file path for the LiveKit SFU | Yes
 `LIVEKIT_KEY_FILE` | file path to LiveKit SFU key-file format (`APIkey: secret`) | mutually exclusive with `LIVEKIT_KEY` and `LIVEKIT_SECRET`
 `LIVEKIT_JWT_PORT` | The port the service listens on | No - defaults to 8080
-`LIVEKIT_FULL_ACCESS_HOMESERVERS` | Comma-separated list of Matrix homeservers whose users are authorized with full access to LiveKit SFU features (supports `*` as a wildcard to allow all homeservers) | Yes
+`LIVEKIT_FULL_ACCESS_HOMESERVERS` | Comma-separated list of Matrix homeservers whose users are authorized with full access to LiveKit SFU features (supports `*` as a wildcard to allow all homeservers) | No - defaults to `*`
 
 Please double check that LiveKit SFU room default settings ([config.yaml](https://github.com/livekit/livekit/blob/7350e9933107ecdea4ada8f8bcb0d6ca78b3f8f7/config-sample.yaml#L170)) are configured as
 ```
