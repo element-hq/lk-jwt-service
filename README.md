@@ -1,10 +1,16 @@
 # LiveKit Token Management Service
 
-This service is currently used for a single reason: generate JWT tokens with a given identity for a given room, so that users can use them to authenticate against LiveKit SFU.
+This service is used for two reasons:
+- generate JWT tokens with a given LiveKit identity for a given LiveKit room, so that users can use them to authenticate against LiveKit SFU,
+- In case of local Matrix users which belong to the same deployment, the corresponding LiveKit room on the SFU will be created if necessary.
 
 It works by allowing a token obtained via the Matrix Client-Server API [OpenID endpoint](https://spec.matrix.org/v1.13/client-server-api/#openid) to be exchanged for a LiveKit JWT token which can be used to access a LiveKit SFU.
 
 This functionality is defined by [MSC4195: MatrixRTC using LiveKit backend](https://github.com/matrix-org/matrix-spec-proposals/pull/4195).
+
+Only for Matrix users of homeservers belonging to the same deployment (called local users) corresponding rooms on the LiveKit SFU will be automatically created. Hence, local homeservers need to be declared via the `LIVEKIT_FULL_ACCESS_HOMESERVERS` environment variable (see below).
+
+Note access to LiveKit SFU is restricted for remote users (not belonging to the same deployment). Those users can join existing LiveKit SFU rooms, but missing rooms will not be automatically created to prevent misuse of infrastructure. Due to the SFU selection algorithm and the order of events this will NOT limit or prevent video conferences across Matrix federation.
 
 ## Usage
 
@@ -56,6 +62,13 @@ Variable | Description | Required
 `LIVEKIT_SECRET` or `LIVEKIT_SECRET_FROM_FILE` | The secret or secret file path for the LiveKit SFU | Yes
 `LIVEKIT_KEY_FILE` | file path to LiveKit SFU key-file format (`APIkey: secret`) | mutually exclusive with `LIVEKIT_KEY` and `LIVEKIT_SECRET`
 `LIVEKIT_JWT_PORT` | The port the service listens on | No - defaults to 8080
+`LIVEKIT_FULL_ACCESS_HOMESERVERS` | Comma-separated list of Matrix homeservers whose users are authorized with full access to LiveKit SFU features (supports `*` as a wildcard to allow all homeservers) | No - defaults to `*`
+
+Please double check that LiveKit SFU room default settings ([config.yaml](https://github.com/livekit/livekit/blob/7350e9933107ecdea4ada8f8bcb0d6ca78b3f8f7/config-sample.yaml#L170)) are configured as
+```
+room:
+  auto_create: false
+```
 
 ### Reverse Proxy and well-known requirements
 

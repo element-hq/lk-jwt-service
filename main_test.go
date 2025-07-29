@@ -96,10 +96,11 @@ func TestHandlePostMissingParams(t *testing.T) {
 
 func TestHandlePost(t *testing.T) {
 	handler := &Handler{
-		secret:        "testSecret",
-		key:           "testKey",
-		lk_url:        "wss://lk.local:8080/foo",
-		skipVerifyTLS: true,
+		secret:                "testSecret",
+		key:                   "testKey",
+		lkUrl:                 "wss://lk.local:8080/foo",
+		fullAccessHomeservers: []string{"example.com"},
+		skipVerifyTLS:     true,
 	}
 
 	var matrixServerName = ""
@@ -196,19 +197,82 @@ func TestHandlePost(t *testing.T) {
 	}
 }
 
+func TestIsFullAccessUser(t *testing.T) {
+	handler := &Handler{
+		secret:                "testSecret",
+		key:                   "testKey",
+		lkUrl:                 "wss://lk.local:8080/foo",
+		fullAccessHomeservers: []string{"example.com", "another.example.com"},
+		skipVerifyTLS:     true,
+	}
+
+	// Test cases for full access users
+	if handler.isFullAccessUser("example.com") {
+		t.Log("User has full access")
+	} else {
+		t.Error("User has restricted access")
+	}
+
+    if handler.isFullAccessUser("another.example.com") {
+		t.Log("User has full access")
+	} else {
+		t.Error("User has restricted access")
+	}
+
+	// Test cases for restricted access users
+    if handler.isFullAccessUser("aanother.example.com") {
+		t.Error("User has full access")
+	} else {
+		t.Log("User has restricted access")
+	}
+
+    if handler.isFullAccessUser("matrix.example.com") {
+		t.Error("User has full access")
+	} else {
+		t.Log("User has restricted access")
+	}
+
+	// test wildcard access
+	handler.fullAccessHomeservers = []string{"*"}
+    if handler.isFullAccessUser("other.com") {
+		t.Log("User has full access")
+	} else {
+		t.Error("User has restricted access")
+	}
+}
+
 func TestGetJoinToken(t *testing.T) {
 	apiKey := "testKey"
 	apiSecret := "testSecret"
 	room := "testRoom"
 	identity := "testIdentity@example.com"
-
-	token, err := getJoinToken(apiKey, apiSecret, room, identity)
+	
+	tokenString, err := getJoinToken(apiKey, apiSecret, room, identity)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if token == "" {
+	
+	if tokenString == "" {
 		t.Error("expected token to be non-empty")
+	}
+	
+	// parse JWT checking the shared secret
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		return []byte(apiSecret), nil
+	})
+	claims, ok := token.Claims.(jwt.MapClaims)
+	
+	if !ok || !token.Valid {
+		t.Fatalf("failed to parse claims from JWT: %v", err)
+	}
+	
+	claimRoomCreate := claims["video"].(map[string]interface{})["roomCreate"]
+	if claimRoomCreate == nil {
+		claimRoomCreate = false
+	}
+	
+	if claimRoomCreate == true {
+		t.Fatalf("roomCreate property needs to be false, since the lk-jwt-service creates the room")
 	}
 }
 
