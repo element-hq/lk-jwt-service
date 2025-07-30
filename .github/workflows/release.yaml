@@ -28,6 +28,7 @@ jobs:
         with:
           name: build-${{ matrix.os }}-${{ matrix.arch }}
           path: build/lk-jwt-service_${{ matrix.os }}_${{ matrix.arch }}
+          if-no-files-found: error
 
   create-release:
     needs: ["build"]
