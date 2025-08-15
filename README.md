@@ -7,24 +7,12 @@ authentication and room creation when needed.
 
 Matrix user wants to start or join a call?
 
-```mermaid
-flowchart LR
-    A[Matrix User] --> B[Get OpenID Token from Homeserver]
-    B --> C[Send to MatrixRTC Authorization Service]
-    C --> E{Full-Access User?}
-    E -- No --> G[Receive LiveKit JWT]
-    E -- Yes --> F[Trigger LiveKit Room Creation if needed]
-    F --> G
-    G --> H[Connect to LiveKit SFU]
-    H --> I["Real-time Video & Audio with Other Participants 🎥🎤"]
-```
+👤 ➡️ Gets OpenID token ➡️ Sends it to the **MatrixRTC Authorization Service** ➡️
+Receives LiveKit JWT ➡️
 
-👤 ➡️ Gets OpenID token → Sends it to the **MatrixRTC Authorization Service** →
-Receives LiveKit JWT →
-
-- **If full-access user** → Can trigger LiveKit room creation (if needed) →
+- **If full-access user** ➡️ Can trigger LiveKit room creation (if needed) ➡️
   Joins the call 🎉
-- **If restricted user** → Can join existing rooms → Joins the call 🎉
+- **If restricted user** ➡️ Can join existing rooms ➡️ Joins the call 🎉
 
 📡 Once connected, the LiveKit SFU handles all real-time media routing so
 participants can see and hear each other.
