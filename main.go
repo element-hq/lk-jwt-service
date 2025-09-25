@@ -11,7 +11,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -130,7 +129,7 @@ func exchangeOpenIdUserInfo(
 	if skipVerifyTLS {
 		log.Printf("!!! WARNING !!! Skipping TLS verification for matrix client connection to %s", token.MatrixServerName)
 		// Disable TLS verification on the default HTTP Transport for the well-known lookup
-		http.DefaultTransport.(*http.Transport).TLSClientConfig  = &tls.Config{ InsecureSkipVerify: true }
+		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
 
@@ -163,7 +162,6 @@ func (h *Handler) prepareMux() *http.ServeMux {
 
 	return mux
 }
-
 
 func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Health check from %s", r.RemoteAddr)
@@ -244,7 +242,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
 		lkIdentity := userInfo.Sub + ":" + sfuAccessRequest.DeviceID
-		token, err := getJoinToken(h.key, h.secret, sfuAccessRequest.Room, lkIdentity)		
+		token, err := getJoinToken(h.key, h.secret, sfuAccessRequest.Room, lkIdentity)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			err = json.NewEncoder(w).Encode(gomatrix.RespError{
@@ -262,16 +260,16 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			creationStart := time.Now().Unix()
 			room, err := roomClient.CreateRoom(
 				context.Background(), &livekit.CreateRoomRequest{
-					Name: sfuAccessRequest.Room,
-					EmptyTimeout: 5 * 60, // 5 Minutes to keep the room open if no one joins
-					DepartureTimeout: 20, // number of seconds to keep the room after everyone leaves 
-					MaxParticipants: 0,   // 0 == no limitation
+					Name:             sfuAccessRequest.Room,
+					EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
+					DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
+					MaxParticipants:  0,      // 0 == no limitation
 				},
 			)
 
 			if err != nil {
 				log.Printf("Unable to create room %s. Error message: %v", sfuAccessRequest.Room, err)
-				
+
 				w.WriteHeader(http.StatusInternalServerError)
 				err = json.NewEncoder(w).Encode(gomatrix.RespError{
 					ErrCode: "M_UNKNOWN",
@@ -284,11 +282,11 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Log the room creation time and the user info
-			isNewRoom := room.GetCreationTime() >= creationStart && room.GetCreationTime() <=  time.Now().Unix()
+			isNewRoom := room.GetCreationTime() >= creationStart && room.GetCreationTime() <= time.Now().Unix()
 			log.Printf(
 				"%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
 				map[bool]string{true: "Created", false: "Using"}[isNewRoom],
-				room.Sid, sfuAccessRequest.Room, userInfo.Sub , lkIdentity,
+				room.Sid, sfuAccessRequest.Room, userInfo.Sub, lkIdentity,
 			)
 		}
 
@@ -323,7 +321,7 @@ func main() {
 	}
 
 	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
-	
+
 	if len(fullAccessHomeservers) == 0 {
 		// For backward compatibility we also check for LIVEKIT_LOCAL_HOMESERVERS
 		// TODO: Remove this backward compatibility in the near future.
@@ -339,12 +337,12 @@ func main() {
 		}
 	}
 
-	lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
-	if lkJwtPort == "" {
-		lkJwtPort = "8080"
+	lkJwtBind := os.Getenv("LIVEKIT_JWT_BIND")
+	if lkJwtBind == "" {
+		lkJwtBind = ":8080"
 	}
 
-	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_PORT: %s", lkUrl, lkJwtPort)
+	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_BIND: %s", lkUrl, lkJwtBind)
 	log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS: %v", fullAccessHomeservers)
 
 	handler := &Handler{
@@ -355,5 +353,5 @@ func main() {
 		fullAccessHomeservers: strings.Split(fullAccessHomeservers, ","),
 	}
 
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lkJwtPort), handler.prepareMux()))
+	log.Fatal(http.ListenAndServe(lkJwtBind, handler.prepareMux()))
 }
