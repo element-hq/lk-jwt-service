@@ -131,6 +131,7 @@ Set environment variables to configure the service:
 | `LIVEKIT_SECRET` / `LIVEKIT_SECRET_FROM_FILE` | API secret or file path for LiveKit SFU                            | ✅ Yes                                                       |
 | `LIVEKIT_KEY_FILE`                            | File path with `APIkey: secret` format                             | ⚠️ mutually exclusive with `LIVEKIT_KEY` and `LIVEKIT_SECRET` |
 | `LIVEKIT_JWT_BIND`                            | Address to bind the server to (default: `:8080`)                                | ❌ No                                                        |
+| `LIVEKIT_JWT_PORT`                            | Port to bind the server to (default: `8080`)                                | ⚠️ Ignored if used in combination with `LIVEKIT_JWT_BIND`                                                        |
 | `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of fully authorized homeservers (`*` for all) | ❌ Default: `*`                                              |
 
 > [!IMPORTANT]

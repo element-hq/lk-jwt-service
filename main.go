@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -339,7 +340,12 @@ func main() {
 
 	lkJwtBind := os.Getenv("LIVEKIT_JWT_BIND")
 	if lkJwtBind == "" {
-		lkJwtBind = ":8080"
+		lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
+		if lkJwtPort == "" {
+			lkJwtPort = "8080"
+		}
+
+		lkJwtBind = fmt.Sprintf(":%s", lkJwtPort)
 	}
 
 	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_BIND: %s", lkUrl, lkJwtBind)
