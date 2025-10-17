@@ -339,8 +339,9 @@ func main() {
 	}
 
 	lkJwtBind := os.Getenv("LIVEKIT_JWT_BIND")
+	lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
+
 	if lkJwtBind == "" {
-		lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
 		if lkJwtPort == "" {
 			lkJwtPort = "8080"
 		} else {
@@ -348,6 +349,8 @@ func main() {
 		}
 
 		lkJwtBind = fmt.Sprintf(":%s", lkJwtPort)
+	} else if lkJwtPort != "" {
+		log.Fatal("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables must not be set together")
 	}
 
 	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_BIND: %s", lkUrl, lkJwtBind)
