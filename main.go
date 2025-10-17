@@ -343,6 +343,8 @@ func main() {
 		lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
 		if lkJwtPort == "" {
 			lkJwtPort = "8080"
+		} else {
+			log.Printf("!!! LIVEKIT_JWT_PORT is deprecated, please use LIVEKIT_JWT_BIND instead !!!")
 		}
 
 		lkJwtBind = fmt.Sprintf(":%s", lkJwtPort)
