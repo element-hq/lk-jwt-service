@@ -2,7 +2,7 @@ module lk-jwt-service
 
 go 1.23.0
 
-toolchain go1.24.5
+toolchain go1.25.3
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
