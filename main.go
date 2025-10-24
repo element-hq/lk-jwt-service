@@ -20,6 +20,10 @@ import (
 
 	"time"
 
+	"lk-jwt-service/version"
+
+	"github.com/urfave/cli/v3"
+
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -304,7 +308,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func main() {
+func startServer(_ context.Context, c *cli.Command) error {
 	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
 	if skipVerifyTLS {
 		log.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
@@ -356,4 +360,23 @@ func main() {
 	}
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", lkJwtPort), handler.prepareMux()))
+
+    return nil
+}
+
+func main() {
+
+	//version := "0.3.0"
+
+	cmd := &cli.Command{
+		Name:        "lk-jwt-service",
+		Usage:       "MatrixRTC Authorization Service",
+		Description: "run without subcommands to start the server",
+		Action:      startServer,
+		Version:     version.Version,
+	}
+
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
+		fmt.Println(err)
+	}
 }
