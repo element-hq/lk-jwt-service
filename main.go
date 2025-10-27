@@ -281,6 +281,7 @@ func readKeySecret() (string, string) {
 			if len(keySecrets) != 2 {
 				log.Fatalf("invalid key secret file format!")
 			}
+			log.Printf("Using LiveKit API key and API secret from LIVEKIT_KEY_FILE")
 			key = keySecrets[0]
 			secret = keySecrets[1]
 		}
@@ -291,6 +292,7 @@ func readKeySecret() (string, string) {
 			if keyBytes, err := os.ReadFile(keyPath); err != nil {
 				log.Fatal(err)
 			} else {
+				log.Printf("Using LiveKit API key from LIVEKIT_KEY_FROM_FILE")
 				key = string(keyBytes)
 			}
 		}
@@ -299,6 +301,7 @@ func readKeySecret() (string, string) {
 			if secretBytes, err := os.ReadFile(secretPath); err != nil {
 				log.Fatal(err)
 			} else {
+				log.Printf("Using LiveKit API secret from LIVEKIT_SECRET_FROM_FILE")
 				secret = string(secretBytes)
 			}
 		}
