@@ -34,7 +34,14 @@ type Handler struct {
 	fullAccessHomeservers []string
 	skipVerifyTLS         bool
 }
-
+type Config struct {
+	Key                   string
+	Secret                string
+	LkUrl                 string
+	SkipVerifyTLS         bool
+	FullAccessHomeservers []string
+	LkJwtBind               string
+}
 type OpenIDTokenType struct {
 	AccessToken      string `json:"access_token"`
 	TokenType        string `json:"token_type"`
@@ -303,7 +310,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func main() {
+func parseConfig() (*Config, error) {
 	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
 	if skipVerifyTLS {
 		log.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
@@ -316,23 +323,18 @@ func main() {
 	key, secret := readKeySecret()
 	lkUrl := os.Getenv("LIVEKIT_URL")
 
-	// Check if the key, secret or url are empty.
 	if key == "" || secret == "" || lkUrl == "" {
-		log.Fatal("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
+		return nil, fmt.Errorf("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
 	}
 
 	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
 
 	if len(fullAccessHomeservers) == 0 {
-		// For backward compatibility we also check for LIVEKIT_LOCAL_HOMESERVERS
-		// TODO: Remove this backward compatibility in the near future.
 		localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
 		if len(localHomeservers) > 0 {
 			log.Printf("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, please use LIVEKIT_FULL_ACCESS_HOMESERVERS instead !!!")
 			fullAccessHomeservers = localHomeservers
 		} else {
-			// If no full access homeservers are set, we default to wildcard '*' to mimic the previous behavior.
-			// TODO: Remove defaulting to wildcard '*' (aka full-access for all users) in the near future.
 			log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*) for full access")
 			fullAccessHomeservers = "*"
 		}
@@ -347,22 +349,37 @@ func main() {
 		} else {
 			log.Printf("!!! LIVEKIT_JWT_PORT is deprecated, please use LIVEKIT_JWT_BIND instead !!!")
 		}
-
 		lkJwtBind = fmt.Sprintf(":%s", lkJwtPort)
 	} else if lkJwtPort != "" {
-		log.Fatal("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables must not be set together")
+		return nil, fmt.Errorf("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables MUST NOT be set together")
 	}
 
-	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_BIND: %s", lkUrl, lkJwtBind)
-	log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS: %v", fullAccessHomeservers)
+	return &Config{
+		Key:                   key,
+		Secret:                secret,
+		LkUrl:                 lkUrl,
+		SkipVerifyTLS:         skipVerifyTLS,
+		FullAccessHomeservers: strings.Fields(strings.ReplaceAll(fullAccessHomeservers, ",", " ")),
+		LkJwtBind:             lkJwtBind,
+	}, nil
+}
+
+func main() {
+	config, err := parseConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_BIND: %s", config.LkUrl, config.LkJwtBind)
+	log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS: %v", config.FullAccessHomeservers)
 
 	handler := &Handler{
-		key:                   key,
-		secret:                secret,
-		lkUrl:                 lkUrl,
-		skipVerifyTLS:         skipVerifyTLS,
-		fullAccessHomeservers: strings.Split(fullAccessHomeservers, ","),
+		key:                   config.Key,
+		secret:                config.Secret,
+		lkUrl:                 config.LkUrl,
+		skipVerifyTLS:         config.SkipVerifyTLS,
+		fullAccessHomeservers: config.FullAccessHomeservers,
 	}
 
-	log.Fatal(http.ListenAndServe(lkJwtBind, handler.prepareMux()))
+	log.Fatal(http.ListenAndServe(config.LkJwtBind, handler.prepareMux()))
 }
