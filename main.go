@@ -59,54 +59,6 @@ type SFUResponse struct {
 	JWT string `json:"jwt"`
 }
 
-func readKeySecret() (string, string) {
-	// We initialize keys & secrets from environment variables
-	key := os.Getenv("LIVEKIT_KEY")
-	secret := os.Getenv("LIVEKIT_SECRET")
-	// We initialize potential key & secret path from environment variables
-	keyPath := os.Getenv("LIVEKIT_KEY_FROM_FILE")
-	secretPath := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
-	keySecretPath := os.Getenv("LIVEKIT_KEY_FILE")
-
-	// If keySecretPath is set we read the file and split it into two parts
-	// It takes over any other initialization
-	if keySecretPath != "" {
-		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
-			log.Fatal(err)
-		} else {
-			keySecrets := strings.Split(string(keySecretBytes), ":")
-			if len(keySecrets) != 2 {
-				log.Fatalf("invalid key secret file format!")
-			}
-			key = keySecrets[0]
-			secret = keySecrets[1]
-		}
-	} else {
-		// If keySecretPath is not set, we try to read the key and secret from files
-		// If those files are not set, we return the key & secret from the environment variables
-		if keyPath != "" {
-			if keyBytes, err := os.ReadFile(keyPath); err != nil {
-				log.Fatal(err)
-			} else {
-				key = string(keyBytes)
-			}
-		}
-
-		if secretPath != "" {
-			if secretBytes, err := os.ReadFile(secretPath); err != nil {
-				log.Fatal(err)
-			} else {
-				secret = string(secretBytes)
-			}
-		}
-
-	}
-
-	// remove white spaces, new lines and carriage returns
-	// from key and secret
-	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
-}
-
 func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
@@ -308,6 +260,54 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func readKeySecret() (string, string) {
+	// We initialize keys & secrets from environment variables
+	key := os.Getenv("LIVEKIT_KEY")
+	secret := os.Getenv("LIVEKIT_SECRET")
+	// We initialize potential key & secret path from environment variables
+	keyPath := os.Getenv("LIVEKIT_KEY_FROM_FILE")
+	secretPath := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
+	keySecretPath := os.Getenv("LIVEKIT_KEY_FILE")
+
+	// If keySecretPath is set we read the file and split it into two parts
+	// It takes over any other initialization
+	if keySecretPath != "" {
+		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
+			log.Fatal(err)
+		} else {
+			keySecrets := strings.Split(string(keySecretBytes), ":")
+			if len(keySecrets) != 2 {
+				log.Fatalf("invalid key secret file format!")
+			}
+			key = keySecrets[0]
+			secret = keySecrets[1]
+		}
+	} else {
+		// If keySecretPath is not set, we try to read the key and secret from files
+		// If those files are not set, we return the key & secret from the environment variables
+		if keyPath != "" {
+			if keyBytes, err := os.ReadFile(keyPath); err != nil {
+				log.Fatal(err)
+			} else {
+				key = string(keyBytes)
+			}
+		}
+
+		if secretPath != "" {
+			if secretBytes, err := os.ReadFile(secretPath); err != nil {
+				log.Fatal(err)
+			} else {
+				secret = string(secretBytes)
+			}
+		}
+
+	}
+
+	// remove white spaces, new lines and carriage returns
+	// from key and secret
+	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
 func parseConfig() (*Config, error) {
