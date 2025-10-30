@@ -124,14 +124,15 @@ LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret LIVEKIT_LO
 
 Set environment variables to configure the service:
 
-| Variable                                      | Description                                                        | Required                                                     |
-| --------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------ |
-| `LIVEKIT_URL`                                 | WebSocket URL of the LiveKit SFU                                   | ✅ Yes                                                       |
-| `LIVEKIT_KEY` / `LIVEKIT_KEY_FROM_FILE`       | API key or file path for LiveKit SFU                               | ✅ Yes                                                       |
-| `LIVEKIT_SECRET` / `LIVEKIT_SECRET_FROM_FILE` | API secret or file path for LiveKit SFU                            | ✅ Yes                                                       |
-| `LIVEKIT_KEY_FILE`                            | File path with `APIkey: secret` format                             | ⚠️ mutually exclusive with `LIVEKIT_KEY` and `LIVEKIT_SECRET` |
-| `LIVEKIT_JWT_PORT`                            | Port to listen on (default: `8080`)                                | ❌ No                                                        |
-| `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of fully authorized homeservers (`*` for all) | ❌ Default: `*`                                              |
+| Variable                                      | Description                                                   | Required                                             | Default |
+| --------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------- | ------- |
+| `LIVEKIT_URL`                                 | WebSocket URL of the LiveKit SFU                              | ✅ Yes                                               |         |
+| `LIVEKIT_KEY` / `LIVEKIT_KEY_FROM_FILE`       | API key or file path for LiveKit SFU                          | ✅ Yes                                               |         |
+| `LIVEKIT_SECRET` / `LIVEKIT_SECRET_FROM_FILE` | API secret or file path for LiveKit SFU                       | ✅ Yes                                               |         |
+| `LIVEKIT_KEY_FILE`                            | File path with `APIkey: secret` format                        | ⚠️ mutually exclusive with <code>LIVEKIT_{KEY&#124;SECRET}</code>    |         |
+| `LIVEKIT_JWT_BIND`                            | Address to bind the server to                                 | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_PORT` | `:8080` |
+| `LIVEKIT_JWT_PORT`                            | ⚠️ Deprecated Port to bind the server to                      | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_BIND` |         |
+| `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all) | ❌ No                                                | `*`     |
 
 > [!IMPORTANT]
 > By default, the LiveKit SFU auto-creates rooms for all users. To ensure proper
