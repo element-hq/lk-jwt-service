@@ -135,6 +135,86 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
 }
 
+func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
+    if req.Room == "" {
+        return nil, &MatrixErrorResponse{
+			Status: http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err: "Missing parameters",
+		}
+    }
+	
+    // TODO: we should be sanitising the input here before using it
+    // e.g. only allowing `https://` URL scheme
+    userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+    if err != nil {
+		return nil, &MatrixErrorResponse{
+			Status: http.StatusInternalServerError,
+			ErrCode: "M_LOOKUP_FAILED",
+			Err: "Failed to look up user info from homeserver",
+		}
+    }
+
+    isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
+
+    log.Printf(
+        "Got Matrix user info for %s (%s)",
+        userInfo.Sub,
+        map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
+    )
+
+    // TODO: is DeviceID required? If so then we should have validated at the start
+    lkIdentity := userInfo.Sub + ":" + req.DeviceID
+    token, err := getJoinToken(h.key, h.secret, req.Room, lkIdentity)
+    if err != nil {
+		return nil, &MatrixErrorResponse{
+			Status: http.StatusInternalServerError,
+			ErrCode: "M_UNKNOWN",
+			Err: "Internal Server Error",
+		}
+    }
+
+    if isFullAccessUser {
+        if err := h.createLiveKitRoom(r.Context(), req.Room, userInfo.Sub, lkIdentity); err != nil {
+			return nil, &MatrixErrorResponse{
+				Status: http.StatusInternalServerError,
+				ErrCode: "M_UNKNOWN",
+				Err: "Unable to create room on SFU",
+			}
+        }
+    }
+
+    return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
+}
+
+func (h *Handler) createLiveKitRoom(ctx context.Context, room, matrixUser, lkIdentity string) error {
+    roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
+    creationStart := time.Now().Unix()
+    lkRoom, err := roomClient.CreateRoom(
+        ctx,
+        &livekit.CreateRoomRequest{
+            Name:             room,
+            EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
+            DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
+            MaxParticipants:  0,      // 0 == no limitation
+        },
+    )
+
+    if err != nil {
+        return fmt.Errorf("unable to create room %s: %w", room, err)
+    }
+
+    // Log the room creation time and the user info
+    isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
+    log.Printf(
+        "%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
+        map[bool]string{true: "Created", false: "Using"}[isNewRoom],
+        lkRoom.Sid, room, matrixUser, lkIdentity,
+    )
+
+    return nil
+}
+
 func (h *Handler) prepareMux() *http.ServeMux {
 
 	mux := http.NewServeMux()
@@ -169,115 +249,24 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
-		var sfuAccessRequest SFURequest
-		err := json.NewDecoder(r.Body).Decode(&sfuAccessRequest)
-		if err != nil {
-			log.Printf("Error decoding JSON: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			err = json.NewEncoder(w).Encode(gomatrix.RespError{
-				ErrCode: "M_NOT_JSON",
-				Err:     "Error decoding JSON",
-			})
-			if err != nil {
-				log.Printf("failed to encode json error message! %v", err)
-			}
-			return
-		}
+        var sfuAccessRequest SFURequest
+        if err := json.NewDecoder(r.Body).Decode(&sfuAccessRequest); err != nil {
+            log.Printf("Error decoding JSON: %v", err)
+            writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error decoding JSON")
+            return
+        }
 
-		if sfuAccessRequest.Room == "" {
-			log.Printf("Request missing room")
-			w.WriteHeader(http.StatusBadRequest)
-			err = json.NewEncoder(w).Encode(gomatrix.RespError{
-				ErrCode: "M_BAD_JSON",
-				Err:     "Missing parameters",
-			})
-			if err != nil {
-				log.Printf("failed to encode json error message! %v", err)
-			}
-			return
-		}
+        resp, err := h.processSFURequest(r, &sfuAccessRequest)
+		matrixErr := &MatrixErrorResponse{}
+		if errors.As(err, &matrixErr) {
+            log.Printf("Error processing request: %v", matrixErr.Err)
+            writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+        }
 
-		// TODO: we should be sanitising the input here before using it
-		// e.g. only allowing `https://` URL scheme
-		userInfo, err := exchangeOpenIdUserInfo(r.Context(), sfuAccessRequest.OpenIDToken, h.skipVerifyTLS)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			err = json.NewEncoder(w).Encode(gomatrix.RespError{
-				ErrCode: "M_LOOKUP_FAILED",
-				Err:     "Failed to look up user info from homeserver",
-			})
-			if err != nil {
-				log.Printf("failed to encode json error message! %v", err)
-			}
-			return
-		}
-
-		// Does the user belong to homeservers granted full access
-		isFullAccessUser := h.isFullAccessUser(sfuAccessRequest.OpenIDToken.MatrixServerName)
-
-		log.Printf(
-			"Got Matrix user info for %s (%s)",
-			userInfo.Sub,
-			map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
-		)
-
-		// TODO: is DeviceID required? If so then we should have validated at the start of the request processing
-		lkIdentity := userInfo.Sub + ":" + sfuAccessRequest.DeviceID
-		token, err := getJoinToken(h.key, h.secret, sfuAccessRequest.Room, lkIdentity)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			err = json.NewEncoder(w).Encode(gomatrix.RespError{
-				ErrCode: "M_UNKNOWN",
-				Err:     "Internal Server Error",
-			})
-			if err != nil {
-				log.Printf("failed to encode json error message! %v", err)
-			}
-			return
-		}
-
-		if isFullAccessUser {
-			roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
-			creationStart := time.Now().Unix()
-			room, err := roomClient.CreateRoom(
-				context.Background(), &livekit.CreateRoomRequest{
-					Name:             sfuAccessRequest.Room,
-					EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
-					DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
-					MaxParticipants:  0,      // 0 == no limitation
-				},
-			)
-
-			if err != nil {
-				log.Printf("Unable to create room %s. Error message: %v", sfuAccessRequest.Room, err)
-
-				w.WriteHeader(http.StatusInternalServerError)
-				err = json.NewEncoder(w).Encode(gomatrix.RespError{
-					ErrCode: "M_UNKNOWN",
-					Err:     "Unable to create room on SFU",
-				})
-				if err != nil {
-					log.Printf("failed to encode json error message! %v", err)
-				}
-				return
-			}
-
-			// Log the room creation time and the user info
-			isNewRoom := room.GetCreationTime() >= creationStart && room.GetCreationTime() <= time.Now().Unix()
-			log.Printf(
-				"%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
-				map[bool]string{true: "Created", false: "Using"}[isNewRoom],
-				room.Sid, sfuAccessRequest.Room, userInfo.Sub, lkIdentity,
-			)
-		}
-
-		res := SFUResponse{URL: h.lkUrl, JWT: token}
-
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(res)
-		if err != nil {
-			log.Printf("failed to encode json response! %v", err)
-		}
+        w.Header().Set("Content-Type", "application/json")
+        if err := json.NewEncoder(w).Encode(resp); err != nil {
+            log.Printf("failed to encode json response! %v", err)
+        }
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
