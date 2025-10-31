@@ -59,6 +59,27 @@ type SFUResponse struct {
 	JWT string `json:"jwt"`
 }
 
+type MatrixErrorResponse struct {
+	Status  int
+	ErrCode string 
+	Err     string
+}
+
+func (e *MatrixErrorResponse) Error() string { 
+    return e.Err
+}
+
+// writeMatrixError writes a Matrix-style error response to the HTTP response writer.
+func writeMatrixError(w http.ResponseWriter, status int, errCode, errMsg string) {
+    w.WriteHeader(status)
+    if err := json.NewEncoder(w).Encode(gomatrix.RespError{
+        ErrCode: errCode,
+        Err:     errMsg,
+    }); err != nil {
+        log.Printf("failed to encode json error message! %v", err)
+    }
+}
+
 func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
