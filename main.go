@@ -48,7 +48,7 @@ type OpenIDTokenType struct {
 	MatrixServerName string `json:"matrix_server_name"`
 }
 
-type SFURequest struct {
+type LegacySFURequest struct {
 	Room        string          `json:"room"`
 	OpenIDToken OpenIDTokenType `json:"openid_token"`
 	DeviceID    string          `json:"device_id"`
@@ -135,7 +135,7 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
 }
 
-func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
+func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
     if req.Room == "" {
         return nil, &MatrixErrorResponse{
 			Status: http.StatusBadRequest,
