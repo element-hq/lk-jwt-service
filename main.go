@@ -42,6 +42,12 @@ type Config struct {
 	FullAccessHomeservers []string
 	LkJwtBind               string
 }
+type MatrixRTCMemberType struct {
+	ID              string `json:"id"`
+	ClaimedUserID   string `json:"claimed_user_id"`
+	ClaimedDeviceID string `json:"claimed_device_id"`
+}
+
 type OpenIDTokenType struct {
 	AccessToken      string `json:"access_token"`
 	TokenType        string `json:"token_type"`
@@ -54,6 +60,13 @@ type LegacySFURequest struct {
 	DeviceID    string          `json:"device_id"`
 }
 
+type SFURequest struct {
+	RoomID         string              `json:"room_id"`
+	SlotID         string              `json:"slot_id"`
+	OpenIDToken    OpenIDTokenType     `json:"openid_token"`
+	Member         MatrixRTCMemberType `json:"member"`
+	DelayedEventID string              `json:"delayed_event_id"`
+}
 type SFUResponse struct {
 	URL string `json:"url"`
 	JWT string `json:"jwt"`
