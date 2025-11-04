@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -345,6 +346,26 @@ func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func mapSFURequest(data *[]byte) (any, error) {
+	requestTypes := []ValidatableSFURequest{&LegacySFURequest{}, &SFURequest{}}
+	for _, req := range requestTypes {
+		decoder := json.NewDecoder(strings.NewReader(string(*data)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(req); err == nil {
+            if err := req.Validate(); err != nil {
+                return nil, err
+            }			
+			return req, nil
+		}
+	}
+
+	return nil, &MatrixErrorResponse{
+		Status: http.StatusBadRequest,
+		ErrCode: "M_INVALID_PARAM",
+		Err: "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
+	}
+}
+
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
 
@@ -359,22 +380,46 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
-        var sfuAccessRequest SFURequest
-        if err := json.NewDecoder(r.Body).Decode(&sfuAccessRequest); err != nil {
-            log.Printf("Error decoding JSON: %v", err)
-            writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error decoding JSON")
+        // Read request body once for later JSON parsing
+        body, err := io.ReadAll(r.Body)
+        if err != nil {
+            log.Printf("Error reading request body: %v", err)
+            writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
             return
         }
 
-        resp, err := h.processSFURequest(r, &sfuAccessRequest)
-		matrixErr := &MatrixErrorResponse{}
-		if errors.As(err, &matrixErr) {
-            log.Printf("Error processing request: %v", matrixErr.Err)
-            writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-        }
+		var sfuAccessResponse *SFUResponse
+
+		sfuAccessRequest, err := mapSFURequest(&body)
+		if err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				log.Printf("Error processing request: %v", matrixErr.Err)
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+				return
+			}
+		}
+		
+		switch sfuReq := sfuAccessRequest.(type) {
+		case *SFURequest:
+			log.Printf("Processing SFU request")
+			sfuAccessResponse, err = h.processSFURequest(r, sfuReq)
+		case *LegacySFURequest:
+			log.Printf("Processing legacy SFU request")
+			sfuAccessResponse, err = h.processLegacySFURequest(r, sfuReq)
+		}
+
+		if err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				log.Printf("Error processing request: %v", matrixErr.Err)
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+				return
+			}
+		}
 
         w.Header().Set("Content-Type", "application/json")
-        if err := json.NewEncoder(w).Encode(resp); err != nil {
+        if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
             log.Printf("failed to encode json response! %v", err)
         }
 	default:
