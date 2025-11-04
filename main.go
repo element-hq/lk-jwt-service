@@ -201,13 +201,7 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 }
 
 func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
-    if req.Room == "" {
-        return nil, &MatrixErrorResponse{
-			Status: http.StatusBadRequest,
-			ErrCode: "M_BAD_JSON",
-			Err: "Missing parameters",
-		}
-    }
+	// Note LegacySFURequest has already been validated at this point
 	
     // TODO: we should be sanitising the input here before using it
     // e.g. only allowing `https://` URL scheme
