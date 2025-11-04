@@ -235,6 +235,9 @@ func TestMapSFURequest(t *testing.T) {
                 }
             }
         })
+    }
+}
+
 func TestMapSFURequestMemoryLeak(t *testing.T) {
 	const iterations = 100000
 

@@ -165,7 +165,7 @@ func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 	return at.ToJWT()
 }
 
-func exchangeOpenIdUserInfo(
+var exchangeOpenIdUserInfo = func(
 	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
 ) (*fclient.UserInfo, error) {
 	if token.AccessToken == "" || token.MatrixServerName == "" {
@@ -234,7 +234,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
     }
 
     if isFullAccessUser {
-        if err := h.createLiveKitRoom(r.Context(), req.Room, userInfo.Sub, lkIdentity); err != nil {
+        if err := createLiveKitRoom(r.Context(), h, req.Room, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status: http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
@@ -280,7 +280,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
     if isFullAccessUser {
 		// using validated userInfo.Sub in favor of req.Member.ClaimedUserID
-        if err := h.createLiveKitRoom(r.Context(), lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+        if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status: http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
@@ -292,7 +292,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
     return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
 }
 
-func (h *Handler) createLiveKitRoom(ctx context.Context, room, matrixUser, lkIdentity string) error {
+var createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
     roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
     creationStart := time.Now().Unix()
     lkRoom, err := roomClient.CreateRoom(
