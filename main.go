@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -239,6 +240,52 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
     if isFullAccessUser {
         if err := h.createLiveKitRoom(r.Context(), req.Room, userInfo.Sub, lkIdentity); err != nil {
+			return nil, &MatrixErrorResponse{
+				Status: http.StatusInternalServerError,
+				ErrCode: "M_UNKNOWN",
+				Err: "Unable to create room on SFU",
+			}
+        }
+    }
+
+    return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
+}
+
+func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
+	// Note SFURequest has already been validated at this point
+	
+    userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+    if err != nil {
+		return nil, &MatrixErrorResponse{
+			Status: http.StatusUnauthorized,
+			ErrCode: "M_UNAUTHORIZED",
+			Err: "The request could not be authorised.",
+		}
+    }
+
+    isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
+
+	// using validated userInfo.Sub in favor of req.Member.ClaimedUserID
+    log.Printf(
+        "Got Matrix user info for %s (%s)",
+        userInfo.Sub,
+        map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
+    )
+
+    lkIdentity := req.Member.ID
+	lkRoomAlias := fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID)))
+    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
+    if err != nil {
+		return nil, &MatrixErrorResponse{
+			Status: http.StatusInternalServerError,
+			ErrCode: "M_UNKNOWN",
+			Err: "Internal Server Error",
+		}
+    }
+
+    if isFullAccessUser {
+		// using validated userInfo.Sub in favor of req.Member.ClaimedUserID
+        if err := h.createLiveKitRoom(r.Context(), lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status: http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
