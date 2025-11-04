@@ -78,8 +78,58 @@ type MatrixErrorResponse struct {
 	Err     string
 }
 
+type ValidatableSFURequest interface {
+    Validate() error
+}
+
 func (e *MatrixErrorResponse) Error() string { 
     return e.Err
+}
+
+func (r *SFURequest) Validate() error {
+    if r.RoomID == "" || r.SlotID == "" {
+		log.Printf("Missing room_id or slot_id: room_id='%s', slot_id='%s'", r.RoomID, r.SlotID)
+        return &MatrixErrorResponse{
+            Status:  http.StatusBadRequest,
+            ErrCode: "M_INVALID_PARAM",
+            Err:     "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
+        }
+    }
+    if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
+        log.Printf("Missing member parameters: %+v", r.Member)
+        return &MatrixErrorResponse{
+            Status:  http.StatusBadRequest,
+            ErrCode: "M_INVALID_PARAM",
+            Err:     "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
+        }
+    }
+    if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
+		log.Printf("Missing OpenID token parameters: %+v", r.OpenIDToken)
+        return &MatrixErrorResponse{
+            Status:  http.StatusBadRequest,
+            ErrCode: "M_INVALID_PARAM",
+            Err:     "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
+        }
+    }
+    return nil
+}
+
+func (r *LegacySFURequest) Validate() error {
+    if r.Room == "" {
+        return &MatrixErrorResponse{
+            Status:  http.StatusBadRequest,
+            ErrCode: "M_INVALID_PARAM",
+            Err:     "Missing room parameter",
+        }
+    }
+    if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
+        return &MatrixErrorResponse{
+            Status:  http.StatusBadRequest,
+            ErrCode: "M_INVALID_PARAM",
+            Err:     "Missing OpenID token parameters",
+        }
+    }
+    return nil
 }
 
 // writeMatrixError writes a Matrix-style error response to the HTTP response writer.
