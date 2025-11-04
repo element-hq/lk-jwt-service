@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -234,7 +235,49 @@ func TestMapSFURequest(t *testing.T) {
                 }
             }
         })
-    }
+func TestMapSFURequestMemoryLeak(t *testing.T) {
+	const iterations = 100000
+
+	input := []byte(`{
+		"room_id": "!testRoom:example.com",
+		"slot_id": "123",
+		"openid_token": {
+			"access_token": "test_token",
+			"token_type": "Bearer",
+			"matrix_server_name": "example.com"
+		},
+		"member": {
+			"id": "test_id",
+			"claimed_user_id": "@test:example.com",
+			"claimed_device_id": "testDevice"
+		}
+	}`)
+
+	// Force a garbage collection to start from a clean slate.
+	var mStart, mEnd runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&mStart)
+
+	for i := 0; i < iterations; i++ {
+		_, err := mapSFURequest(&input)
+		if err != nil {
+			t.Fatalf("unexpected error in mapSFURequest iteration %d: %v", i, err)
+		}
+	}
+
+	// Force another GC to clear unreferenced memory
+	runtime.GC()
+	runtime.ReadMemStats(&mEnd)
+
+	// Check that allocated heap hasn’t grown unboundedly
+	allocDiff := mEnd.Alloc - mStart.Alloc
+	t.Logf("Heap allocation growth after %d iterations: %d bytes", iterations, allocDiff)
+
+	// Heuristic threshold: less than 1 MB growth across 100k iterations is fine
+	const leakThreshold = 1 * 1024 * 1024 // 1MB
+	if allocDiff > leakThreshold {
+		t.Errorf("Potential memory leak: heap grew by %d bytes (> %d)", allocDiff, leakThreshold)
+	}
 }
 
 func TestHandlePost(t *testing.T) {
