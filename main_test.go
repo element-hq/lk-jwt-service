@@ -144,59 +144,59 @@ func TestHandlePost(t *testing.T) {
 	jsonBody, _ := json.Marshal(testCase)
 
 	req, err := http.NewRequest("POST", "/sfu/get", bytes.NewBuffer(jsonBody))
-	if err != nil {
-		t.Fatal(err)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rr := httptest.NewRecorder()
+		handler.prepareMux().ServeHTTP(rr, req)
+
+		if status := rr.Code; status != http.StatusOK {
+			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+		}
+
+		if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
+			t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
+		}
+
+		var resp SFUResponse
+		err = json.NewDecoder(rr.Body).Decode(&resp)
+		if err != nil {
+			t.Errorf("failed to decode response body %v", err)
+		}
+
+		if resp.URL != "wss://lk.local:8080/foo" {
+			t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
+		}
+
+		if resp.JWT == "" {
+			t.Error("expected JWT to be non-empty")
+		}
+
+		// parse JWT checking the shared secret
+		token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
+			return []byte(handler.secret), nil
+		})
+
+		if err != nil {
+			t.Fatalf("failed to parse JWT: %v", err)
+		}
+
+		claims, ok := token.Claims.(jwt.MapClaims)
+
+		if !ok || !token.Valid {
+			t.Fatalf("failed to parse claims from JWT: %v", err)
+		}
+
+		if claims["sub"] != "@user:"+matrixServerName+":testDevice" {
+			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName+":testDevice")
+		}
+
+		// should have permission for the room
+		if claims["video"].(map[string]interface{})["room"] != "testRoom" {
+			t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
+		}
 	}
-
-	rr := httptest.NewRecorder()
-	handler.prepareMux().ServeHTTP(rr, req)
-
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-	}
-
-	if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
-		t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
-	}
-
-	var resp SFUResponse
-	err = json.NewDecoder(rr.Body).Decode(&resp)
-	if err != nil {
-		t.Errorf("failed to decode response body %v", err)
-	}
-
-	if resp.URL != "wss://lk.local:8080/foo" {
-		t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
-	}
-
-	if resp.JWT == "" {
-		t.Error("expected JWT to be non-empty")
-	}
-
-	// parse JWT checking the shared secret
-	token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
-		return []byte(handler.secret), nil
-	})
-
-	if err != nil {
-		t.Fatalf("failed to parse JWT: %v", err)
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-
-	if !ok || !token.Valid {
-		t.Fatalf("failed to parse claims from JWT: %v", err)
-	}
-
-	if claims["sub"] != "@user:"+matrixServerName+":testDevice" {
-		t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName+":testDevice")
-	}
-
-	// should have permission for the room
-	if claims["video"].(map[string]interface{})["room"] != "testRoom" {
-		t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
-	}
-}
 
 func TestIsFullAccessUser(t *testing.T) {
 	handler := &Handler{
