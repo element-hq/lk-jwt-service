@@ -830,3 +830,112 @@ func TestProcessSFURequest(t *testing.T) {
 
 }
 
+func TestProcessLegacySFURequest(t *testing.T) {
+    // mock createLiveKitRoom
+    var called_createLiveKitRoom bool
+	original_createLiveKitRoom := createLiveKitRoom
+    createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
+        called_createLiveKitRoom = true
+        if room == "" {
+            t.Error("expected room name passed into mock")
+        }
+        return nil
+    }
+    t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
+
+    // mock OpenID lookup
+	var failed_exchangeOpenIdUserInfo bool
+    original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
+    exchangeOpenIdUserInfo = func(ctx context.Context, token OpenIDTokenType, skip bool) (*fclient.UserInfo, error) {
+        if failed_exchangeOpenIdUserInfo {
+			return nil, &MatrixErrorResponse{
+				Status: http.StatusUnauthorized,
+				ErrCode: "M_UNAUTHORIZED",
+				Err: "The request could not be authorised.",
+			}
+        }	
+        return &fclient.UserInfo{Sub: "@mock:example.com"}, nil
+    }
+    t.Cleanup(func() { exchangeOpenIdUserInfo = original_exchangeOpenIdUserInfo })
+
+	type testCase struct {
+		name                       string
+		MatrixID                   string
+		getJoinTokenErr            error
+		expectJoinTokenError       bool
+		expectExchangeOpendIdError bool
+		expectCreateRoomCall       bool
+		expectError                bool
+		exchangeErr                error
+	}
+
+	tests := []testCase{
+		{
+			name:                       "Full access user + all OK",
+			MatrixID:                   "@user:example.com",
+			expectCreateRoomCall:       true,
+			expectError:                false,
+		},
+		{
+			name:                       "Restricted user + all OK",
+			MatrixID:                   "@user:otherdomain.com",
+			expectCreateRoomCall:       false,
+			expectError:                false,
+		},
+		{
+			name:                       "Full access user but exchangeOpenIdUserInfo fails",
+			MatrixID:                   "@user:example.com",
+			expectExchangeOpendIdError: true,
+			exchangeErr:                &MatrixErrorResponse{},
+			expectCreateRoomCall:       false,
+			expectError:                true,
+		},
+		{
+			name:                       "Full access user but getJoinToken fails",
+			MatrixID:                   "@user:example.com",
+			expectJoinTokenError:       true,
+			getJoinTokenErr:            &MatrixErrorResponse{},
+			expectCreateRoomCall:       false,
+			expectError:                true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// --- mock createLiveKitRoom ---
+			called_createLiveKitRoom = false
+			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
+
+		    handler := &Handler{
+				key:                   map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError],
+				secret:                "secret",
+				lkUrl:                 "wss://lk.local:8080/foo",
+				fullAccessHomeservers: []string{"example.com"},
+			}
+
+			req := &LegacySFURequest{
+				Room: "!room:example.com",
+				OpenIDToken: OpenIDTokenType{
+					AccessToken:      "token",
+					MatrixServerName: strings.Split(tc.MatrixID, ":")[1],
+				},
+				DeviceID: "dev",
+			}
+
+			_, err := handler.processLegacySFURequest(&http.Request{}, req)
+			if tc.expectError && err == nil {
+				t.Fatalf("expected error but got nil")
+			}
+			if !tc.expectError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if called_createLiveKitRoom != tc.expectCreateRoomCall {
+				t.Errorf("expected createLiveKitRoom called=%v, got %v", tc.expectCreateRoomCall, called_createLiveKitRoom)
+			}
+
+		})
+	}
+
+
+}
