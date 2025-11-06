@@ -98,191 +98,6 @@ func TestHandlePostMissingParams(t *testing.T) {
 	}
 }
 
-func TestMapSFURequest(t *testing.T) {
-    testCases := []struct {
-        name        string
-        input       string
-        want        any
-        wantErrCode string
-    }{
-        {
-            name: "Valid legacy request",
-            input: `{
-                "room": "testRoom",
-                "openid_token": {
-                    "access_token": "test_token",
-                    "token_type": "Bearer",
-                    "matrix_server_name": "example.com"
-                },
-                "device_id": "testDevice"
-            }`,
-            want: &LegacySFURequest{
-                Room: "testRoom",
-                OpenIDToken: OpenIDTokenType{
-                    AccessToken:      "test_token",
-                    TokenType:        "Bearer",
-                    MatrixServerName: "example.com",
-                },
-                DeviceID: "testDevice",
-            },
-        },
-        {
-            name: "Valid Matrix2 request",
-            input: `{
-                "room_id": "!testRoom:example.com",
-                "slot_id": "123",
-                "openid_token": {
-                    "access_token": "test_token",
-                    "token_type": "Bearer",
-                    "matrix_server_name": "example.com"
-                },
-                "member": {
-                    "id": "test_id",
-                    "claimed_user_id": "@test:example.com",
-                    "claimed_device_id": "testDevice"
-                }
-            }`,
-            want: &SFURequest{
-                RoomID: "!testRoom:example.com",
-                SlotID: "123",
-                OpenIDToken: OpenIDTokenType{
-                    AccessToken:      "test_token",
-                    TokenType:        "Bearer",
-                    MatrixServerName: "example.com",
-                },
-                Member: MatrixRTCMemberType{
-                    ID:              "test_id",
-                    ClaimedUserID:   "@test:example.com",
-                    ClaimedDeviceID: "testDevice",
-                },
-            },
-        },
-        {
-            name:        "Invalid JSON",
-            input:       `{"invalid": json}`,
-            want:        nil,
-            wantErrCode: "M_INVALID_PARAM",
-        },
-        {
-            name:        "Empty request",
-            input:       `{}`,
-            want:        nil,
-			wantErrCode: "M_INVALID_PARAM",
-        },
-        {
-            name: "Invalid legacy request with extra field",
-            input: `{
-                "room": "testRoom",
-                "openid_token": {
-                    "access_token": "test_token",
-                    "token_type": "Bearer",
-                    "matrix_server_name": "example.com"
-                },
-                "device_id": "testDevice",
-                "extra_field": "should_fail"
-            }`,
-            want:        nil,
-            wantErrCode: "M_INVALID_PARAM",
-        },
-    }
-
-    for _, tc := range testCases {
-        t.Run(tc.name, func(t *testing.T) {
-            // Convert string to []byte for input
-            input := []byte(tc.input)
-            
-            // Call mapSFURequest
-            got, err := mapSFURequest(&input)
-
-            // Check error cases
-            if tc.wantErrCode != "" {
-                matrixErr := &MatrixErrorResponse{}
-                if !errors.As(err, &matrixErr) {
-                    t.Errorf("mapSFURequest() error = %v, want MatrixErrorResponse", err)
-                    return
-                }
-                if matrixErr.ErrCode != tc.wantErrCode {
-                    t.Errorf("mapSFURequest() error code = %v, want %v", matrixErr.ErrCode, tc.wantErrCode)
-                }
-                return
-            }
-
-            // Check success cases
-            if err != nil {
-                t.Errorf("mapSFURequest() unexpected error: %v", err)
-                return
-            }
-
-            // Type-specific comparisons
-            switch expected := tc.want.(type) {
-            case *LegacySFURequest:
-                actual, ok := got.(*LegacySFURequest)
-                if !ok {
-                    t.Errorf("mapSFURequest() returned wrong type, got %T, want *LegacySFURequest", got)
-                    return
-                }
-                if !reflect.DeepEqual(actual, expected) {
-                    t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
-                }
-            case *SFURequest:
-                actual, ok := got.(*SFURequest)
-                if !ok {
-                    t.Errorf("mapSFURequest() returned wrong type, got %T, want *SFURequest", got)
-                    return
-                }
-                if !reflect.DeepEqual(actual, expected) {
-                    t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
-                }
-            }
-        })
-    }
-}
-
-func TestMapSFURequestMemoryLeak(t *testing.T) {
-	const iterations = 100000
-
-	input := []byte(`{
-		"room_id": "!testRoom:example.com",
-		"slot_id": "123",
-		"openid_token": {
-			"access_token": "test_token",
-			"token_type": "Bearer",
-			"matrix_server_name": "example.com"
-		},
-		"member": {
-			"id": "test_id",
-			"claimed_user_id": "@test:example.com",
-			"claimed_device_id": "testDevice"
-		}
-	}`)
-
-	// Force a garbage collection to start from a clean slate.
-	var mStart, mEnd runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&mStart)
-
-	for i := 0; i < iterations; i++ {
-		_, err := mapSFURequest(&input)
-		if err != nil {
-			t.Fatalf("unexpected error in mapSFURequest iteration %d: %v", i, err)
-		}
-	}
-
-	// Force another GC to clear unreferenced memory
-	runtime.GC()
-	runtime.ReadMemStats(&mEnd)
-
-	// Check that allocated heap hasn’t grown unboundedly
-	allocDiff := mEnd.Alloc - mStart.Alloc
-	t.Logf("Heap allocation growth after %d iterations: %d bytes", iterations, allocDiff)
-
-	// Heuristic threshold: less than 1 MB growth across 100k iterations is fine
-	const leakThreshold = 1 * 1024 * 1024 // 1MB
-	if allocDiff > leakThreshold {
-		t.Errorf("Potential memory leak: heap grew by %d bytes (> %d)", allocDiff, leakThreshold)
-	}
-}
-
 func TestHandlePost(t *testing.T) {
 	handler := &Handler{
 		secret:                "testSecret",
@@ -707,3 +522,193 @@ func TestParseConfig(t *testing.T) {
         })
     }
 }
+
+func TestMapSFURequest(t *testing.T) {
+    testCases := []struct {
+        name        string
+        input       string
+        want        any
+        wantErrCode string
+    }{
+        {
+            name: "Valid legacy request",
+            input: `{
+                "room": "testRoom",
+                "openid_token": {
+                    "access_token": "test_token",
+                    "token_type": "Bearer",
+                    "matrix_server_name": "example.com"
+                },
+                "device_id": "testDevice"
+            }`,
+            want: &LegacySFURequest{
+                Room: "testRoom",
+                OpenIDToken: OpenIDTokenType{
+                    AccessToken:      "test_token",
+                    TokenType:        "Bearer",
+                    MatrixServerName: "example.com",
+                },
+                DeviceID: "testDevice",
+            },
+        },
+        {
+            name: "Valid Matrix2 request",
+            input: `{
+                "room_id": "!testRoom:example.com",
+                "slot_id": "123",
+                "openid_token": {
+                    "access_token": "test_token",
+                    "token_type": "Bearer",
+                    "matrix_server_name": "example.com"
+                },
+                "member": {
+                    "id": "test_id",
+                    "claimed_user_id": "@test:example.com",
+                    "claimed_device_id": "testDevice"
+                }
+            }`,
+            want: &SFURequest{
+                RoomID: "!testRoom:example.com",
+                SlotID: "123",
+                OpenIDToken: OpenIDTokenType{
+                    AccessToken:      "test_token",
+                    TokenType:        "Bearer",
+                    MatrixServerName: "example.com",
+                },
+                Member: MatrixRTCMemberType{
+                    ID:              "test_id",
+                    ClaimedUserID:   "@test:example.com",
+                    ClaimedDeviceID: "testDevice",
+                },
+            },
+        },
+        {
+            name:        "Invalid JSON",
+            input:       `{"invalid": json}`,
+            want:        nil,
+            wantErrCode: "M_INVALID_PARAM",
+        },
+        {
+            name:        "Empty request",
+            input:       `{}`,
+            want:        nil,
+			wantErrCode: "M_INVALID_PARAM",
+        },
+        {
+            name: "Invalid legacy request with extra field",
+            input: `{
+                "room": "testRoom",
+                "openid_token": {
+                    "access_token": "test_token",
+                    "token_type": "Bearer",
+                    "matrix_server_name": "example.com"
+                },
+                "device_id": "testDevice",
+                "extra_field": "should_fail"
+            }`,
+            want:        nil,
+            wantErrCode: "M_INVALID_PARAM",
+        },
+    }
+
+    for _, tc := range testCases {
+        t.Run(tc.name, func(t *testing.T) {
+            // Convert string to []byte for input
+            input := []byte(tc.input)
+            
+            // Call mapSFURequest
+            got, err := mapSFURequest(&input)
+
+            // Check error cases
+            if tc.wantErrCode != "" {
+                matrixErr := &MatrixErrorResponse{}
+                if !errors.As(err, &matrixErr) {
+                    t.Errorf("mapSFURequest() error = %v, want MatrixErrorResponse", err)
+                    return
+                }
+                if matrixErr.ErrCode != tc.wantErrCode {
+                    t.Errorf("mapSFURequest() error code = %v, want %v", matrixErr.ErrCode, tc.wantErrCode)
+                }
+                return
+            }
+
+            // Check success cases
+            if err != nil {
+                t.Errorf("mapSFURequest() unexpected error: %v", err)
+                return
+            }
+
+            // Type-specific comparisons
+            switch expected := tc.want.(type) {
+            case *LegacySFURequest:
+                actual, ok := got.(*LegacySFURequest)
+                if !ok {
+                    t.Errorf("mapSFURequest() returned wrong type, got %T, want *LegacySFURequest", got)
+                    return
+                }
+                if !reflect.DeepEqual(actual, expected) {
+                    t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
+                }
+            case *SFURequest:
+                actual, ok := got.(*SFURequest)
+                if !ok {
+                    t.Errorf("mapSFURequest() returned wrong type, got %T, want *SFURequest", got)
+                    return
+                }
+                if !reflect.DeepEqual(actual, expected) {
+                    t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
+                }
+            }
+        })
+    }
+}
+
+func TestMapSFURequestMemoryLeak(t *testing.T) {
+	const iterations = 100000
+
+	input := []byte(`{
+		"room_id": "!testRoom:example.com",
+		"slot_id": "123",
+		"openid_token": {
+			"access_token": "test_token",
+			"token_type": "Bearer",
+			"matrix_server_name": "example.com"
+		},
+		"member": {
+			"id": "test_id",
+			"claimed_user_id": "@test:example.com",
+			"claimed_device_id": "testDevice"
+		}
+	}`)
+
+	// Force a garbage collection to start from a clean slate.
+	var mStart, mEnd runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&mStart)
+
+	for i := 0; i < iterations; i++ {
+		_, err := mapSFURequest(&input)
+		if err != nil {
+			t.Fatalf("unexpected error in mapSFURequest iteration %d: %v", i, err)
+		}
+	}
+
+	// Force another GC to clear unreferenced memory
+	runtime.GC()
+	runtime.ReadMemStats(&mEnd)
+
+	t.Logf("Start Alloc: %d bytes, End Alloc: %d bytes", mStart.Alloc, mEnd.Alloc)
+
+	// Check that allocated heap hasn’t grown unboundedly
+	if mEnd.Alloc > mStart.Alloc {
+		allocDiff := mEnd.Alloc - mStart.Alloc
+		t.Logf("Heap allocation growth after %d iterations: %d bytes", iterations, allocDiff)
+
+		// Heuristic threshold: less than 100KB growth across 100k iterations is fine
+		const leakThreshold uint64 = 100 * 1024 // 100KB
+		if allocDiff > leakThreshold {
+			t.Errorf("Potential memory leak: heap grew by %d bytes (> %d)", allocDiff, leakThreshold)
+		}
+	}
+}
+
