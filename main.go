@@ -94,7 +94,7 @@ func (r *SFURequest) Validate() error {
         return &MatrixErrorResponse{
             Status:  http.StatusBadRequest,
             ErrCode: "M_INVALID_PARAM",
-            Err:     "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
+            Err:     "The request body is missing `room_id` or `slot_id`",
         }
     }
     if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
