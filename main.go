@@ -271,6 +271,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	lkRoomAlias := fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID)))
     token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
     if err != nil {
+		log.Printf("Error getting LiveKit token: %v", err)
 		return nil, &MatrixErrorResponse{
 			Status: http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
