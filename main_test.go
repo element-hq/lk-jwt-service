@@ -730,6 +730,7 @@ func TestProcessSFURequest(t *testing.T) {
 
     // mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool
+	var exchangeOpenIdUserInfo_MatrixID string
     original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
     exchangeOpenIdUserInfo = func(ctx context.Context, token OpenIDTokenType, skip bool) (*fclient.UserInfo, error) {
         if failed_exchangeOpenIdUserInfo {
@@ -739,13 +740,14 @@ func TestProcessSFURequest(t *testing.T) {
 				Err: "The request could not be authorised.",
 			}
         }	
-        return &fclient.UserInfo{Sub: "@mock:example.com"}, nil
+        return &fclient.UserInfo{Sub: exchangeOpenIdUserInfo_MatrixID}, nil
     }
     t.Cleanup(func() { exchangeOpenIdUserInfo = original_exchangeOpenIdUserInfo })
 
 	type testCase struct {
 		name                       string
 		MatrixID                   string
+		ClaimedMatrixID            string
 		getJoinTokenErr            error
 		expectJoinTokenError       bool
 		expectExchangeOpendIdError bool
@@ -758,18 +760,21 @@ func TestProcessSFURequest(t *testing.T) {
 		{
 			name:                       "Full access user + all OK",
 			MatrixID:                   "@user:example.com",
+			ClaimedMatrixID:            "@user:example.com",
 			expectCreateRoomCall:       true,
 			expectError:                false,
 		},
 		{
 			name:                       "Restricted user + all OK",
 			MatrixID:                   "@user:otherdomain.com",
+			ClaimedMatrixID:            "@user:otherdomain.com",
 			expectCreateRoomCall:       false,
 			expectError:                false,
 		},
 		{
 			name:                       "Full access user but exchangeOpenIdUserInfo fails",
 			MatrixID:                   "@user:example.com",
+			ClaimedMatrixID:            "@user:example.com",
 			expectExchangeOpendIdError: true,
 			exchangeErr:                &MatrixErrorResponse{},
 			expectCreateRoomCall:       false,
@@ -778,7 +783,17 @@ func TestProcessSFURequest(t *testing.T) {
 		{
 			name:                       "Full access user but getJoinToken fails",
 			MatrixID:                   "@user:example.com",
+			ClaimedMatrixID:            "@user:example.com",
 			expectJoinTokenError:       true,
+			getJoinTokenErr:            &MatrixErrorResponse{},
+			expectCreateRoomCall:       false,
+			expectError:                true,
+		},
+		{
+			name:                       "Full access user but claimed_matrix_id fails",
+			MatrixID:                   "@user:example.com",
+			ClaimedMatrixID:            "@user:faked.com",
+			expectJoinTokenError:       false,
 			getJoinTokenErr:            &MatrixErrorResponse{},
 			expectCreateRoomCall:       false,
 			expectError:                true,
@@ -790,6 +805,7 @@ func TestProcessSFURequest(t *testing.T) {
 			// --- mock createLiveKitRoom ---
 			called_createLiveKitRoom = false
 			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
+			exchangeOpenIdUserInfo_MatrixID = tc.MatrixID
 
 		    handler := &Handler{
 				key:                   map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError],
@@ -803,11 +819,11 @@ func TestProcessSFURequest(t *testing.T) {
 				SlotID: "slot",
 				OpenIDToken: OpenIDTokenType{
 					AccessToken:      "token",
-					MatrixServerName: strings.Split(tc.MatrixID, ":")[1],
+					MatrixServerName: strings.Split(tc.ClaimedMatrixID, ":")[1],
 				},
 				Member: MatrixRTCMemberType{
 					ID:              "device",
-					ClaimedUserID:   tc.MatrixID,
+					ClaimedUserID:   tc.ClaimedMatrixID,
 					ClaimedDeviceID: "dev",
 				},
 			}

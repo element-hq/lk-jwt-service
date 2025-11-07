@@ -203,8 +203,6 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
 	// Note LegacySFURequest has already been validated at this point
 	
-    // TODO: we should be sanitising the input here before using it
-    // e.g. only allowing `https://` URL scheme
     userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
     if err != nil {
 		return nil, &MatrixErrorResponse{
@@ -258,9 +256,18 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
     }
 
+	// Check if validated userInfo.Sub matches req.Member.ClaimedUserID
+	if req.Member.ClaimedUserID != userInfo.Sub {
+		log.Printf("Claimed user ID %s does not match token subject %s", req.Member.ClaimedUserID, userInfo.Sub)
+		return nil, &MatrixErrorResponse{
+			Status: http.StatusUnauthorized,
+			ErrCode: "M_UNAUTHORIZED",
+			Err: "The request could not be authorised.",
+		}
+	}
+
     isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-	// using validated userInfo.Sub in favor of req.Member.ClaimedUserID
     log.Printf(
         "Got Matrix user info for %s (%s)",
         userInfo.Sub,
@@ -280,7 +287,6 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
     }
 
     if isFullAccessUser {
-		// using validated userInfo.Sub in favor of req.Member.ClaimedUserID
         if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status: http.StatusInternalServerError,
