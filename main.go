@@ -135,7 +135,7 @@ func (r *LegacySFURequest) Validate() error {
 }
 
 // writeMatrixError writes a Matrix-style error response to the HTTP response writer.
-func writeMatrixError(w http.ResponseWriter, status int, errCode, errMsg string) {
+func writeMatrixError(w http.ResponseWriter, status int, errCode string, errMsg string) {
     w.WriteHeader(status)
     if err := json.NewEncoder(w).Encode(gomatrix.RespError{
         ErrCode: errCode,
