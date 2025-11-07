@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,6 +139,115 @@ func TestHandlePost(t *testing.T) {
 	matrixServerName = u.Host
 
 	testCase := map[string]interface{}{
+		"room_id": "!testRoom:example.com",
+		"slot_id": "m.call#ROOM",
+		"openid_token": map[string]interface{}{
+			"access_token":       "testAccessToken",
+			"token_type":         "testTokenType",
+			"matrix_server_name": u.Host,
+		},
+		"member": map[string]interface{}{
+			"id":                "member_test_id",
+			"claimed_user_id":   "@user:" + matrixServerName,
+			"claimed_device_id": "testDevice",
+		},
+	}
+
+	jsonBody, _ := json.Marshal(testCase)
+
+	req, err := http.NewRequest("POST", "/get_token", bytes.NewBuffer(jsonBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rr := httptest.NewRecorder()
+		handler.prepareMux().ServeHTTP(rr, req)
+
+		if status := rr.Code; status != http.StatusOK {
+			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+		}
+
+		if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
+			t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
+		}
+
+		var resp SFUResponse
+		err = json.NewDecoder(rr.Body).Decode(&resp)
+		if err != nil {
+			t.Errorf("failed to decode response body %v", err)
+		}
+
+		if resp.URL != "wss://lk.local:8080/foo" {
+			t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
+		}
+
+		if resp.JWT == "" {
+			t.Error("expected JWT to be non-empty")
+		}
+
+		// parse JWT checking the shared secret
+		token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
+			return []byte(handler.secret), nil
+		})
+
+		if err != nil {
+			t.Fatalf("failed to parse JWT: %v", err)
+		}
+
+		claims, ok := token.Claims.(jwt.MapClaims)
+
+		if !ok || !token.Valid {
+			t.Fatalf("failed to parse claims from JWT: %v", err)
+		}
+
+		if claims["sub"] != "member_test_id" {
+			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "member_test_id")
+		}
+
+		// should have permission for the room
+		want_room := fmt.Sprintf("%x", sha256.Sum256([]byte("!testRoom:example.com" + "|" +  "m.call#ROOM")))
+		if claims["video"].(map[string]interface{})["room"] != want_room {
+			t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], want_room)
+		}
+}
+
+func TestLegacyHandlePost(t *testing.T) {
+	handler := &Handler{
+		secret:                "testSecret",
+		key:                   "testKey",
+		lkUrl:                 "wss://lk.local:8080/foo",
+		fullAccessHomeservers: []string{"example.com"},
+		skipVerifyTLS:     true,
+	}
+
+	var matrixServerName = ""
+
+	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Log("Received request")
+		// Inspect the request
+		if r.URL.Path != "/_matrix/federation/v1/openid/userinfo" {
+			t.Errorf("unexpected request path: got %v want %v", r.URL.Path, "/_matrix/federation/v1/openid/userinfo")
+		}
+
+		if accessToken := r.URL.Query().Get("access_token"); accessToken != "testAccessToken" {
+			t.Errorf("unexpected access token: got %v want %v", accessToken, "testAccessToken")
+		}
+
+		// Mock response
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		_, err := fmt.Fprintf(w, `{"sub": "@user:%s"}`, matrixServerName)
+		if err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer testServer.Close()
+
+	u, _ := url.Parse(testServer.URL)
+
+	matrixServerName = u.Host
+
+	testCase := map[string]interface{}{
 		"room": "testRoom",
 		"openid_token": map[string]interface{}{
 			"access_token":       "testAccessToken",
@@ -202,7 +312,7 @@ func TestHandlePost(t *testing.T) {
 		if claims["video"].(map[string]interface{})["room"] != "testRoom" {
 			t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
 		}
-	}
+}
 
 func TestIsFullAccessUser(t *testing.T) {
 	handler := &Handler{
