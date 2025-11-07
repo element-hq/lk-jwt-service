@@ -266,6 +266,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 	}
 
+	// Does the user belong to homeservers granted full access
     isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
     log.Printf(
