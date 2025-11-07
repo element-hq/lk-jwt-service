@@ -323,7 +323,8 @@ var createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, 
 func (h *Handler) prepareMux() *http.ServeMux {
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sfu/get", h.handle)
+	mux.HandleFunc("/sfu/get", h.handle_legacy) // TODO: This is deprecated and will be removed in future versions
+ 	mux.HandleFunc("/get_token", h.handle)
 	mux.HandleFunc("/healthz", h.healthcheck)
 
 	return mux
@@ -340,6 +341,7 @@ func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// TODO: This is deprecated and will be removed in future versions
 func mapSFURequest(data *[]byte) (any, error) {
 	requestTypes := []ValidatableSFURequest{&LegacySFURequest{}, &SFURequest{}}
 	for _, req := range requestTypes {
@@ -360,7 +362,8 @@ func mapSFURequest(data *[]byte) (any, error) {
 	}
 }
 
-func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
+// TODO: This is deprecated and will be removed in future versions
+func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
 
 	// Set the CORS headers
@@ -416,6 +419,61 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
         if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
             log.Printf("failed to encode json response! %v", err)
         }
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
+
+	// Set the CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
+
+	// Handle preflight request (CORS)
+	switch r.Method {
+	case "OPTIONS":
+		w.WriteHeader(http.StatusOK)
+		return
+	case "POST":
+		var sfuAccessRequest SFURequest
+
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&sfuAccessRequest); err == nil {
+			if err := sfuAccessRequest.Validate(); err != nil {
+				matrixErr := &MatrixErrorResponse{}
+				if errors.As(err, &matrixErr) {
+					log.Printf("Error processing request: %v", matrixErr.Err)
+					writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+					return
+				}
+			}
+		} else {
+            log.Printf("Error reading request body: %v", err)
+            writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
+            return
+        }			
+
+		log.Printf("Processing SFU request")
+		sfuAccessResponse, err := h.processSFURequest(r, &sfuAccessRequest)
+
+		if err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				log.Printf("Error processing request: %v", matrixErr.Err)
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+				return
+			}
+		}
+
+        w.Header().Set("Content-Type", "application/json")
+        if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
+            log.Printf("failed to encode json response! %v", err)
+        }
+
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
