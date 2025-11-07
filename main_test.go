@@ -95,8 +95,8 @@ func TestHandlePostMissingParams(t *testing.T) {
 			t.Errorf("failed to decode response body %v", err)
 		}
 
-		if resp.ErrCode != "M_INVALID_PARAM" {
-			t.Errorf("unexpected error code: got %v want %v", resp.ErrCode, "M_INVALID_PARAM")
+		if resp.ErrCode != "M_BAD_JSON" {
+			t.Errorf("unexpected error code: got %v want %v", resp.ErrCode, "M_BAD_JSON")
 		}
 	}
 }
@@ -589,13 +589,13 @@ func TestMapSFURequest(t *testing.T) {
             name:        "Invalid JSON",
             input:       `{"invalid": json}`,
             want:        nil,
-            wantErrCode: "M_INVALID_PARAM",
+            wantErrCode: "M_BAD_JSON",
         },
         {
             name:        "Empty request",
             input:       `{}`,
             want:        nil,
-			wantErrCode: "M_INVALID_PARAM",
+			wantErrCode: "M_BAD_JSON",
         },
         {
             name: "Invalid legacy request with extra field",
@@ -610,7 +610,7 @@ func TestMapSFURequest(t *testing.T) {
                 "extra_field": "should_fail"
             }`,
             want:        nil,
-            wantErrCode: "M_INVALID_PARAM",
+            wantErrCode: "M_BAD_JSON",
         },
     }
 

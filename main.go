@@ -93,7 +93,7 @@ func (r *SFURequest) Validate() error {
 		log.Printf("Missing room_id or slot_id: room_id='%s', slot_id='%s'", r.RoomID, r.SlotID)
         return &MatrixErrorResponse{
             Status:  http.StatusBadRequest,
-            ErrCode: "M_INVALID_PARAM",
+            ErrCode: "M_BAD_JSON",
             Err:     "The request body is missing `room_id` or `slot_id`",
         }
     }
@@ -101,7 +101,7 @@ func (r *SFURequest) Validate() error {
         log.Printf("Missing member parameters: %+v", r.Member)
         return &MatrixErrorResponse{
             Status:  http.StatusBadRequest,
-            ErrCode: "M_INVALID_PARAM",
+            ErrCode: "M_BAD_JSON",
             Err:     "The request body `member` is missing a `id`, `claimed_user_id` or `claimed_device_id`",
         }
     }
@@ -109,7 +109,7 @@ func (r *SFURequest) Validate() error {
 		log.Printf("Missing OpenID token parameters: %+v", r.OpenIDToken)
         return &MatrixErrorResponse{
             Status:  http.StatusBadRequest,
-            ErrCode: "M_INVALID_PARAM",
+            ErrCode: "M_BAD_JSON",
             Err:     "The request body `openid_token` is missing a `access_token` or `matrix_server_name`",
         }
     }
@@ -120,14 +120,14 @@ func (r *LegacySFURequest) Validate() error {
     if r.Room == "" {
         return &MatrixErrorResponse{
             Status:  http.StatusBadRequest,
-            ErrCode: "M_INVALID_PARAM",
+            ErrCode: "M_BAD_JSON",
             Err:     "Missing room parameter",
         }
     }
     if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
         return &MatrixErrorResponse{
             Status:  http.StatusBadRequest,
-            ErrCode: "M_INVALID_PARAM",
+            ErrCode: "M_BAD_JSON",
             Err:     "Missing OpenID token parameters",
         }
     }
@@ -365,7 +365,7 @@ func mapSFURequest(data *[]byte) (any, error) {
 
 	return nil, &MatrixErrorResponse{
 		Status: http.StatusBadRequest,
-		ErrCode: "M_INVALID_PARAM",
+		ErrCode: "M_BAD_JSON",
 		Err: "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
 	}
 }
