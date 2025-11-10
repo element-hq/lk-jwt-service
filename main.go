@@ -374,24 +374,26 @@ func mapSFURequest(data *[]byte) (any, error) {
 func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
 
+	w.Header().Set("Content-Type", "application/json")
+
 	// Set the CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST")
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
-	// Handle preflight request (CORS)
 	switch r.Method {
 	case "OPTIONS":
+		// Handle preflight request (CORS)
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
-        // Read request body once for later JSON parsing
-        body, err := io.ReadAll(r.Body)
-        if err != nil {
-            log.Printf("Error reading request body: %v", err)
-            writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
-            return
-        }
+		// Read request body once for later JSON parsing
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("Error reading request body: %v", err)
+			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
+			return
+		}
 
 		var sfuAccessResponse *SFUResponse
 
@@ -423,10 +425,9 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-        w.Header().Set("Content-Type", "application/json")
-        if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-            log.Printf("failed to encode json response! %v", err)
-        }
+		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
+			log.Printf("failed to encode json response! %v", err)
+		}
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -434,6 +435,8 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
+
+	w.Header().Set("Content-Type", "application/json")
 
 	// Set the CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -477,10 +480,9 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-        w.Header().Set("Content-Type", "application/json")
-        if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-            log.Printf("failed to encode json response! %v", err)
-        }
+		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
+			log.Printf("failed to encode json response! %v", err)
+		}
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
