@@ -69,6 +69,8 @@ type SFURequest struct {
 	OpenIDToken    OpenIDTokenType     `json:"openid_token"`
 	Member         MatrixRTCMemberType `json:"member"`
 	DelayedEventID string              `json:"delayed_event_id"`
+	DelayID        string              `json:"delay_id,omitempty"`
+	DelayTimeout   string              `json:"delay_timeout,omitempty"`
 }
 type SFUResponse struct {
 	URL string `json:"url"`
