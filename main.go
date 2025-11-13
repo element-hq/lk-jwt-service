@@ -54,6 +54,7 @@ type OpenIDTokenType struct {
 	AccessToken      string `json:"access_token"`
 	TokenType        string `json:"token_type"`
 	MatrixServerName string `json:"matrix_server_name"`
+	ExpiresIn        int    `json:"expires_in"`
 }
 
 type LegacySFURequest struct {

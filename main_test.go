@@ -145,6 +145,7 @@ func TestHandlePost(t *testing.T) {
 			"access_token":       "testAccessToken",
 			"token_type":         "testTokenType",
 			"matrix_server_name": u.Host,
+			"expires_in":         3600,
 		},
 		"member": map[string]interface{}{
 			"id":                "member_test_id",
@@ -253,6 +254,7 @@ func TestLegacyHandlePost(t *testing.T) {
 			"access_token":       "testAccessToken",
 			"token_type":         "testTokenType",
 			"matrix_server_name": u.Host,
+			"expires_in":         3600,
 		},
 		"device_id": "testDevice",
 	}
@@ -650,7 +652,8 @@ func TestMapSFURequest(t *testing.T) {
                 "openid_token": {
                     "access_token": "test_token",
                     "token_type": "Bearer",
-                    "matrix_server_name": "example.com"
+                    "matrix_server_name": "example.com",
+                    "expires_in": 3600
                 },
                 "device_id": "testDevice"
             }`,
@@ -660,6 +663,7 @@ func TestMapSFURequest(t *testing.T) {
                     AccessToken:      "test_token",
                     TokenType:        "Bearer",
                     MatrixServerName: "example.com",
+                    ExpiresIn:        3600,
                 },
                 DeviceID: "testDevice",
             },
@@ -672,7 +676,8 @@ func TestMapSFURequest(t *testing.T) {
                 "openid_token": {
                     "access_token": "test_token",
                     "token_type": "Bearer",
-                    "matrix_server_name": "example.com"
+                    "matrix_server_name": "example.com",
+                    "expires_in": 3600
                 },
                 "member": {
                     "id": "test_id",
@@ -687,6 +692,7 @@ func TestMapSFURequest(t *testing.T) {
                     AccessToken:      "test_token",
                     TokenType:        "Bearer",
                     MatrixServerName: "example.com",
+                    ExpiresIn:        3600,
                 },
                 Member: MatrixRTCMemberType{
                     ID:              "test_id",
@@ -714,7 +720,8 @@ func TestMapSFURequest(t *testing.T) {
                 "openid_token": {
                     "access_token": "test_token",
                     "token_type": "Bearer",
-                    "matrix_server_name": "example.com"
+                    "matrix_server_name": "example.com",
+                    "expires_in": 3600
                 },
                 "device_id": "testDevice",
                 "extra_field": "should_fail"
@@ -785,7 +792,8 @@ func TestMapSFURequestMemoryLeak(t *testing.T) {
 		"openid_token": {
 			"access_token": "test_token",
 			"token_type": "Bearer",
-			"matrix_server_name": "example.com"
+			"matrix_server_name": "example.com",
+			"expires_in": 3600
 		},
 		"member": {
 			"id": "test_id",
