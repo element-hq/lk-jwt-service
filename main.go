@@ -318,7 +318,8 @@ func readKeySecret() (string, string) {
 func parseConfig() (*Config, error) {
 	showVersionAndExit := os.Getenv("ACTION") == "VERSION"
 	if showVersionAndExit {
-		log.Printf(version.Version)
+		fmt.Printf("lk-jwt-service version %s", version.Version)
+		fmt.Println()
 		os.Exit(-1)
 	}
 
