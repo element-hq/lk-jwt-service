@@ -70,7 +70,7 @@ type SFURequest struct {
 	Member         MatrixRTCMemberType `json:"member"`
 	DelayedEventID string              `json:"delayed_event_id"`
 	DelayID        string              `json:"delay_id,omitempty"`
-	DelayTimeout   string              `json:"delay_timeout,omitempty"`
+	DelayTimeout   int                 `json:"delay_timeout,omitempty"`
 }
 type SFUResponse struct {
 	URL string `json:"url"`
@@ -79,9 +79,13 @@ type SFUResponse struct {
 
 type MatrixErrorResponse struct {
 	Status  int
-	ErrCode string 
+	ErrCode string
 	Err     string
 }
+
+type LiveKitRoomAlias string
+type LiveKitIdentity string
+
 
 type ValidatableSFURequest interface {
 	Validate() error
@@ -156,7 +160,7 @@ func writeMatrixError(w http.ResponseWriter, status int, errCode string, errMsg 
 	}
 }
 
-func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
+func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identity LiveKitIdentity) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
@@ -166,11 +170,11 @@ func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 		RoomCreate:   false,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
-		Room:         room,
+		Room:         string(room),
 	}
 
 	at.SetVideoGrant(grant).
-		SetIdentity(identity).
+		SetIdentity(string(identity)).
 		SetValidFor(time.Hour)
 
 	return at.ToJWT()
@@ -242,17 +246,17 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 		}
 	}
 
-    if isFullAccessUser {
-        if err := createLiveKitRoom(r.Context(), h, req.Room, userInfo.Sub, lkIdentity); err != nil {
+	if isFullAccessUser {
+		if err := createLiveKitRoom(r.Context(), h, LiveKitRoomAlias(req.Room), userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
-				Status: http.StatusInternalServerError,
+				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
-				Err: "Unable to create room on SFU",
+				Err:     "Unable to create room on SFU",
 			}
-        }
-    }
+		}
+	}
 
-    return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
+	return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
 }
 
 func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
@@ -278,7 +282,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	// Does the user belong to homeservers granted full access
-    isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
+	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
 	log.Printf(
 		"Got Matrix user info for %s (%s)",
@@ -286,17 +290,17 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
 	)
 
-    lkIdentity := req.Member.ID
-	lkRoomAlias := fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID)))
-    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
-    if err != nil {
+	lkIdentity := LiveKitIdentity(req.Member.ID)
+	lkRoomAlias := LiveKitRoomAlias(fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID+"|"+req.SlotID))))
+	token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
+	if err != nil {
 		log.Printf("Error getting LiveKit token: %v", err)
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusInternalServerError,
+			Status:  http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
-			Err: "Internal Server Error",
+			Err:     "Internal Server Error",
 		}
-    }
+	}
 
 	if isFullAccessUser {
 		if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
@@ -311,32 +315,32 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
     return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
 }
 
-var createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
-    roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
-    creationStart := time.Now().Unix()
-    lkRoom, err := roomClient.CreateRoom(
-        ctx,
-        &livekit.CreateRoomRequest{
-            Name:             room,
-            EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
-            DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
-            MaxParticipants:  0,      // 0 == no limitation
-        },
-    )
+var createLiveKitRoom = func(ctx context.Context, h *Handler, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+	roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
+	creationStart := time.Now().Unix()
+	lkRoom, err := roomClient.CreateRoom(
+		ctx,
+		&livekit.CreateRoomRequest{
+			Name:             string(room),
+			EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
+			DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
+			MaxParticipants:  0,      // 0 == no limitation
+		},
+	)
 
-    if err != nil {
-        return fmt.Errorf("unable to create room %s: %w", room, err)
-    }
+	if err != nil {
+		return fmt.Errorf("unable to create room %s: %w", room, err)
+	}
 
-    // Log the room creation time and the user info
-    isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
-    log.Printf(
-        "%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
-        map[bool]string{true: "Created", false: "Using"}[isNewRoom],
-        lkRoom.Sid, room, matrixUser, lkIdentity,
-    )
+	// Log the room creation time and the user info
+	isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
+	log.Printf(
+		"%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
+		map[bool]string{true: "Created", false: "Using"}[isNewRoom],
+		lkRoom.Sid, room, matrixUser, lkIdentity,
+	)
 
-    return nil
+	return nil
 }
 
 func (h *Handler) prepareMux() *http.ServeMux {

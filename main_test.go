@@ -363,9 +363,9 @@ func TestIsFullAccessUser(t *testing.T) {
 func TestGetJoinToken(t *testing.T) {
 	apiKey := "testKey"
 	apiSecret := "testSecret"
-	room := "testRoom"
-	identity := "testIdentity@example.com"
-	
+	room := LiveKitRoomAlias("testRoom")
+	identity := LiveKitIdentity("testIdentity@example.com")
+
 	tokenString, err := getJoinToken(apiKey, apiSecret, room, identity)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
