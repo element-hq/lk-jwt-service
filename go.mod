@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.25.3
 
 require (
-	github.com/golang-jwt/jwt/v5 v5.2.2
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/livekit/protocol v1.34.0
 	github.com/livekit/server-sdk-go/v2 v2.5.0
 	github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
