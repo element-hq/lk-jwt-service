@@ -111,7 +111,7 @@ mv lk-jwt-service-0.3.0 lk-jwt-service
 
 ```shell
 cd lk-jwt-service
-go build -o lk-jwt-service .
+go build -o lk-jwt-service -ldflags="-X main.version=$(git describe --always --tags --dirty)" .
 ```
 
 3. Run locally:

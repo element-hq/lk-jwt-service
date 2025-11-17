@@ -85,6 +85,8 @@ type ValidatableSFURequest interface {
     Validate() error
 }
 
+var version = "undefined"
+
 func (e *MatrixErrorResponse) Error() string { 
     return e.Err
 }
@@ -542,6 +544,13 @@ func readKeySecret() (string, string) {
 }
 
 func parseConfig() (*Config, error) {
+	showVersionAndExit := os.Getenv("ACTION") == "VERSION"
+	if showVersionAndExit {
+		fmt.Printf("lk-jwt-service version %s", version)
+		fmt.Println()
+		os.Exit(-1)
+	}
+
 	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
 	if skipVerifyTLS {
 		log.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
