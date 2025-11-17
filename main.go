@@ -20,8 +20,6 @@ import (
 
 	"time"
 
-	"lk-jwt-service/version"
-
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -60,6 +58,8 @@ type SFUResponse struct {
 	URL string `json:"url"`
 	JWT string `json:"jwt"`
 }
+
+var version = "undefined"
 
 func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
@@ -318,7 +318,7 @@ func readKeySecret() (string, string) {
 func parseConfig() (*Config, error) {
 	showVersionAndExit := os.Getenv("ACTION") == "VERSION"
 	if showVersionAndExit {
-		fmt.Printf("lk-jwt-service version %s", version.Version)
+		fmt.Printf("lk-jwt-service version %s", version)
 		fmt.Println()
 		os.Exit(-1)
 	}
