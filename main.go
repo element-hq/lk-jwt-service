@@ -42,7 +42,7 @@ type Config struct {
 	LkUrl                 string
 	SkipVerifyTLS         bool
 	FullAccessHomeservers []string
-	LkJwtBind               string
+	LkJwtBind             string
 }
 type MatrixRTCMemberType struct {
 	ID              string `json:"id"`
@@ -347,7 +347,7 @@ func (h *Handler) prepareMux() *http.ServeMux {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sfu/get", h.handle_legacy) // TODO: This is deprecated and will be removed in future versions
- 	mux.HandleFunc("/get_token", h.handle)
+	mux.HandleFunc("/get_token", h.handle)
 	mux.HandleFunc("/healthz", h.healthcheck)
 
 	return mux
@@ -371,9 +371,9 @@ func mapSFURequest(data *[]byte) (any, error) {
 		decoder := json.NewDecoder(strings.NewReader(string(*data)))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(req); err == nil {
-            if err := req.Validate(); err != nil {
-                return nil, err
-            }			
+			if err := req.Validate(); err != nil {
+				return nil, err
+			}
 			return req, nil
 		}
 	}
@@ -381,7 +381,7 @@ func mapSFURequest(data *[]byte) (any, error) {
 	return nil, &MatrixErrorResponse{
 		Status:  http.StatusBadRequest,
 		ErrCode: "M_BAD_JSON",
-		Err: "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
+		Err:     "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
 	}
 }
 
