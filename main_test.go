@@ -108,7 +108,7 @@ func TestHandlePost(t *testing.T) {
 		key:                   "testKey",
 		lkUrl:                 "wss://lk.local:8080/foo",
 		fullAccessHomeservers: []string{"example.com"},
-		skipVerifyTLS:     true,
+		skipVerifyTLS:         true,
 	}
 
 	var matrixServerName = ""
@@ -157,59 +157,59 @@ func TestHandlePost(t *testing.T) {
 	jsonBody, _ := json.Marshal(testCase)
 
 	req, err := http.NewRequest("POST", "/get_token", bytes.NewBuffer(jsonBody))
-		if err != nil {
-			t.Fatal(err)
-		}
+	if err != nil {
+		t.Fatal(err)
+	}
 
-		rr := httptest.NewRecorder()
-		handler.prepareMux().ServeHTTP(rr, req)
+	rr := httptest.NewRecorder()
+	handler.prepareMux().ServeHTTP(rr, req)
 
-		if status := rr.Code; status != http.StatusOK {
-			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-		}
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
 
-		if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
-			t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
-		}
+	if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
+	}
 
-		var resp SFUResponse
-		err = json.NewDecoder(rr.Body).Decode(&resp)
-		if err != nil {
-			t.Errorf("failed to decode response body %v", err)
-		}
+	var resp SFUResponse
+	err = json.NewDecoder(rr.Body).Decode(&resp)
+	if err != nil {
+		t.Errorf("failed to decode response body %v", err)
+	}
 
-		if resp.URL != "wss://lk.local:8080/foo" {
-			t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
-		}
+	if resp.URL != "wss://lk.local:8080/foo" {
+		t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
+	}
 
-		if resp.JWT == "" {
-			t.Error("expected JWT to be non-empty")
-		}
+	if resp.JWT == "" {
+		t.Error("expected JWT to be non-empty")
+	}
 
-		// parse JWT checking the shared secret
-		token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
-			return []byte(handler.secret), nil
-		})
+	// parse JWT checking the shared secret
+	token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
+		return []byte(handler.secret), nil
+	})
 
-		if err != nil {
-			t.Fatalf("failed to parse JWT: %v", err)
-		}
+	if err != nil {
+		t.Fatalf("failed to parse JWT: %v", err)
+	}
 
-		claims, ok := token.Claims.(jwt.MapClaims)
+	claims, ok := token.Claims.(jwt.MapClaims)
 
-		if !ok || !token.Valid {
-			t.Fatalf("failed to parse claims from JWT: %v", err)
-		}
+	if !ok || !token.Valid {
+		t.Fatalf("failed to parse claims from JWT: %v", err)
+	}
 
-		if claims["sub"] != "member_test_id" {
-			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "member_test_id")
-		}
+	if claims["sub"] != "member_test_id" {
+		t.Errorf("unexpected sub: got %v want %v", claims["sub"], "member_test_id")
+	}
 
-		// should have permission for the room
-		want_room := fmt.Sprintf("%x", sha256.Sum256([]byte("!testRoom:example.com" + "|" +  "m.call#ROOM")))
-		if claims["video"].(map[string]interface{})["room"] != want_room {
-			t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], want_room)
-		}
+	// should have permission for the room
+	want_room := fmt.Sprintf("%x", sha256.Sum256([]byte("!testRoom:example.com"+"|"+"m.call#ROOM")))
+	if claims["video"].(map[string]interface{})["room"] != want_room {
+		t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], want_room)
+	}
 }
 
 func TestLegacyHandlePost(t *testing.T) {
@@ -218,7 +218,7 @@ func TestLegacyHandlePost(t *testing.T) {
 		key:                   "testKey",
 		lkUrl:                 "wss://lk.local:8080/foo",
 		fullAccessHomeservers: []string{"example.com"},
-		skipVerifyTLS:     true,
+		skipVerifyTLS:         true,
 	}
 
 	var matrixServerName = ""
@@ -262,58 +262,58 @@ func TestLegacyHandlePost(t *testing.T) {
 	jsonBody, _ := json.Marshal(testCase)
 
 	req, err := http.NewRequest("POST", "/sfu/get", bytes.NewBuffer(jsonBody))
-		if err != nil {
-			t.Fatal(err)
-		}
+	if err != nil {
+		t.Fatal(err)
+	}
 
-		rr := httptest.NewRecorder()
-		handler.prepareMux().ServeHTTP(rr, req)
+	rr := httptest.NewRecorder()
+	handler.prepareMux().ServeHTTP(rr, req)
 
-		if status := rr.Code; status != http.StatusOK {
-			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-		}
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
 
-		if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
-			t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
-		}
+	if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
+	}
 
-		var resp SFUResponse
-		err = json.NewDecoder(rr.Body).Decode(&resp)
-		if err != nil {
-			t.Errorf("failed to decode response body %v", err)
-		}
+	var resp SFUResponse
+	err = json.NewDecoder(rr.Body).Decode(&resp)
+	if err != nil {
+		t.Errorf("failed to decode response body %v", err)
+	}
 
-		if resp.URL != "wss://lk.local:8080/foo" {
-			t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
-		}
+	if resp.URL != "wss://lk.local:8080/foo" {
+		t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
+	}
 
-		if resp.JWT == "" {
-			t.Error("expected JWT to be non-empty")
-		}
+	if resp.JWT == "" {
+		t.Error("expected JWT to be non-empty")
+	}
 
-		// parse JWT checking the shared secret
-		token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
-			return []byte(handler.secret), nil
-		})
+	// parse JWT checking the shared secret
+	token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
+		return []byte(handler.secret), nil
+	})
 
-		if err != nil {
-			t.Fatalf("failed to parse JWT: %v", err)
-		}
+	if err != nil {
+		t.Fatalf("failed to parse JWT: %v", err)
+	}
 
-		claims, ok := token.Claims.(jwt.MapClaims)
+	claims, ok := token.Claims.(jwt.MapClaims)
 
-		if !ok || !token.Valid {
-			t.Fatalf("failed to parse claims from JWT: %v", err)
-		}
+	if !ok || !token.Valid {
+		t.Fatalf("failed to parse claims from JWT: %v", err)
+	}
 
-		if claims["sub"] != "@user:"+matrixServerName+":testDevice" {
-			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName+":testDevice")
-		}
+	if claims["sub"] != "@user:"+matrixServerName+":testDevice" {
+		t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName+":testDevice")
+	}
 
-		// should have permission for the room
-		if claims["video"].(map[string]interface{})["room"] != "testRoom" {
-			t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
-		}
+	// should have permission for the room
+	if claims["video"].(map[string]interface{})["room"] != "testRoom" {
+		t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
+	}
 }
 
 func TestIsFullAccessUser(t *testing.T) {
@@ -322,7 +322,7 @@ func TestIsFullAccessUser(t *testing.T) {
 		key:                   "testKey",
 		lkUrl:                 "wss://lk.local:8080/foo",
 		fullAccessHomeservers: []string{"example.com", "another.example.com"},
-		skipVerifyTLS:     true,
+		skipVerifyTLS:         true,
 	}
 
 	// Test cases for full access users
@@ -332,20 +332,20 @@ func TestIsFullAccessUser(t *testing.T) {
 		t.Error("User has restricted access")
 	}
 
-    if handler.isFullAccessUser("another.example.com") {
+	if handler.isFullAccessUser("another.example.com") {
 		t.Log("User has full access")
 	} else {
 		t.Error("User has restricted access")
 	}
 
 	// Test cases for restricted access users
-    if handler.isFullAccessUser("aanother.example.com") {
+	if handler.isFullAccessUser("aanother.example.com") {
 		t.Error("User has full access")
 	} else {
 		t.Log("User has restricted access")
 	}
 
-    if handler.isFullAccessUser("matrix.example.com") {
+	if handler.isFullAccessUser("matrix.example.com") {
 		t.Error("User has full access")
 	} else {
 		t.Log("User has restricted access")
@@ -353,7 +353,7 @@ func TestIsFullAccessUser(t *testing.T) {
 
 	// test wildcard access
 	handler.fullAccessHomeservers = []string{"*"}
-    if handler.isFullAccessUser("other.com") {
+	if handler.isFullAccessUser("other.com") {
 		t.Log("User has full access")
 	} else {
 		t.Error("User has restricted access")
@@ -370,26 +370,26 @@ func TestGetJoinToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	
+
 	if tokenString == "" {
 		t.Error("expected token to be non-empty")
 	}
-	
+
 	// parse JWT checking the shared secret
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return []byte(apiSecret), nil
 	})
 	claims, ok := token.Claims.(jwt.MapClaims)
-	
+
 	if !ok || !token.Valid {
 		t.Fatalf("failed to parse claims from JWT: %v", err)
 	}
-	
+
 	claimRoomCreate := claims["video"].(map[string]interface{})["roomCreate"]
 	if claimRoomCreate == nil {
 		claimRoomCreate = false
 	}
-	
+
 	if claimRoomCreate == true {
 		t.Fatalf("roomCreate property needs to be false, since the lk-jwt-service creates the room")
 	}
@@ -482,172 +482,172 @@ func TestReadKeySecret(t *testing.T) {
 }
 
 func TestParseConfig(t *testing.T) {
-    testCases := []struct {
-        name        string
-        env         map[string]string
-        wantConfig  *Config
-        wantErrMsg  string
-    }{
-        {
-            name: "Minimal valid config",
-            env: map[string]string{
-                "LIVEKIT_KEY":    "test_key",
-                "LIVEKIT_SECRET": "test_secret",
-                "LIVEKIT_URL":    "wss://test.livekit.cloud",
-            },
-            wantConfig: &Config{
-                Key:                   "test_key",
-                Secret:                "test_secret",
-                LkUrl:                 "wss://test.livekit.cloud",
-                SkipVerifyTLS:         false,
-                FullAccessHomeservers: []string{"*"},
-                LkJwtBind:               ":8080",
-            },
-        },
-        {
-            name: "Full config with all options",
-            env: map[string]string{
-                "LIVEKIT_KEY":                      "test_key",
-                "LIVEKIT_SECRET":                   "test_secret",
-                "LIVEKIT_URL":                      "wss://test.livekit.cloud",
-                "LIVEKIT_FULL_ACCESS_HOMESERVERS":  "example.com, test.com",
-                "LIVEKIT_JWT_BIND":                 ":9090",
-                "LIVEKIT_INSECURE_SKIP_VERIFY_TLS": "YES_I_KNOW_WHAT_I_AM_DOING",
-            },
-            wantConfig: &Config{
-                Key:                   "test_key",
-                Secret:                "test_secret",
-                LkUrl:                 "wss://test.livekit.cloud",
-                SkipVerifyTLS:         true,
-                FullAccessHomeservers: []string{"example.com", "test.com"},
-                LkJwtBind:               ":9090",
-            },
-        },
-        {
-            name: "Legacy port configuration",
-            env: map[string]string{
-                "LIVEKIT_KEY":      "test_key",
-                "LIVEKIT_SECRET":   "test_secret",
-                "LIVEKIT_URL":      "wss://test.livekit.cloud",
-                "LIVEKIT_JWT_PORT": "9090",
-            },
-            wantConfig: &Config{
-                Key:                   "test_key",
-                Secret:                "test_secret",
-                LkUrl:                 "wss://test.livekit.cloud",
-                SkipVerifyTLS:         false,
-                FullAccessHomeservers: []string{"*"},
-                LkJwtBind:             ":9090",
-            },
-        },
-        {
-            name: "Legacy full-access homeservers configuration",
-            env: map[string]string{
-                "LIVEKIT_KEY":               "test_key",
-                "LIVEKIT_SECRET":            "test_secret",
-                "LIVEKIT_URL":               "wss://test.livekit.cloud",
-                "LIVEKIT_LOCAL_HOMESERVERS": "legacy.com",
-            },
-            wantConfig: &Config{
-                Key:                   "test_key",
-                Secret:                "test_secret",
-                LkUrl:                 "wss://test.livekit.cloud",
-                SkipVerifyTLS:         false,
-                FullAccessHomeservers: []string{"legacy.com"},
-                LkJwtBind:               ":8080",
-            },
-        },
-        {
-            name: "Missing required config",
-            env: map[string]string{
-                "LIVEKIT_KEY": "test_key",
-            },
-            wantErrMsg: "LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set",
-        },
-        {
-            name: "Conflicting bind configuration",
-            env: map[string]string{
-                "LIVEKIT_KEY":    "test_key",
-                "LIVEKIT_SECRET": "test_secret",
-                "LIVEKIT_URL":    "wss://test.livekit.cloud",
-                "LIVEKIT_JWT_BIND": ":9090",
-                "LIVEKIT_JWT_PORT": "8080",
-            },
-            wantErrMsg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables MUST NOT be set together",
-        },
-    }
+	testCases := []struct {
+		name       string
+		env        map[string]string
+		wantConfig *Config
+		wantErrMsg string
+	}{
+		{
+			name: "Minimal valid config",
+			env: map[string]string{
+				"LIVEKIT_KEY":    "test_key",
+				"LIVEKIT_SECRET": "test_secret",
+				"LIVEKIT_URL":    "wss://test.livekit.cloud",
+			},
+			wantConfig: &Config{
+				Key:                   "test_key",
+				Secret:                "test_secret",
+				LkUrl:                 "wss://test.livekit.cloud",
+				SkipVerifyTLS:         false,
+				FullAccessHomeservers: []string{"*"},
+				LkJwtBind:             ":8080",
+			},
+		},
+		{
+			name: "Full config with all options",
+			env: map[string]string{
+				"LIVEKIT_KEY":                      "test_key",
+				"LIVEKIT_SECRET":                   "test_secret",
+				"LIVEKIT_URL":                      "wss://test.livekit.cloud",
+				"LIVEKIT_FULL_ACCESS_HOMESERVERS":  "example.com, test.com",
+				"LIVEKIT_JWT_BIND":                 ":9090",
+				"LIVEKIT_INSECURE_SKIP_VERIFY_TLS": "YES_I_KNOW_WHAT_I_AM_DOING",
+			},
+			wantConfig: &Config{
+				Key:                   "test_key",
+				Secret:                "test_secret",
+				LkUrl:                 "wss://test.livekit.cloud",
+				SkipVerifyTLS:         true,
+				FullAccessHomeservers: []string{"example.com", "test.com"},
+				LkJwtBind:             ":9090",
+			},
+		},
+		{
+			name: "Legacy port configuration",
+			env: map[string]string{
+				"LIVEKIT_KEY":      "test_key",
+				"LIVEKIT_SECRET":   "test_secret",
+				"LIVEKIT_URL":      "wss://test.livekit.cloud",
+				"LIVEKIT_JWT_PORT": "9090",
+			},
+			wantConfig: &Config{
+				Key:                   "test_key",
+				Secret:                "test_secret",
+				LkUrl:                 "wss://test.livekit.cloud",
+				SkipVerifyTLS:         false,
+				FullAccessHomeservers: []string{"*"},
+				LkJwtBind:             ":9090",
+			},
+		},
+		{
+			name: "Legacy full-access homeservers configuration",
+			env: map[string]string{
+				"LIVEKIT_KEY":               "test_key",
+				"LIVEKIT_SECRET":            "test_secret",
+				"LIVEKIT_URL":               "wss://test.livekit.cloud",
+				"LIVEKIT_LOCAL_HOMESERVERS": "legacy.com",
+			},
+			wantConfig: &Config{
+				Key:                   "test_key",
+				Secret:                "test_secret",
+				LkUrl:                 "wss://test.livekit.cloud",
+				SkipVerifyTLS:         false,
+				FullAccessHomeservers: []string{"legacy.com"},
+				LkJwtBind:             ":8080",
+			},
+		},
+		{
+			name: "Missing required config",
+			env: map[string]string{
+				"LIVEKIT_KEY": "test_key",
+			},
+			wantErrMsg: "LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set",
+		},
+		{
+			name: "Conflicting bind configuration",
+			env: map[string]string{
+				"LIVEKIT_KEY":      "test_key",
+				"LIVEKIT_SECRET":   "test_secret",
+				"LIVEKIT_URL":      "wss://test.livekit.cloud",
+				"LIVEKIT_JWT_BIND": ":9090",
+				"LIVEKIT_JWT_PORT": "8080",
+			},
+			wantErrMsg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables MUST NOT be set together",
+		},
+	}
 
-    for _, tc := range testCases {
-        t.Run(tc.name, func(t *testing.T) {
-            // Setup: set env variables
-            for k, v := range tc.env {
-                if err := os.Setenv(k, v); err != nil {
-                    t.Fatalf("Failed to set environment variable %s: %v", k, err)
-                }
-            }
-            defer func() {
-                // Cleanup: reset env variables after test
-                for k := range tc.env {
-                    if err := os.Unsetenv(k); err != nil {
-                        t.Errorf("Failed to unset environment variable %s: %v", k, err)
-                    }
-                }
-            }()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Setup: set env variables
+			for k, v := range tc.env {
+				if err := os.Setenv(k, v); err != nil {
+					t.Fatalf("Failed to set environment variable %s: %v", k, err)
+				}
+			}
+			defer func() {
+				// Cleanup: reset env variables after test
+				for k := range tc.env {
+					if err := os.Unsetenv(k); err != nil {
+						t.Errorf("Failed to unset environment variable %s: %v", k, err)
+					}
+				}
+			}()
 
-            // parse config from env variables
-            got, err := parseConfig()
+			// parse config from env variables
+			got, err := parseConfig()
 
-            // Given error(s), check potential error messages
-            if tc.wantErrMsg != "" {
-                if err == nil {
-                    t.Errorf("parseConfig() error = nil, wantErr %q", tc.wantErrMsg)
-                    return
-                }
-                if err.Error() != tc.wantErrMsg {
-                    t.Errorf("parseConfig() error = %q, wantErr %q", err.Error(), tc.wantErrMsg)
-                }
-                return
-            }
+			// Given error(s), check potential error messages
+			if tc.wantErrMsg != "" {
+				if err == nil {
+					t.Errorf("parseConfig() error = nil, wantErr %q", tc.wantErrMsg)
+					return
+				}
+				if err.Error() != tc.wantErrMsg {
+					t.Errorf("parseConfig() error = %q, wantErr %q", err.Error(), tc.wantErrMsg)
+				}
+				return
+			}
 
-            // Given no error, check for unexpected error messages
-            if err != nil {
-                t.Errorf("parseConfig() unexpected error: %v", err)
-                return
-            }
+			// Given no error, check for unexpected error messages
+			if err != nil {
+				t.Errorf("parseConfig() unexpected error: %v", err)
+				return
+			}
 
-            // Compare parsed (got) config with wanted config
-            if got.Key != tc.wantConfig.Key {
-                t.Errorf("Key = %q, want %q", got.Key, tc.wantConfig.Key)
-            }
-            if got.Secret != tc.wantConfig.Secret {
-                t.Errorf("Secret = %q, want %q", got.Secret, tc.wantConfig.Secret)
-            }
-            if got.LkUrl != tc.wantConfig.LkUrl {
-                t.Errorf("LkUrl = %q, want %q", got.LkUrl, tc.wantConfig.LkUrl)
-            }
-            if got.SkipVerifyTLS != tc.wantConfig.SkipVerifyTLS {
-                t.Errorf("SkipVerifyTLS = %v, want %v", got.SkipVerifyTLS, tc.wantConfig.SkipVerifyTLS)
-            }
-            if !reflect.DeepEqual(got.FullAccessHomeservers, tc.wantConfig.FullAccessHomeservers) {
-                t.Errorf("FullAccessHomeservers = %v, want %v", got.FullAccessHomeservers, tc.wantConfig.FullAccessHomeservers)
-            }
-            if got.LkJwtBind != tc.wantConfig.LkJwtBind {
-                t.Errorf("JwtBind = %q, want %q", got.LkJwtBind, tc.wantConfig.LkJwtBind)
-            }
-        })
-    }
+			// Compare parsed (got) config with wanted config
+			if got.Key != tc.wantConfig.Key {
+				t.Errorf("Key = %q, want %q", got.Key, tc.wantConfig.Key)
+			}
+			if got.Secret != tc.wantConfig.Secret {
+				t.Errorf("Secret = %q, want %q", got.Secret, tc.wantConfig.Secret)
+			}
+			if got.LkUrl != tc.wantConfig.LkUrl {
+				t.Errorf("LkUrl = %q, want %q", got.LkUrl, tc.wantConfig.LkUrl)
+			}
+			if got.SkipVerifyTLS != tc.wantConfig.SkipVerifyTLS {
+				t.Errorf("SkipVerifyTLS = %v, want %v", got.SkipVerifyTLS, tc.wantConfig.SkipVerifyTLS)
+			}
+			if !reflect.DeepEqual(got.FullAccessHomeservers, tc.wantConfig.FullAccessHomeservers) {
+				t.Errorf("FullAccessHomeservers = %v, want %v", got.FullAccessHomeservers, tc.wantConfig.FullAccessHomeservers)
+			}
+			if got.LkJwtBind != tc.wantConfig.LkJwtBind {
+				t.Errorf("JwtBind = %q, want %q", got.LkJwtBind, tc.wantConfig.LkJwtBind)
+			}
+		})
+	}
 }
 
 func TestMapSFURequest(t *testing.T) {
-    testCases := []struct {
-        name        string
-        input       string
-        want        any
-        wantErrCode string
-    }{
-        {
-            name: "Valid legacy request",
-            input: `{
+	testCases := []struct {
+		name        string
+		input       string
+		want        any
+		wantErrCode string
+	}{
+		{
+			name: "Valid legacy request",
+			input: `{
                 "room": "testRoom",
                 "openid_token": {
                     "access_token": "test_token",
@@ -657,20 +657,20 @@ func TestMapSFURequest(t *testing.T) {
                 },
                 "device_id": "testDevice"
             }`,
-            want: &LegacySFURequest{
-                Room: "testRoom",
-                OpenIDToken: OpenIDTokenType{
-                    AccessToken:      "test_token",
-                    TokenType:        "Bearer",
-                    MatrixServerName: "example.com",
-                    ExpiresIn:        3600,
-                },
-                DeviceID: "testDevice",
-            },
-        },
-        {
-            name: "Valid Matrix2 request",
-            input: `{
+			want: &LegacySFURequest{
+				Room: "testRoom",
+				OpenIDToken: OpenIDTokenType{
+					AccessToken:      "test_token",
+					TokenType:        "Bearer",
+					MatrixServerName: "example.com",
+					ExpiresIn:        3600,
+				},
+				DeviceID: "testDevice",
+			},
+		},
+		{
+			name: "Valid Matrix2 request",
+			input: `{
                 "room_id": "!testRoom:example.com",
                 "slot_id": "123",
                 "openid_token": {
@@ -685,37 +685,37 @@ func TestMapSFURequest(t *testing.T) {
                     "claimed_device_id": "testDevice"
                 }
             }`,
-            want: &SFURequest{
-                RoomID: "!testRoom:example.com",
-                SlotID: "123",
-                OpenIDToken: OpenIDTokenType{
-                    AccessToken:      "test_token",
-                    TokenType:        "Bearer",
-                    MatrixServerName: "example.com",
-                    ExpiresIn:        3600,
-                },
-                Member: MatrixRTCMemberType{
-                    ID:              "test_id",
-                    ClaimedUserID:   "@test:example.com",
-                    ClaimedDeviceID: "testDevice",
-                },
-            },
-        },
-        {
-            name:        "Invalid JSON",
-            input:       `{"invalid": json}`,
-            want:        nil,
-            wantErrCode: "M_BAD_JSON",
-        },
-        {
-            name:        "Empty request",
-            input:       `{}`,
-            want:        nil,
+			want: &SFURequest{
+				RoomID: "!testRoom:example.com",
+				SlotID: "123",
+				OpenIDToken: OpenIDTokenType{
+					AccessToken:      "test_token",
+					TokenType:        "Bearer",
+					MatrixServerName: "example.com",
+					ExpiresIn:        3600,
+				},
+				Member: MatrixRTCMemberType{
+					ID:              "test_id",
+					ClaimedUserID:   "@test:example.com",
+					ClaimedDeviceID: "testDevice",
+				},
+			},
+		},
+		{
+			name:        "Invalid JSON",
+			input:       `{"invalid": json}`,
+			want:        nil,
 			wantErrCode: "M_BAD_JSON",
-        },
-        {
-            name: "Invalid legacy request with extra field",
-            input: `{
+		},
+		{
+			name:        "Empty request",
+			input:       `{}`,
+			want:        nil,
+			wantErrCode: "M_BAD_JSON",
+		},
+		{
+			name: "Invalid legacy request with extra field",
+			input: `{
                 "room": "testRoom",
                 "openid_token": {
                     "access_token": "test_token",
@@ -726,61 +726,61 @@ func TestMapSFURequest(t *testing.T) {
                 "device_id": "testDevice",
                 "extra_field": "should_fail"
             }`,
-            want:        nil,
-            wantErrCode: "M_BAD_JSON",
-        },
-    }
+			want:        nil,
+			wantErrCode: "M_BAD_JSON",
+		},
+	}
 
-    for _, tc := range testCases {
-        t.Run(tc.name, func(t *testing.T) {
-            // Convert string to []byte for input
-            input := []byte(tc.input)
-            
-            // Call mapSFURequest
-            got, err := mapSFURequest(&input)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Convert string to []byte for input
+			input := []byte(tc.input)
 
-            // Check error cases
-            if tc.wantErrCode != "" {
-                matrixErr := &MatrixErrorResponse{}
-                if !errors.As(err, &matrixErr) {
-                    t.Errorf("mapSFURequest() error = %v, want MatrixErrorResponse", err)
-                    return
-                }
-                if matrixErr.ErrCode != tc.wantErrCode {
-                    t.Errorf("mapSFURequest() error code = %v, want %v", matrixErr.ErrCode, tc.wantErrCode)
-                }
-                return
-            }
+			// Call mapSFURequest
+			got, err := mapSFURequest(&input)
 
-            // Check success cases
-            if err != nil {
-                t.Errorf("mapSFURequest() unexpected error: %v", err)
-                return
-            }
+			// Check error cases
+			if tc.wantErrCode != "" {
+				matrixErr := &MatrixErrorResponse{}
+				if !errors.As(err, &matrixErr) {
+					t.Errorf("mapSFURequest() error = %v, want MatrixErrorResponse", err)
+					return
+				}
+				if matrixErr.ErrCode != tc.wantErrCode {
+					t.Errorf("mapSFURequest() error code = %v, want %v", matrixErr.ErrCode, tc.wantErrCode)
+				}
+				return
+			}
 
-            // Type-specific comparisons
-            switch expected := tc.want.(type) {
-            case *LegacySFURequest:
-                actual, ok := got.(*LegacySFURequest)
-                if !ok {
-                    t.Errorf("mapSFURequest() returned wrong type, got %T, want *LegacySFURequest", got)
-                    return
-                }
-                if !reflect.DeepEqual(actual, expected) {
-                    t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
-                }
-            case *SFURequest:
-                actual, ok := got.(*SFURequest)
-                if !ok {
-                    t.Errorf("mapSFURequest() returned wrong type, got %T, want *SFURequest", got)
-                    return
-                }
-                if !reflect.DeepEqual(actual, expected) {
-                    t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
-                }
-            }
-        })
-    }
+			// Check success cases
+			if err != nil {
+				t.Errorf("mapSFURequest() unexpected error: %v", err)
+				return
+			}
+
+			// Type-specific comparisons
+			switch expected := tc.want.(type) {
+			case *LegacySFURequest:
+				actual, ok := got.(*LegacySFURequest)
+				if !ok {
+					t.Errorf("mapSFURequest() returned wrong type, got %T, want *LegacySFURequest", got)
+					return
+				}
+				if !reflect.DeepEqual(actual, expected) {
+					t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
+				}
+			case *SFURequest:
+				actual, ok := got.(*SFURequest)
+				if !ok {
+					t.Errorf("mapSFURequest() returned wrong type, got %T, want *SFURequest", got)
+					return
+				}
+				if !reflect.DeepEqual(actual, expected) {
+					t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
+				}
+			}
+		})
+	}
 }
 
 func TestMapSFURequestMemoryLeak(t *testing.T) {
@@ -834,33 +834,33 @@ func TestMapSFURequestMemoryLeak(t *testing.T) {
 }
 
 func TestProcessSFURequest(t *testing.T) {
-    // mock createLiveKitRoom
-    var called_createLiveKitRoom bool
+	// mock createLiveKitRoom
+	var called_createLiveKitRoom bool
 	original_createLiveKitRoom := createLiveKitRoom
-    createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
-        called_createLiveKitRoom = true
-        if room == "" {
-            t.Error("expected room name passed into mock")
-        }
-        return nil
-    }
-    t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
+	createLiveKitRoom = func(ctx context.Context, h *Handler, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+		called_createLiveKitRoom = true
+		if room == "" {
+			t.Error("expected room name passed into mock")
+		}
+		return nil
+	}
+	t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
 
-    // mock OpenID lookup
+	// mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool
 	var exchangeOpenIdUserInfo_MatrixID string
-    original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
-    exchangeOpenIdUserInfo = func(ctx context.Context, token OpenIDTokenType, skip bool) (*fclient.UserInfo, error) {
-        if failed_exchangeOpenIdUserInfo {
+	original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
+	exchangeOpenIdUserInfo = func(ctx context.Context, token OpenIDTokenType, skip bool) (*fclient.UserInfo, error) {
+		if failed_exchangeOpenIdUserInfo {
 			return nil, &MatrixErrorResponse{
-				Status: http.StatusUnauthorized,
+				Status:  http.StatusUnauthorized,
 				ErrCode: "M_UNAUTHORIZED",
-				Err: "The request could not be authorised.",
+				Err:     "The request could not be authorised.",
 			}
-        }	
-        return &fclient.UserInfo{Sub: exchangeOpenIdUserInfo_MatrixID}, nil
-    }
-    t.Cleanup(func() { exchangeOpenIdUserInfo = original_exchangeOpenIdUserInfo })
+		}
+		return &fclient.UserInfo{Sub: exchangeOpenIdUserInfo_MatrixID}, nil
+	}
+	t.Cleanup(func() { exchangeOpenIdUserInfo = original_exchangeOpenIdUserInfo })
 
 	type testCase struct {
 		name                       string
@@ -876,18 +876,18 @@ func TestProcessSFURequest(t *testing.T) {
 
 	tests := []testCase{
 		{
-			name:                       "Full access user + all OK",
-			MatrixID:                   "@user:example.com",
-			ClaimedMatrixID:            "@user:example.com",
-			expectCreateRoomCall:       true,
-			expectError:                false,
+			name:                 "Full access user + all OK",
+			MatrixID:             "@user:example.com",
+			ClaimedMatrixID:      "@user:example.com",
+			expectCreateRoomCall: true,
+			expectError:          false,
 		},
 		{
-			name:                       "Restricted user + all OK",
-			MatrixID:                   "@user:otherdomain.com",
-			ClaimedMatrixID:            "@user:otherdomain.com",
-			expectCreateRoomCall:       false,
-			expectError:                false,
+			name:                 "Restricted user + all OK",
+			MatrixID:             "@user:otherdomain.com",
+			ClaimedMatrixID:      "@user:otherdomain.com",
+			expectCreateRoomCall: false,
+			expectError:          false,
 		},
 		{
 			name:                       "Full access user but exchangeOpenIdUserInfo fails",
@@ -899,22 +899,22 @@ func TestProcessSFURequest(t *testing.T) {
 			expectError:                true,
 		},
 		{
-			name:                       "Full access user but getJoinToken fails",
-			MatrixID:                   "@user:example.com",
-			ClaimedMatrixID:            "@user:example.com",
-			expectJoinTokenError:       true,
-			getJoinTokenErr:            &MatrixErrorResponse{},
-			expectCreateRoomCall:       false,
-			expectError:                true,
+			name:                 "Full access user but getJoinToken fails",
+			MatrixID:             "@user:example.com",
+			ClaimedMatrixID:      "@user:example.com",
+			expectJoinTokenError: true,
+			getJoinTokenErr:      &MatrixErrorResponse{},
+			expectCreateRoomCall: false,
+			expectError:          true,
 		},
 		{
-			name:                       "Full access user but claimed_matrix_id fails",
-			MatrixID:                   "@user:example.com",
-			ClaimedMatrixID:            "@user:faked.com",
-			expectJoinTokenError:       false,
-			getJoinTokenErr:            &MatrixErrorResponse{},
-			expectCreateRoomCall:       false,
-			expectError:                true,
+			name:                 "Full access user but claimed_matrix_id fails",
+			MatrixID:             "@user:example.com",
+			ClaimedMatrixID:      "@user:faked.com",
+			expectJoinTokenError: false,
+			getJoinTokenErr:      &MatrixErrorResponse{},
+			expectCreateRoomCall: false,
+			expectError:          true,
 		},
 	}
 
@@ -925,12 +925,7 @@ func TestProcessSFURequest(t *testing.T) {
 			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
 			exchangeOpenIdUserInfo_MatrixID = tc.MatrixID
 
-		    handler := &Handler{
-				key:                   map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError],
-				secret:                "secret",
-				lkUrl:                 "wss://lk.local:8080/foo",
-				fullAccessHomeservers: []string{"example.com"},
-			}
+			handler := NewHandler(map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError], "secret", "wss://lk.local:8080/foo", false, []string{"example.com"})
 
 			req := &SFURequest{
 				RoomID: "!room:example.com",
@@ -961,36 +956,35 @@ func TestProcessSFURequest(t *testing.T) {
 		})
 	}
 
-
 }
 
 func TestProcessLegacySFURequest(t *testing.T) {
-    // mock createLiveKitRoom
-    var called_createLiveKitRoom bool
+	// mock createLiveKitRoom
+	var called_createLiveKitRoom bool
 	original_createLiveKitRoom := createLiveKitRoom
-    createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
-        called_createLiveKitRoom = true
-        if room == "" {
-            t.Error("expected room name passed into mock")
-        }
-        return nil
-    }
-    t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
+	createLiveKitRoom = func(ctx context.Context, h *Handler, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+		called_createLiveKitRoom = true
+		if room == "" {
+			t.Error("expected room name passed into mock")
+		}
+		return nil
+	}
+	t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
 
-    // mock OpenID lookup
+	// mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool
-    original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
-    exchangeOpenIdUserInfo = func(ctx context.Context, token OpenIDTokenType, skip bool) (*fclient.UserInfo, error) {
-        if failed_exchangeOpenIdUserInfo {
+	original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
+	exchangeOpenIdUserInfo = func(ctx context.Context, token OpenIDTokenType, skip bool) (*fclient.UserInfo, error) {
+		if failed_exchangeOpenIdUserInfo {
 			return nil, &MatrixErrorResponse{
-				Status: http.StatusUnauthorized,
+				Status:  http.StatusUnauthorized,
 				ErrCode: "M_UNAUTHORIZED",
-				Err: "The request could not be authorised.",
+				Err:     "The request could not be authorised.",
 			}
-        }	
-        return &fclient.UserInfo{Sub: "@mock:example.com"}, nil
-    }
-    t.Cleanup(func() { exchangeOpenIdUserInfo = original_exchangeOpenIdUserInfo })
+		}
+		return &fclient.UserInfo{Sub: "@mock:example.com"}, nil
+	}
+	t.Cleanup(func() { exchangeOpenIdUserInfo = original_exchangeOpenIdUserInfo })
 
 	type testCase struct {
 		name                       string
@@ -1005,16 +999,16 @@ func TestProcessLegacySFURequest(t *testing.T) {
 
 	tests := []testCase{
 		{
-			name:                       "Full access user + all OK",
-			MatrixID:                   "@user:example.com",
-			expectCreateRoomCall:       true,
-			expectError:                false,
+			name:                 "Full access user + all OK",
+			MatrixID:             "@user:example.com",
+			expectCreateRoomCall: true,
+			expectError:          false,
 		},
 		{
-			name:                       "Restricted user + all OK",
-			MatrixID:                   "@user:otherdomain.com",
-			expectCreateRoomCall:       false,
-			expectError:                false,
+			name:                 "Restricted user + all OK",
+			MatrixID:             "@user:otherdomain.com",
+			expectCreateRoomCall: false,
+			expectError:          false,
 		},
 		{
 			name:                       "Full access user but exchangeOpenIdUserInfo fails",
@@ -1025,12 +1019,12 @@ func TestProcessLegacySFURequest(t *testing.T) {
 			expectError:                true,
 		},
 		{
-			name:                       "Full access user but getJoinToken fails",
-			MatrixID:                   "@user:example.com",
-			expectJoinTokenError:       true,
-			getJoinTokenErr:            &MatrixErrorResponse{},
-			expectCreateRoomCall:       false,
-			expectError:                true,
+			name:                 "Full access user but getJoinToken fails",
+			MatrixID:             "@user:example.com",
+			expectJoinTokenError: true,
+			getJoinTokenErr:      &MatrixErrorResponse{},
+			expectCreateRoomCall: false,
+			expectError:          true,
 		},
 	}
 
@@ -1040,7 +1034,7 @@ func TestProcessLegacySFURequest(t *testing.T) {
 			called_createLiveKitRoom = false
 			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
 
-		    handler := &Handler{
+			handler := &Handler{
 				key:                   map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError],
 				secret:                "secret",
 				lkUrl:                 "wss://lk.local:8080/foo",
@@ -1070,6 +1064,5 @@ func TestProcessLegacySFURequest(t *testing.T) {
 
 		})
 	}
-
 
 }

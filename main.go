@@ -84,68 +84,76 @@ type MatrixErrorResponse struct {
 }
 
 type ValidatableSFURequest interface {
-    Validate() error
+	Validate() error
 }
 
-func (e *MatrixErrorResponse) Error() string { 
-    return e.Err
+func (e *MatrixErrorResponse) Error() string {
+	return e.Err
 }
 
 func (r *SFURequest) Validate() error {
-    if r.RoomID == "" || r.SlotID == "" {
+	if r.RoomID == "" || r.SlotID == "" {
 		log.Printf("Missing room_id or slot_id: room_id='%s', slot_id='%s'", r.RoomID, r.SlotID)
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "The request body is missing `room_id` or `slot_id`",
-        }
-    }
-    if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
-        log.Printf("Missing member parameters: %+v", r.Member)
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "The request body `member` is missing a `id`, `claimed_user_id` or `claimed_device_id`",
-        }
-    }
-    if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `room_id` or `slot_id`",
+		}
+	}
+	if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
+		log.Printf("Missing member parameters: %+v", r.Member)
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body `member` is missing a `id`, `claimed_user_id` or `claimed_device_id`",
+		}
+	}
+	if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
 		log.Printf("Missing OpenID token parameters: %+v", r.OpenIDToken)
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "The request body `openid_token` is missing a `access_token` or `matrix_server_name`",
-        }
-    }
-    return nil
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body `openid_token` is missing a `access_token` or `matrix_server_name`",
+		}
+	}
+	if (r.DelayedEventID != "" && r.DelayTimeout == 0) || (r.DelayedEventID == "" && r.DelayTimeout != 0) {
+		log.Printf("Missing delayed_event_id or delay_timeout: '%s', '%d'", r.DelayedEventID, r.DelayTimeout)
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `delayed_event_id` or `delay_timeout`",
+		}
+	}
+	return nil
 }
 
 func (r *LegacySFURequest) Validate() error {
-    if r.Room == "" {
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "Missing room parameter",
-        }
-    }
-    if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "Missing OpenID token parameters",
-        }
-    }
-    return nil
+	if r.Room == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Missing room parameter",
+		}
+	}
+	if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Missing OpenID token parameters",
+		}
+	}
+	return nil
 }
 
 // writeMatrixError writes a Matrix-style error response to the HTTP response writer.
 func writeMatrixError(w http.ResponseWriter, status int, errCode string, errMsg string) {
-    w.WriteHeader(status)
-    if err := json.NewEncoder(w).Encode(gomatrix.RespError{
-        ErrCode: errCode,
-        Err:     errMsg,
-    }); err != nil {
-        log.Printf("failed to encode json error message! %v", err)
-    }
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(gomatrix.RespError{
+		ErrCode: errCode,
+		Err:     errMsg,
+	}); err != nil {
+		log.Printf("failed to encode json error message! %v", err)
+	}
 }
 
 func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
@@ -205,34 +213,34 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 
 func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
 	// Note LegacySFURequest has already been validated at this point
-	
-    userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
-    if err != nil {
+
+	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	if err != nil {
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusInternalServerError,
+			Status:  http.StatusInternalServerError,
 			ErrCode: "M_LOOKUP_FAILED",
-			Err: "Failed to look up user info from homeserver",
+			Err:     "Failed to look up user info from homeserver",
 		}
-    }
+	}
 
-    isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
+	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-    log.Printf(
-        "Got Matrix user info for %s (%s)",
-        userInfo.Sub,
-        map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
-    )
+	log.Printf(
+		"Got Matrix user info for %s (%s)",
+		userInfo.Sub,
+		map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
+	)
 
-    // TODO: is DeviceID required? If so then we should have validated at the start
-    lkIdentity := userInfo.Sub + ":" + req.DeviceID
-    token, err := getJoinToken(h.key, h.secret, req.Room, lkIdentity)
-    if err != nil {
+	// TODO: is DeviceID required? If so then we should have validated at the start
+	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
+	token, err := getJoinToken(h.key, h.secret, LiveKitRoomAlias(req.Room), lkIdentity)
+	if err != nil {
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusInternalServerError,
+			Status:  http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
-			Err: "Internal Server Error",
+			Err:     "Internal Server Error",
 		}
-    }
+	}
 
     if isFullAccessUser {
         if err := createLiveKitRoom(r.Context(), h, req.Room, userInfo.Sub, lkIdentity); err != nil {
@@ -249,34 +257,34 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
 func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
 	// Note SFURequest has already been validated at this point
-	
-    userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
-    if err != nil {
+
+	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	if err != nil {
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusUnauthorized,
+			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
-			Err: "The request could not be authorised.",
+			Err:     "The request could not be authorised.",
 		}
-    }
+	}
 
 	// Check if validated userInfo.Sub matches req.Member.ClaimedUserID
 	if req.Member.ClaimedUserID != userInfo.Sub {
 		log.Printf("Claimed user ID %s does not match token subject %s", req.Member.ClaimedUserID, userInfo.Sub)
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusUnauthorized,
+			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
-			Err: "The request could not be authorised.",
+			Err:     "The request could not be authorised.",
 		}
 	}
 
 	// Does the user belong to homeservers granted full access
     isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-    log.Printf(
-        "Got Matrix user info for %s (%s)",
-        userInfo.Sub,
-        map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
-    )
+	log.Printf(
+		"Got Matrix user info for %s (%s)",
+		userInfo.Sub,
+		map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
+	)
 
     lkIdentity := req.Member.ID
 	lkRoomAlias := fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID)))
@@ -290,12 +298,12 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
     }
 
-    if isFullAccessUser {
-        if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+	if isFullAccessUser {
+		if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
-				Status: http.StatusInternalServerError,
+				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
-				Err: "Unable to create room on SFU",
+				Err:     "Unable to create room on SFU",
 			}
         }
     }
@@ -367,7 +375,7 @@ func mapSFURequest(data *[]byte) (any, error) {
 	}
 
 	return nil, &MatrixErrorResponse{
-		Status: http.StatusBadRequest,
+		Status:  http.StatusBadRequest,
 		ErrCode: "M_BAD_JSON",
 		Err: "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
 	}
@@ -409,7 +417,7 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		
+
 		switch sfuReq := sfuAccessRequest.(type) {
 		case *SFURequest:
 			log.Printf("Processing SFU request")
@@ -466,10 +474,10 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-            log.Printf("Error reading request body: %v", err)
-            writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
-            return
-        }			
+			log.Printf("Error reading request body: %v", err)
+			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
+			return
+		}
 
 		log.Printf("Processing SFU request")
 		sfuAccessResponse, err := h.processSFURequest(r, &sfuAccessRequest)
