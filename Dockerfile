@@ -1,5 +1,5 @@
 # Set the version to match that which is in go.mod
-ARG GO_VERSION="1.23.0"
+ARG GO_VERSION="build-arg-must-be-provided"
 
 FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine AS builder
 
