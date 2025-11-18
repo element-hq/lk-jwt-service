@@ -181,8 +181,13 @@ var exchangeOpenIdUserInfo = func(
 	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
 
 	// validate the openid token by getting the user's ID
+	hostOverride := os.Getenv("USER_INFO_HOST_OVERRIDE")
+	serverName := spec.ServerName(token.MatrixServerName)
+	if hostOverride != "" {
+		serverName = spec.ServerName(hostOverride)
+	}
 	userinfo, err := client.LookupUserInfo(
-		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
+		ctx, serverName, token.AccessToken,
 	)
 	if err != nil {
 		log.Printf("Failed to look up user info: %v", err)
