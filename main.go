@@ -190,8 +190,16 @@ var exchangeOpenIdUserInfo = func(
 		ctx, serverName, token.AccessToken,
 	)
 	if err != nil {
-		log.Printf("Failed to look up user info: %v", err)
-		return nil, errors.New("failed to look up user info")
+		// If a host override was provided we may get a userID vs server name
+		// mismatch error from the client. In that specific case, allow the
+		// lookup to proceed (log a warning) so that deployments which use
+		// `USER_INFO_HOST_OVERRIDE` can still validate the token.
+		if hostOverride != "" && strings.Contains(err.Error(), "userID doesn't match server name") {
+			log.Printf("Ignoring userID/server name mismatch due to USER_INFO_HOST_OVERRIDE: %v", err)
+		} else {
+			log.Printf("Failed to look up user info: %v", err)
+			return nil, errors.New("failed to look up user info")
+		}
 	}
 	return &userinfo, nil
 }
