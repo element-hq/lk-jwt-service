@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"slices"
@@ -22,6 +23,7 @@ import (
 
 	"time"
 
+	"github.com/MatusOllah/slogcolor"
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -97,7 +99,7 @@ func (e *MatrixErrorResponse) Error() string {
 
 func (r *SFURequest) Validate() error {
 	if r.RoomID == "" || r.SlotID == "" {
-		log.Printf("Missing room_id or slot_id: room_id='%s', slot_id='%s'", r.RoomID, r.SlotID)
+		slog.Error("Missing room_id or slot_id", "room_id", r.RoomID, "slot_id", r.SlotID)
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
@@ -105,7 +107,7 @@ func (r *SFURequest) Validate() error {
 		}
 	}
 	if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
-		log.Printf("Missing member parameters: %+v", r.Member)
+		slog.Error("Handler -> SFURequest: Missing member parameters", "Member", r.Member)
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
@@ -113,15 +115,18 @@ func (r *SFURequest) Validate() error {
 		}
 	}
 	if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
-		log.Printf("Missing OpenID token parameters: %+v", r.OpenIDToken)
+		slog.Error("Handler -> SFURequest: Missing OpenID token parameters:", "OpenIDToken", r.OpenIDToken)
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
 			Err:     "The request body `openid_token` is missing a `access_token` or `matrix_server_name`",
 		}
 	}
-	if (r.DelayedEventID != "" && r.DelayTimeout == 0) || (r.DelayedEventID == "" && r.DelayTimeout != 0) {
-		log.Printf("Missing delayed_event_id or delay_timeout: '%s', '%d'", r.DelayedEventID, r.DelayTimeout)
+		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters", 
+			"DelayID", r.DelayID, 
+			"DelayTimeout", r.DelayTimeout, 
+			"DelayCsApiUrl", r.DelayCsApiUrl,
+		)
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
@@ -156,7 +161,7 @@ func writeMatrixError(w http.ResponseWriter, status int, errCode string, errMsg 
 		ErrCode: errCode,
 		Err:     errMsg,
 	}); err != nil {
-		log.Printf("failed to encode json error message! %v", err)
+		slog.Error("Handler: failed to encode json error message!", "err", err)
 	}
 }
 
@@ -188,7 +193,7 @@ var exchangeOpenIdUserInfo = func(
 	}
 
 	if skipVerifyTLS {
-		log.Printf("!!! WARNING !!! Skipping TLS verification for matrix client connection to %s", token.MatrixServerName)
+		slog.Warn("OpenIDUserInfo:: !!! WARNING !!! Skipping TLS verification", "MatrixServerName", token.MatrixServerName)
 		// Disable TLS verification on the default HTTP Transport for the well-known lookup
 		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
@@ -199,7 +204,7 @@ var exchangeOpenIdUserInfo = func(
 		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
 	)
 	if err != nil {
-		log.Printf("Failed to look up user info: %v", err)
+		slog.Error("OpenIDUserInfo: Failed to look up user info", "err", err)
 		return nil, errors.New("failed to look up user info")
 	}
 	return &userinfo, nil
@@ -273,7 +278,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
 	// Check if validated userInfo.Sub matches req.Member.ClaimedUserID
 	if req.Member.ClaimedUserID != userInfo.Sub {
-		log.Printf("Claimed user ID %s does not match token subject %s", req.Member.ClaimedUserID, userInfo.Sub)
+		slog.Warn("Handler: Claimed user ID %s does not match token subject %s", "ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
@@ -284,17 +289,17 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	// Does the user belong to homeservers granted full access
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-	log.Printf(
-		"Got Matrix user info for %s (%s)",
-		userInfo.Sub,
-		map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
+	slog.Info(
+		"Handler: Got Matrix user info", "userInfo.Sub", 
+		userInfo.Sub, 
+		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
 	)
 
 	lkIdentity := LiveKitIdentity(req.Member.ID)
 	lkRoomAlias := LiveKitRoomAlias(fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID+"|"+req.SlotID))))
 	token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
-		log.Printf("Error getting LiveKit token: %v", err)
+		slog.Error("Handler: Error getting LiveKit token", "userInfo.Sub", userInfo.Sub, "err", err)
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
@@ -309,10 +314,8 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 				ErrCode: "M_UNKNOWN",
 				Err:     "Unable to create room on SFU",
 			}
-        }
-    }
-
-    return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
+			slog.Info("Handler: Scheduling delayed event job", "room", lkRoomAlias, "lkId", lkIdentity, "DelayID", req.DelayID, "CsApiUrl", req.DelayCsApiUrl)
+			h.addDelayedEventJob(DelayedEventJob{
 }
 
 var createLiveKitRoom = func(ctx context.Context, h *Handler, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
@@ -334,10 +337,13 @@ var createLiveKitRoom = func(ctx context.Context, h *Handler, room LiveKitRoomAl
 
 	// Log the room creation time and the user info
 	isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
-	log.Printf(
-		"%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
-		map[bool]string{true: "Created", false: "Using"}[isNewRoom],
-		lkRoom.Sid, room, matrixUser, lkIdentity,
+	slog.Info(
+		fmt.Sprintf("createLiveKitRoom: %s Room for full-access Matrix user", map[bool]string{true: "Created", false: "Using"}[isNewRoom]),
+		"room", room,
+		"roomSid", lkRoom.Sid,
+		"lkId", lkIdentity,
+		"matrixUser", matrixUser,
+		"access", "full access",
 	)
 
 	return nil
@@ -354,7 +360,7 @@ func (h *Handler) prepareMux() *http.ServeMux {
 }
 
 func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Health check from %s", r.RemoteAddr)
+	slog.Info("Handler: Health check", "RemoteAddr", r.RemoteAddr)
 
 	if r.Method == "GET" {
 		w.WriteHeader(http.StatusOK)
@@ -387,7 +393,7 @@ func mapSFURequest(data *[]byte) (any, error) {
 
 // TODO: This is deprecated and will be removed in future versions
 func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
+	slog.Info("Handler (legacy endpoint): New Request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
 	w.Header().Set("Content-Type", "application/json")
 
@@ -405,7 +411,7 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 		// Read request body once for later JSON parsing
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			log.Printf("Error reading request body: %v", err)
+			slog.Error("Handler (legacy endpoint): Error reading request body", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", err)
 			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
 			return
 		}
@@ -416,7 +422,7 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				log.Printf("Error processing request: %v", matrixErr.Err)
+				slog.Error("Handler (legacy endpoint): Error processing request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "matrixErr", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
 				return
 			}
@@ -434,14 +440,14 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				log.Printf("Error processing request: %v", matrixErr.Err)
+				slog.Error("Handler (legacy endpoint): Error reading request body", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "matrixErr", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
 				return
 			}
 		}
 
 		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-			log.Printf("failed to encode json response! %v", err)
+			slog.Error("Handler (legacy endpoint): failed to encode json response!", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", err)
 		}
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -461,9 +467,11 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	// Handle preflight request (CORS)
 	switch r.Method {
 	case "OPTIONS":
+		slog.Debug("Handler: preflight request (CORS)", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
+		slog.Info("Handler: New Request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 		var sfuAccessRequest SFURequest
 
 		decoder := json.NewDecoder(r.Body)
@@ -472,13 +480,13 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			if err := sfuAccessRequest.Validate(); err != nil {
 				matrixErr := &MatrixErrorResponse{}
 				if errors.As(err, &matrixErr) {
-					log.Printf("Error processing request: %v", matrixErr.Err)
+					slog.Error("Handler: Error processing request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", matrixErr.Err)
 					writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
 					return
 				}
 			}
 		} else {
-			log.Printf("Error reading request body: %v", err)
+			slog.Error("Handler: Error reading request body", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", err)
 			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
 			return
 		}
@@ -489,14 +497,14 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				log.Printf("Error processing request: %v", matrixErr.Err)
+				slog.Error("Handler: Error reading request body", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "matrixErr", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
 				return
 			}
 		}
 
 		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-			log.Printf("failed to encode json response! %v", err)
+			slog.Error("Handler: failed to encode json response!", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", err)
 		}
 
 	default:
@@ -523,7 +531,7 @@ func readKeySecret() (string, string) {
 			if len(keySecrets) != 2 {
 				log.Fatalf("invalid key secret file format!")
 			}
-			log.Printf("Using LiveKit API key and API secret from LIVEKIT_KEY_FILE")
+			slog.Info("Using LiveKit API key and API secret from LIVEKIT_KEY_FILE", "keySecretPath", keySecretPath)
 			key = keySecrets[0]
 			secret = keySecrets[1]
 		}
@@ -534,7 +542,7 @@ func readKeySecret() (string, string) {
 			if keyBytes, err := os.ReadFile(keyPath); err != nil {
 				log.Fatal(err)
 			} else {
-				log.Printf("Using LiveKit API key from LIVEKIT_KEY_FROM_FILE")
+				slog.Info("Using LiveKit API key from LIVEKIT_KEY_FROM_FILE", "keyPath", keyPath)
 				key = string(keyBytes)
 			}
 		}
@@ -543,7 +551,7 @@ func readKeySecret() (string, string) {
 			if secretBytes, err := os.ReadFile(secretPath); err != nil {
 				log.Fatal(err)
 			} else {
-				log.Printf("Using LiveKit API secret from LIVEKIT_SECRET_FROM_FILE")
+				slog.Info("Using LiveKit API secret from LIVEKIT_SECRET_FROM_FILE", "secretPath", secretPath)
 				secret = string(secretBytes)
 			}
 		}
@@ -558,11 +566,11 @@ func readKeySecret() (string, string) {
 func parseConfig() (*Config, error) {
 	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
 	if skipVerifyTLS {
-		log.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		log.Printf("!!! WARNING !!!  LIVEKIT_INSECURE_SKIP_VERIFY_TLS        !!! WARNING !!!")
-		log.Printf("!!! WARNING !!!  Allow to skip invalid TLS certificates  !!! WARNING !!!")
-		log.Printf("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
-		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		slog.Warn("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		slog.Warn("!!! WARNING !!!  LIVEKIT_INSECURE_SKIP_VERIFY_TLS        !!! WARNING !!!")
+		slog.Warn("!!! WARNING !!!  Allow to skip invalid TLS certificates  !!! WARNING !!!")
+		slog.Warn("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
+		slog.Warn("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
 	}
 
 	key, secret := readKeySecret()
@@ -577,10 +585,10 @@ func parseConfig() (*Config, error) {
 	if len(fullAccessHomeservers) == 0 {
 		localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
 		if len(localHomeservers) > 0 {
-			log.Printf("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, please use LIVEKIT_FULL_ACCESS_HOMESERVERS instead !!!")
+			slog.Warn("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, please use LIVEKIT_FULL_ACCESS_HOMESERVERS instead !!!")
 			fullAccessHomeservers = localHomeservers
 		} else {
-			log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*) for full access")
+			slog.Warn("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*) for full access")
 			fullAccessHomeservers = "*"
 		}
 	}
@@ -592,7 +600,7 @@ func parseConfig() (*Config, error) {
 		if lkJwtPort == "" {
 			lkJwtPort = "8080"
 		} else {
-			log.Printf("!!! LIVEKIT_JWT_PORT is deprecated, please use LIVEKIT_JWT_BIND instead !!!")
+			slog.Warn("!!! LIVEKIT_JWT_PORT is deprecated, please use LIVEKIT_JWT_BIND instead !!!")
 		}
 		lkJwtBind = fmt.Sprintf(":%s", lkJwtPort)
 	} else if lkJwtPort != "" {
@@ -610,21 +618,25 @@ func parseConfig() (*Config, error) {
 }
 
 func main() {
+	// Set global logger with custom options
+	opts := slogcolor.DefaultOptions
+	opts.Level = slog.LevelDebug
+	slog.SetDefault(slog.New(slogcolor.NewHandler(os.Stderr, opts)))
+
 	config, err := parseConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_BIND: %s", config.LkUrl, config.LkJwtBind)
-	log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS: %v", config.FullAccessHomeservers)
-
-	handler := &Handler{
-		key:                   config.Key,
-		secret:                config.Secret,
-		lkUrl:                 config.LkUrl,
-		skipVerifyTLS:         config.SkipVerifyTLS,
-		fullAccessHomeservers: config.FullAccessHomeservers,
-	}
+	slog.Info(
+		"Starting service", 
+		"LIVEKIT_URL", config.LkUrl,
+		"LIVEKIT_JWT_BIND", config.LkJwtBind,
+		"LIVEKIT_FULL_ACCESS_HOMESERVERS", config.FullAccessHomeservers,
+		"SkipVerifyTLS", config.SkipVerifyTLS,
+		"LiveKit key", config.Key,
+		"LiveKit secret", config.Secret,
+	)
 
 	log.Fatal(http.ListenAndServe(config.LkJwtBind, handler.prepareMux()))
 }
