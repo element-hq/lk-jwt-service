@@ -252,7 +252,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	if isFullAccessUser {
-		if err := createLiveKitRoom(r.Context(), h, LiveKitRoomAlias(req.Room), userInfo.Sub, lkIdentity); err != nil {
+		if err := helperCreateLiveKitRoom(r.Context(), &h.liveKitAuth, LiveKitRoomAlias(req.Room), userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
@@ -308,7 +308,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	if isFullAccessUser {
-		if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+		if err := helperCreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
@@ -318,8 +318,8 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 			h.addDelayedEventJob(DelayedEventJob{
 }
 
-var createLiveKitRoom = func(ctx context.Context, h *Handler, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
-	roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
+var helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+	roomClient := lksdk.NewRoomServiceClient(liveKitAuth.lkUrl, liveKitAuth.key, liveKitAuth.secret)
 	creationStart := time.Now().Unix()
 	lkRoom, err := roomClient.CreateRoom(
 		ctx,
