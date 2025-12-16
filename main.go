@@ -638,6 +638,37 @@ func parseConfig() (*Config, error) {
 	}, nil
 }
 
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string) *Handler {
+
+	//writeDelayedEventJobChan := make(chan writeDelayedEventJob)
+
+	handler := &Handler{
+		liveKitAuth:              lkAuth,
+		skipVerifyTLS:            skipVerifyTLS,
+		fullAccessHomeservers:    fullAccessHomeservers,
+		MonitorCommChan: make(chan HandlerMessage),
+		LiveKitRoomMonitors:   make(map[LiveKitRoomAlias]*LiveKitRoomMonitor),
+	}
+
+	go func() {
+		for {
+			select {
+			case event := <- handler.MonitorCommChan:
+				switch event.Event {
+				case NoJobsLeft:
+					_, ok := handler.getRoomMonitor(event.RoomAlias)
+					if ok {
+						slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias)
+						handler.removeRoomMonitor(event.RoomAlias)
+					}
+				}
+			}
+		}
+	}()
+
+	return handler
+}
+
 func main() {
 	// Set global logger with custom options
 	opts := slogcolor.DefaultOptions
@@ -649,6 +680,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	handler := NewHandler(
+		LiveKitAuth{
+			key:          config.Key,
+			secret:       config.Secret,
+			// for LiveKit webhooks we need authProvider, for createLiveKitRoom we need 
+			// key and secret which is not exposed by authProvider, hence redundancy
+			authProvider: auth.NewSimpleKeyProvider(config.Key, config.Secret),
+			lkUrl:        config.LkUrl,
+		},
+		config.SkipVerifyTLS,
+		config.FullAccessHomeservers,
+	)
+
+	// TODO
+	// check if we can create a proper connection to SFU in order to fail fast
 
 	slog.Info(
 		"Starting service", 
