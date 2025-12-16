@@ -343,13 +343,29 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	// Does the user belong to homeservers granted full access
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
+	delayedEventDelegationRequested := req.DelayID != ""
+	if delayedEventDelegationRequested {
+		// TODO: Check if homeserver supported delegation of delayed events
+		// org.matrix.msc4140
+	}
+
+	// Use a valid DelayID as indicator for delegation of delayed events (fail early)
+	if delayedEventDelegationRequested && !isFullAccessUser {
+		return nil, &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Delegation of delayed events is only supported for full access users",
+		}
+	}
+
 	slog.Info(
 		"Handler: Got Matrix user info", "userInfo.Sub", 
 		userInfo.Sub, 
 		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
 	)
 
-	lkIdentity := LiveKitIdentity(req.Member.ID)
+	lkIdentityRaw := userInfo.Sub + "|" + req.Member.ClaimedDeviceID + "|" + req.Member.ID
+	lkIdentity := LiveKitIdentity(fmt.Sprintf("%x", sha256.Sum256([]byte(lkIdentityRaw))))
 	lkRoomAlias := LiveKitRoomAlias(fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID+"|"+req.SlotID))))
 	token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
@@ -368,8 +384,23 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 				ErrCode: "M_UNKNOWN",
 				Err:     "Unable to create room on SFU",
 			}
+		}
+
+		if delayedEventDelegationRequested {
+			// TODO verify support for delayed events
 			slog.Info("Handler: Scheduling delayed event job", "room", lkRoomAlias, "lkId", lkIdentity, "DelayID", req.DelayID, "CsApiUrl", req.DelayCsApiUrl)
-			h.addDelayedEventJob(DelayedEventJob{
+			h.addDelayedEventJob(&DelayedEventJob{
+				CsApiUrl:         req.DelayCsApiUrl,
+				DelayID:          req.DelayID,
+				DelayTimeout:     time.Duration(req.DelayTimeout) * time.Millisecond,
+				LiveKitRoom:      lkRoomAlias,
+				LiveKitIdentity:  lkIdentity,
+			},
+			)
+		}
+	}
+
+	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
 var helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
