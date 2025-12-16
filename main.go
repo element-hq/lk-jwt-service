@@ -342,10 +342,10 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
 	delayedEventDelegationRequested := req.DelayID != ""
-	if delayedEventDelegationRequested {
-		// TODO: Check if homeserver supported delegation of delayed events
-		// org.matrix.msc4140
-	}
+	// if delayedEventDelegationRequested {
+	// 	// TODO: Check if homeserver supported delegation of delayed events
+	// 	// org.matrix.msc4140
+	// }
 
 	// Use a valid DelayID as indicator for delegation of delayed events (fail early)
 	if delayedEventDelegationRequested && !isFullAccessUser {
@@ -772,16 +772,13 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 	}
 
 	go func() {
-		for {
-			select {
-			case event := <- handler.MonitorCommChan:
-				switch event.Event {
-				case NoJobsLeft:
-					_, ok := handler.getRoomMonitor(event.RoomAlias)
-					if ok {
-						slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias)
-						handler.removeRoomMonitor(event.RoomAlias)
-					}
+		for event := range handler.MonitorCommChan {
+			switch event.Event {
+			case NoJobsLeft:
+				_, ok := handler.getRoomMonitor(event.RoomAlias)
+				if ok {
+					slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias)
+					handler.removeRoomMonitor(event.RoomAlias)
 				}
 			}
 		}

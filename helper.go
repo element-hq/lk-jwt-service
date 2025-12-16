@@ -37,7 +37,7 @@ var helperLiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAut
 var helperExecuteDelayedEventAction = func(baseUrl string, delayID string, action DelayEventAction) (*http.Response, error) {
 
     url := fmt.Sprintf("%s%s/%s/%s", baseUrl, DelayedEventsEndpoint, delayID, action)
-	var jsonStr = []byte(`{}`)
+    var jsonStr = []byte(`{}`)
 
     http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
     client := &http.Client{Timeout: 1 * time.Second}
@@ -47,7 +47,11 @@ var helperExecuteDelayedEventAction = func(baseUrl string, delayID string, actio
     if err != nil{
         return resp, err
     }
-    defer resp.Body.Close()
+    defer func() {
+        if err := resp.Body.Close(); err != nil {
+            slog.Error("failed to close response body", "err", err)
+        }
+    }()
 
     // https://go.dev/src/net/http/status.go
     

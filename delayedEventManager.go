@@ -459,7 +459,7 @@ func NewDelayedEventJob(csApiUrl string, delayID string, delayTimeout time.Durat
         }
     }()
 
-    var waitingDuration time.Duration = min(time.Hour, job.DelayTimeout)
+    var waitingDuration = min(time.Hour, job.DelayTimeout)
 
     job.fsmTimerWaitingState = time.AfterFunc(waitingDuration, func() {
         slog.Debug("FSM WaitingState -> Event: WaitingStateTimedOut", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
@@ -482,7 +482,7 @@ func (m *LiveKitRoomMonitor) AddJob(name LiveKitIdentity, job *DelayedEventJob) 
     m.jobs[name] = job
     m.wg.Add(1)
 
-    var waitingDuration time.Duration = min(time.Hour, job.DelayTimeout)
+    var waitingDuration = min(time.Hour, job.DelayTimeout)
 
     opParticipantLookup := func() (bool, error) {
         return helperLiveKitParticipantLookup(context.TODO(), *m.lkAuth, job.LiveKitRoom, job.LiveKitIdentity, m.SFUCommChan)
@@ -589,13 +589,6 @@ func NewLiveKitRoomMonitor(lkAuth *LiveKitAuth, roomAlias LiveKitRoomAlias) *Liv
     slog.Info("LiveKitRoomMonitor: Started", "room", roomAlias)
 
     return monitor
-}
-
-func (m *LiveKitRoomMonitor) addDelayedEventJob2(job DelayedEventJob) bool {
-    slog.Info("RoomMonitor: Adding delayed event job", "room", m.RoomAlias, "lkId", job.LiveKitIdentity)
-    writeResp := make(chan bool)
-    //m.AddJobChan <- writeDelayedEventJob{job: job, resp: writeResp}
-    return <-writeResp
 }
 
 func (m *LiveKitRoomMonitor) addDelayedEventJob(job *DelayedEventJob) {
