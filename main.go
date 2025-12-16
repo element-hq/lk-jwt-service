@@ -621,6 +621,7 @@ func main() {
 	// Set global logger with custom options
 	opts := slogcolor.DefaultOptions
 	opts.Level = slog.LevelDebug
+	opts.NoColor = !isatty.IsTerminal(os.Stderr.Fd())
 	slog.SetDefault(slog.New(slogcolor.NewHandler(os.Stderr, opts)))
 
 	config, err := parseConfig()
