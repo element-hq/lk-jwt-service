@@ -108,10 +108,6 @@ type MatrixErrorResponse struct {
 	Err     string
 }
 
-type LiveKitRoomAlias string
-type LiveKitIdentity string
-
-
 type ValidatableSFURequest interface {
 	Validate() error
 }
@@ -157,9 +153,10 @@ func (r *SFURequest) Validate() error {
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
-			Err:     "The request body is missing `delayed_event_id` or `delay_timeout`",
+			Err:     "The request body is missing `delay_id`, `delay_timeout` or `delay_cs_api_url`",
 		}
 	}
+
 	return nil
 }
 
@@ -368,7 +365,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	lkIdentityRaw := userInfo.Sub + "|" + req.Member.ClaimedDeviceID + "|" + req.Member.ID
 	lkIdentity := LiveKitIdentity(fmt.Sprintf("%x", sha256.Sum256([]byte(lkIdentityRaw))))
 	lkRoomAlias := LiveKitRoomAlias(fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID+"|"+req.SlotID))))
-	token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
+	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
 		slog.Error("Handler: Error getting LiveKit token", "userInfo.Sub", userInfo.Sub, "err", err)
 		return nil, &MatrixErrorResponse{
@@ -600,7 +597,6 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("Processing SFU request")
 		sfuAccessResponse, err := h.processSFURequest(r, &sfuAccessRequest)
 
 		if err != nil {
