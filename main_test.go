@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/matrix-org/gomatrix"
@@ -103,13 +104,15 @@ func TestHandlePostMissingParams(t *testing.T) {
 }
 
 func TestHandlePost(t *testing.T) {
-	handler := &Handler{
-		secret:                "testSecret",
-		key:                   "testKey",
-		lkUrl:                 "wss://lk.local:8080/foo",
-		fullAccessHomeservers: []string{"example.com"},
-		skipVerifyTLS:         true,
-	}
+	handler := NewHandler(
+		LiveKitAuth{
+			secret: "testSecret",
+			key:    "testKey",
+			lkUrl:  "wss://lk.local:8080/foo",
+		},
+		true,
+		[]string{"example.com"},
+	)
 
 	var matrixServerName = ""
 
@@ -188,7 +191,7 @@ func TestHandlePost(t *testing.T) {
 
 	// parse JWT checking the shared secret
 	token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
-		return []byte(handler.secret), nil
+		return []byte(handler.liveKitAuth.secret), nil
 	})
 
 	if err != nil {
@@ -213,13 +216,15 @@ func TestHandlePost(t *testing.T) {
 }
 
 func TestLegacyHandlePost(t *testing.T) {
-	handler := &Handler{
-		secret:                "testSecret",
-		key:                   "testKey",
-		lkUrl:                 "wss://lk.local:8080/foo",
-		fullAccessHomeservers: []string{"example.com"},
-		skipVerifyTLS:         true,
-	}
+	handler := NewHandler(
+		LiveKitAuth{
+			secret: "testSecret",
+			key:    "testKey",
+			lkUrl:  "wss://lk.local:8080/foo",
+		},
+		true,
+		[]string{"example.com"},
+	)
 
 	var matrixServerName = ""
 
@@ -293,7 +298,7 @@ func TestLegacyHandlePost(t *testing.T) {
 
 	// parse JWT checking the shared secret
 	token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
-		return []byte(handler.secret), nil
+		return []byte(handler.liveKitAuth.secret), nil
 	})
 
 	if err != nil {
@@ -317,13 +322,15 @@ func TestLegacyHandlePost(t *testing.T) {
 }
 
 func TestIsFullAccessUser(t *testing.T) {
-	handler := &Handler{
-		secret:                "testSecret",
-		key:                   "testKey",
-		lkUrl:                 "wss://lk.local:8080/foo",
-		fullAccessHomeservers: []string{"example.com", "another.example.com"},
-		skipVerifyTLS:         true,
-	}
+	handler := NewHandler(
+		LiveKitAuth{
+			secret: "testSecret",
+			key:    "testKey",
+			lkUrl:  "wss://lk.local:8080/foo",
+		},
+		true,
+		[]string{"example.com", "another.example.com"},
+	)
 
 	// Test cases for full access users
 	if handler.isFullAccessUser("example.com") {
@@ -669,7 +676,7 @@ func TestMapSFURequest(t *testing.T) {
 			},
 		},
 		{
-			name: "Valid Matrix2 request",
+			name: "Valid Matrix 2.0 request",
 			input: `{
                 "room_id": "!testRoom:example.com",
                 "slot_id": "123",
@@ -702,6 +709,67 @@ func TestMapSFURequest(t *testing.T) {
 			},
 		},
 		{
+			name: "Valid Matrix 2.0 request with delayed events parameters",
+			input: `{
+				"room_id": "!testRoom:example.com",
+				"slot_id": "123",
+				"openid_token": {
+					"access_token": "test_token",
+					"token_type": "Bearer",
+					"matrix_server_name": "example.com",
+					"expires_in": 3600
+				},
+				"member": {
+					"id": "test_id",
+					"claimed_user_id": "@test:example.com",
+					"claimed_device_id": "testDevice"
+				},
+				"delay_id": "delayed123",
+				"delay_timeout": 30,
+				"delay_cs_api_url": "https://example.com/api"
+            }`,
+			want: &SFURequest{
+				RoomID: "!testRoom:example.com",
+				SlotID: "123",
+				OpenIDToken: OpenIDTokenType{
+					AccessToken:      "test_token",
+					TokenType:        "Bearer",
+					MatrixServerName: "example.com",
+					ExpiresIn:        3600,
+				},
+				Member: MatrixRTCMemberType{
+					ID:              "test_id",
+					ClaimedUserID:   "@test:example.com",
+					ClaimedDeviceID: "testDevice",
+				},
+				DelayID:     "delayed123",
+				DelayTimeout: 30,
+				DelayCsApiUrl: "https://example.com/api",
+			},
+		},
+		{
+			name: "Valid Matrix 2.0 request with INVALID delayed events parameters",
+			input: `{
+				"room_id": "!testRoom:example.com",
+				"slot_id": "123",
+				"openid_token": {
+					"access_token": "test_token",
+					"token_type": "Bearer",
+					"matrix_server_name": "example.com",
+					"expires_in": 3600
+				},
+				"member": {
+					"id": "test_id",
+					"claimed_user_id": "@test:example.com",
+					"claimed_device_id": "testDevice"
+				},
+				"delay_id": "delayed123",
+				"delay_timeout": 30
+            }`,
+			want:        nil,
+			wantErrCode: "M_BAD_JSON",
+
+		},		{
 			name:        "Invalid JSON",
 			input:       `{"invalid": json}`,
 			want:        nil,
@@ -836,15 +904,15 @@ func TestMapSFURequestMemoryLeak(t *testing.T) {
 func TestProcessSFURequest(t *testing.T) {
 	// mock createLiveKitRoom
 	var called_createLiveKitRoom bool
-	original_createLiveKitRoom := createLiveKitRoom
-	createLiveKitRoom = func(ctx context.Context, h *Handler, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+	original_createLiveKitRoom := helperCreateLiveKitRoom
+	helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
 		called_createLiveKitRoom = true
 		if room == "" {
 			t.Error("expected room name passed into mock")
 		}
 		return nil
 	}
-	t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
+	t.Cleanup(func() { helperCreateLiveKitRoom = original_createLiveKitRoom })
 
 	// mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool
@@ -925,7 +993,15 @@ func TestProcessSFURequest(t *testing.T) {
 			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
 			exchangeOpenIdUserInfo_MatrixID = tc.MatrixID
 
-			handler := NewHandler(map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError], "secret", "wss://lk.local:8080/foo", false, []string{"example.com"})
+			handler := NewHandler(
+				LiveKitAuth{
+					key: map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError], 
+					secret: "secret", 
+					lkUrl: "wss://lk.local:8080/foo",
+				}, 
+				false, 
+				[]string{"example.com"},
+			)
 
 			req := &SFURequest{
 				RoomID: "!room:example.com",
@@ -961,15 +1037,16 @@ func TestProcessSFURequest(t *testing.T) {
 func TestProcessLegacySFURequest(t *testing.T) {
 	// mock createLiveKitRoom
 	var called_createLiveKitRoom bool
-	original_createLiveKitRoom := createLiveKitRoom
-	createLiveKitRoom = func(ctx context.Context, h *Handler, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+	original_createLiveKitRoom := helperCreateLiveKitRoom
+	
+	helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
 		called_createLiveKitRoom = true
 		if room == "" {
 			t.Error("expected room name passed into mock")
 		}
 		return nil
 	}
-	t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
+	t.Cleanup(func() { helperCreateLiveKitRoom = original_createLiveKitRoom })
 
 	// mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool
@@ -1034,12 +1111,15 @@ func TestProcessLegacySFURequest(t *testing.T) {
 			called_createLiveKitRoom = false
 			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
 
-			handler := &Handler{
-				key:                   map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError],
-				secret:                "secret",
-				lkUrl:                 "wss://lk.local:8080/foo",
-				fullAccessHomeservers: []string{"example.com"},
-			}
+			handler := NewHandler(
+				LiveKitAuth{
+					key:    map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError],
+					secret: "secret",
+					lkUrl:  "wss://lk.local:8080/foo",
+				},
+				false,
+				[]string{"example.com"},
+			)
 
 			req := &LegacySFURequest{
 				Room: "!room:example.com",
@@ -1065,4 +1145,131 @@ func TestProcessLegacySFURequest(t *testing.T) {
 		})
 	}
 
+}
+
+func TestLiveKitRoomMonitor(t *testing.T) {
+	handler := NewHandler(
+		LiveKitAuth{
+			secret: "secret",
+			key:    "devkey",
+//			lkUrl:  "wss://matrix-rtc.m.localhost/livekit/sfu",
+			lkUrl:  "ws://127.0.0.1:7880",
+		},
+		true,
+		[]string{"example.com"},
+	)
+
+	lkAlias := LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848")
+
+	monitor := NewLiveKitRoomMonitor(&handler.liveKitAuth, lkAlias)
+
+	job, _ := NewDelayedEventJob(
+				"https://synapse.m.localhost",
+				"syd_astTzXBzAazONpxHCqzW", 
+				10 * time.Second, 
+				lkAlias, 
+				"@azure-colonial-otter:synapse.m.localhostQQVMKEAUKY", 
+				monitor.JobCommChan,
+	)
+
+	monitor.addDelayedEventJob(job)
+	job.EventChannel <- ParticipantConnected
+	monitor.wg.Wait()
+
+	/*
+	var matrixServerName string
+
+	// Mock Matrix server
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/_matrix/federation/v1/openid/userinfo" {
+			t.Errorf("unexpected URL path: got %v want %v", r.URL.Path, "/_matrix/federation/v1/openid/userinfo")
+		}
+
+		accessToken := r.URL.Query().Get("access_token")
+		if accessToken != "testAccessToken" {
+			t.Errorf("unexpected access_token: got %v want %v", accessToken, "testAccessToken")
+		}
+
+		userInfo := fclient.UserInfo{
+			Sub: "@user:" + matrixServerName,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		err := json.NewEncoder(w).Encode(userInfo)
+		if err != nil {
+			t.Errorf("failed to encode user info: %v", err)
+		}
+	}))
+	defer testServer.Close()
+
+	u, err := url.Parse(testServer.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+	matrixServerName = u.Host
+
+	// Prepare request
+	testCase := map[string]any{
+		"room": "testRoom",
+		"openid_token": map[string]any{
+			"access_token":      "testAccessToken",
+			"token_type":        "Bearer",
+			"matrix_server_name": matrixServerName,
+			"expires_in":        3600,
+		},
+		"device_id": "testDevice",
+	}
+
+	reqBody, err := json.Marshal(testCase)
+	if err != nil {
+		t.Fatalf("failed to marshal test case: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", "/sfu-jwt", bytes.NewBuffer(reqBody))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+
+	// Record response
+	rr := httptest.NewRecorder()
+	handlerFunc := http.HandlerFunc(handler.SFUJWTHandler)
+	handlerFunc.ServeHTTP(rr, req)
+
+	// Check response
+	if status := rr.Code; status != http.StatusOK {
+		t.Fatalf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	var resp SFUJWTResponse
+	err = json.NewDecoder(rr.Body).Decode(&resp)
+	if err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.URL != "wss://lk.local:8080/foo" {
+		t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
+	}
+
+	// parse JWT checking the shared secret
+	token, err := jwt.Parse(resp.Token, func(token *jwt.Token) (interface{}, error) {
+		return []byte("testSecret"), nil
+	})
+	claims, ok := token.Claims.(jwt.MapClaims)
+
+	if !ok || !token.Valid {
+		t.Fatalf("failed to parse claims from JWT: %v", err)
+	}
+
+	if claims["iss"] != "testKey" {
+		t.Errorf("unexpected iss: got %v want %v", claims["iss"], "testKey")
+	}
+
+	if claims["sub"] != "@user:"+matrixServerName {
+		t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName)
+	}
+
+	if claims["room"] != "testRoom" {
+		t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
+	}
+	*/
 }
