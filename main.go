@@ -27,6 +27,7 @@ import (
 	"github.com/MatusOllah/slogcolor"
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
+	"github.com/livekit/protocol/webhook"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/mattn/go-isatty"
 
@@ -617,6 +618,43 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) handleSfuWebhook (w http.ResponseWriter, r *http.Request) {
+
+	event, err := webhook.ReceiveWebhookEvent(r, h.liveKitAuth.authProvider)
+	if err != nil {
+		slog.Warn("Handler: SFU Webhook -> Error receiving webhook event", "err", err)
+		return
+	}
+
+	switch event.Event {
+		case "participant_joined":
+			monitorSnapshot, ok := h.getRoomMonitor(LiveKitRoomAlias(event.Room.Name))
+			if ok {
+				monitorSnapshot.SFUCommChan <- SFUMessage{
+					Type: ParticipantConnected, 
+					LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+				}
+			}
+			slog.Debug("Handler: SFU Webhook -> Participant joined", "lkId", event.Participant.Identity, "room", event.Room.Name)
+		case "participant_left", "participant_connection_aborted":
+			monitorSnapshot, ok := h.getRoomMonitor(LiveKitRoomAlias(event.Room.Name))
+			if ok {
+				if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
+					monitorSnapshot.SFUCommChan <- SFUMessage{
+						Type: ParticipantDisconnectedIntentionally, 
+						LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+					}
+				} else  {
+					monitorSnapshot.SFUCommChan <- SFUMessage{
+						Type: ParticipantConnectionAborted, 
+						LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+					}
+				}
+			}
+			slog.Debug("Handler: SFU Webhook -> Participant left", "lkId", event.Participant.Identity, "room", event.Room.Name, "DisconnectReason", event.Participant.DisconnectReason)
 	}
 }
 
