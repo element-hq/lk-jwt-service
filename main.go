@@ -143,6 +143,10 @@ func (r *SFURequest) Validate() error {
 			Err:     "The request body `openid_token` is missing a `access_token` or `matrix_server_name`",
 		}
 	}
+	
+	all_delayed_event_params_present := r.DelayID != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
+	at_least_one_delayed_event_param_present := r.DelayID != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
+	if (at_least_one_delayed_event_param_present && !all_delayed_event_params_present) {
 		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters", 
 			"DelayID", r.DelayID, 
 			"DelayTimeout", r.DelayTimeout, 
