@@ -116,6 +116,8 @@ github.com/matrix-org/gomatrixserverlib v0.0.0-20250704071233-a234d6df21c7 h1:WA
 github.com/matrix-org/gomatrixserverlib v0.0.0-20250704071233-a234d6df21c7/go.mod h1:61LpEsWAroRfdVh2dnr6fQ+K3MmRgD5I35GVvF4FpXQ=
 github.com/matrix-org/gomatrixserverlib v0.0.0-20250815065806-6697d93cbcba h1:vUUjTOXZ/bYdF/SmJPH8HZ/UTmvw+ldngFKVLElmn+I=
 github.com/matrix-org/gomatrixserverlib v0.0.0-20250815065806-6697d93cbcba/go.mod h1:b6KVfDjXjA5Q7vhpOaMqIhFYvu5BuFVZixlNeTV/CLc=
+github.com/matrix-org/gomatrixserverlib v0.0.0-20251210211621-ffcbbd38fba6 h1:sn3SspgeB1Qb5ddcpacgGypBi6draLe6Bfwg7k0B1A8=
+github.com/matrix-org/gomatrixserverlib v0.0.0-20251210211621-ffcbbd38fba6/go.mod h1:b6KVfDjXjA5Q7vhpOaMqIhFYvu5BuFVZixlNeTV/CLc=
 github.com/matrix-org/util v0.0.0-20221111132719-399730281e66 h1:6z4KxomXSIGWqhHcfzExgkH3Z3UkIXry4ibJS4Aqz2Y=
 github.com/matrix-org/util v0.0.0-20221111132719-399730281e66/go.mod h1:iBI1foelCqA09JJgPV0FYz4qA5dUXYOxMi57FxKBdd4=
 github.com/miekg/dns v1.1.66 h1:FeZXOS3VCVsKnEAd+wBkjMC3D2K+ww66Cq3VnCINuJE=
