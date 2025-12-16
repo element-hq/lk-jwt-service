@@ -539,10 +539,8 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 
 		switch sfuReq := sfuAccessRequest.(type) {
 		case *SFURequest:
-			log.Printf("Processing SFU request")
 			sfuAccessResponse, err = h.processSFURequest(r, sfuReq)
 		case *LegacySFURequest:
-			log.Printf("Processing legacy SFU request")
 			sfuAccessResponse, err = h.processLegacySFURequest(r, sfuReq)
 		}
 
