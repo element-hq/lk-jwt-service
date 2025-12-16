@@ -1,2 +1,3 @@
 .vscode
 lk-jwt-service
+build/*
