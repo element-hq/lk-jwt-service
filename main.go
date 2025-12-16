@@ -562,7 +562,6 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
 
 	w.Header().Set("Content-Type", "application/json")
 
@@ -571,9 +570,9 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Methods", "POST")
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
-	// Handle preflight request (CORS)
 	switch r.Method {
 	case "OPTIONS":
+		// Handle preflight request (CORS)
 		slog.Debug("Handler: preflight request (CORS)", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 		w.WriteHeader(http.StatusOK)
 		return
