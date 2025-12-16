@@ -461,9 +461,11 @@ func (h* Handler) removeRoomMonitor(name LiveKitRoomAlias) {
 func (h *Handler) prepareMux() *http.ServeMux {
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sfu/get", h.handle_legacy) // TODO: This is deprecated and will be removed in future versions
+	mux.HandleFunc("/sfu/get",   h.handle_legacy) // TODO: This is deprecated and will be removed in future versions
 	mux.HandleFunc("/get_token", h.handle)
-	mux.HandleFunc("/healthz", h.healthcheck)
+	mux.HandleFunc("/disconnect_delegation", h.handle)
+	mux.HandleFunc("/sfu_webhook", h.handleSfuWebhook)
+	mux.HandleFunc("/healthz",   h.healthcheck)
 
 	return mux
 }
