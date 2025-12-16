@@ -296,7 +296,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
 	// TODO: is DeviceID required? If so then we should have validated at the start
 	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
-	token, err := getJoinToken(h.key, h.secret, LiveKitRoomAlias(req.Room), lkIdentity)
+	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, LiveKitRoomAlias(req.Room), lkIdentity)
 	if err != nil {
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusInternalServerError,
@@ -315,7 +315,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 		}
 	}
 
-	return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
+	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
 func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
