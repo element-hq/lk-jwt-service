@@ -231,6 +231,34 @@ var exchangeOpenIdUserInfo = func(
 	return &userinfo, nil
 }
 
+func (h *Handler) addDelayedEventJob(jobDescription *DelayedEventJob) {
+
+	slog.Debug("Handler: Adding delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
+
+	targetMonitor, ok := h.getRoomMonitor(LiveKitRoomAlias(jobDescription.LiveKitIdentity))	
+	if !ok {
+		slog.Info("Handler: Creating new LiveKitRoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
+		targetMonitor = NewLiveKitRoomMonitor(&h.liveKitAuth, jobDescription.LiveKitRoom)
+		targetMonitor.HandlerCommChan = h.MonitorCommChan
+		h.addRoomMonitor(targetMonitor)
+	}
+
+	job, err := NewDelayedEventJob(
+		jobDescription.CsApiUrl,
+		jobDescription.DelayID,
+		jobDescription.DelayTimeout,
+		jobDescription.LiveKitRoom,
+		jobDescription.LiveKitIdentity,
+		targetMonitor.JobCommChan,
+	)
+	slog.Debug("Handler: Created delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
+	if err != nil {
+		slog.Error("Error creating delayed event job",  "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "err", err)
+		return
+	}
+	targetMonitor.addDelayedEventJob(job)
+}
+
 func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 	// Grant full access if wildcard '*' is present as the only entry
 	if len(h.fullAccessHomeservers) == 1 && h.fullAccessHomeservers[0] == "*" {
