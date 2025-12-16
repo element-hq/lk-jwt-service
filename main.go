@@ -370,6 +370,30 @@ var helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth
 	return nil
 }
 
+func (h *Handler) addRoomMonitor(m *LiveKitRoomMonitor) {
+	h.Lock()
+	defer h.Unlock()
+	h.LiveKitRoomMonitors[m.RoomAlias] = m
+	h.wg.Add(1)
+}
+
+func (h* Handler) getRoomMonitor(name LiveKitRoomAlias) (*LiveKitRoomMonitor, bool) {
+	h.Lock()
+	defer h.Unlock()
+	
+	monitor, ok := h.LiveKitRoomMonitors[name]
+	return monitor, ok
+}
+
+func (h* Handler) removeRoomMonitor(name LiveKitRoomAlias) {
+	h.Lock()
+	defer h.Unlock()
+    if _, ok := h.LiveKitRoomMonitors[name]; ok {
+        delete(h.LiveKitRoomMonitors, name)
+        h.wg.Done()
+    }	
+}
+
 func (h *Handler) prepareMux() *http.ServeMux {
 
 	mux := http.NewServeMux()
