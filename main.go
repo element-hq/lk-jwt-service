@@ -20,6 +20,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"time"
 
@@ -33,10 +34,29 @@ import (
 	"github.com/matrix-org/gomatrixserverlib/spec"
 )
 
+type LiveKitAuth struct {
+	key          string
+	secret       string
+	authProvider *auth.SimpleKeyProvider
+	lkUrl        string
+}
+
+type RoomMonitorEvent int
+const(
+	NoJobsLeft RoomMonitorEvent = iota
+)
+type HandlerMessage struct {
+	RoomAlias LiveKitRoomAlias
+	Event     RoomMonitorEvent
+}
 type Handler struct {
-	key, secret, lkUrl    string
-	fullAccessHomeservers []string
-	skipVerifyTLS         bool
+	sync.Mutex
+	wg                       sync.WaitGroup
+	liveKitAuth              LiveKitAuth
+	fullAccessHomeservers    []string
+	skipVerifyTLS            bool
+	LiveKitRoomMonitors      map[LiveKitRoomAlias]*LiveKitRoomMonitor
+	MonitorCommChan          chan HandlerMessage
 }
 type Config struct {
 	Key                   string
