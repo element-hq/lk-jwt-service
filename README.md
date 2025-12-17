@@ -97,27 +97,19 @@ Releases are available
 docker run -e LIVEKIT_URL="ws://somewhere" -e LIVEKIT_KEY=devkey -e LIVEKIT_SECRET=secret -e LIVEKIT_FULL_ACCESS_HOMESERVERS=example.com -p 8080:8080 ghcr.io/element-hq/lk-jwt-service:0.3.0
 ```
 
-### 📦 From Release File
+### 📦 From Release
 
-1. Download & extract:
-
-```shell
-wget https://github.com/element-hq/lk-jwt-service/archive/refs/tags/v0.3.0.tar.gz
-tar -xvf v0.3.0.tar.gz
-mv lk-jwt-service-0.3.0 lk-jwt-service
-```
-
-2. Build:
+1. Download & mark as executable (example is amd64, replace with arm64 if needed):
 
 ```shell
-cd lk-jwt-service
-go build -o lk-jwt-service .
+wget https://github.com/element-hq/lk-jwt-service/releases/latest/download/lk-jwt-service_linux_amd64
+chmod +x lk-jwt-service_linux_amd64
 ```
 
 3. Run locally:
 
 ```shell
-LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret LIVEKIT_LOCAL_HOMESERVERS=example.com ./lk-jwt-service
+LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret LIVEKIT_LOCAL_HOMESERVERS=example.com ./lk-jwt-service_linux_amd64
 ```
 
 ## ⚙️ Configuration
