@@ -117,7 +117,7 @@ go build -o lk-jwt-service .
 3. Run locally:
 
 ```shell
-LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret LIVEKIT_LOCAL_HOMESERVERS=example.com ./lk-jwt-service
+LIVEKIT_URL="ws://somewhere" LIVEKIT_KEY=devkey LIVEKIT_SECRET=secret LIVEKIT_FULL_ACCESS_HOMESERVERS=example.com ./lk-jwt-service
 ```
 
 ## ⚙️ Configuration
@@ -265,6 +265,6 @@ LIVEKIT_URL="wss://matrix-rtc.m.localhost/livekit/sfu" \
 LIVEKIT_KEY=devkey \
 LIVEKIT_SECRET=secret \
 LIVEKIT_JWT_PORT=6080 \
-LIVEKIT_LOCAL_HOMESERVERS=synapse.m.localhost \
+LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse.m.localhost \
 ./lk-jwt-service
 ```
