@@ -201,7 +201,9 @@ func TestHandlePost(t *testing.T) {
 			t.Fatalf("failed to parse claims from JWT: %v", err)
 		}
 
-		if claims["sub"] != "member_test_id" {
+		want_sub_hash := sha256.Sum256([]byte("@user:"+ matrixServerName + "|testDevice|member_test_id"))
+		want_sub := unpaddedBase64.EncodeToString(want_sub_hash[:])
+		if claims["sub"] != want_sub {
 			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "member_test_id")
 		}
 
