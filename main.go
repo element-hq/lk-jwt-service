@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +85,8 @@ type MatrixErrorResponse struct {
 type ValidatableSFURequest interface {
     Validate() error
 }
+
+var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 
 func (e *MatrixErrorResponse) Error() string { 
     return e.Err
@@ -276,8 +279,13 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
         map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
     )
 
-    lkIdentity := req.Member.ID
-	lkRoomAlias := fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID)))
+	lkIdentityRaw := userInfo.Sub + "|" + req.Member.ClaimedDeviceID + "|" + req.Member.ID
+	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
+	lkIdentity := unpaddedBase64.EncodeToString(lkIdentityHash[:])
+
+    lkRoomAliasHash := sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID))
+	lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
+
     token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
     if err != nil {
 		log.Printf("Error getting LiveKit token: %v", err)
