@@ -206,7 +206,8 @@ func TestHandlePost(t *testing.T) {
 		}
 
 		// should have permission for the room
-		want_room := fmt.Sprintf("%x", sha256.Sum256([]byte("!testRoom:example.com" + "|" +  "m.call#ROOM")))
+		want_room_hash := sha256.Sum256([]byte("!testRoom:example.com" + "|" +  "m.call#ROOM"))
+		want_room := unpaddedBase64.EncodeToString(want_room_hash[:])
 		if claims["video"].(map[string]interface{})["room"] != want_room {
 			t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], want_room)
 		}
