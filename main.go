@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
