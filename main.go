@@ -141,13 +141,13 @@ func (r *SFURequest) Validate() error {
 			Err:     "The request body `openid_token` is missing a `access_token` or `matrix_server_name`",
 		}
 	}
-	
+
 	all_delayed_event_params_present := r.DelayID != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
 	at_least_one_delayed_event_param_present := r.DelayID != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
 	if (at_least_one_delayed_event_param_present && !all_delayed_event_params_present) {
-		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters", 
-			"DelayID", r.DelayID, 
-			"DelayTimeout", r.DelayTimeout, 
+		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
+			"DelayID", r.DelayID,
+			"DelayTimeout", r.DelayTimeout,
 			"DelayCsApiUrl", r.DelayCsApiUrl,
 		)
 		return &MatrixErrorResponse{
@@ -238,7 +238,7 @@ func (h *Handler) addDelayedEventJob(jobDescription *DelayedEventJob) {
 
 	slog.Debug("Handler: Adding delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
 
-	targetMonitor, ok := h.getRoomMonitor(LiveKitRoomAlias(jobDescription.LiveKitIdentity))	
+	targetMonitor, ok := h.getRoomMonitor(LiveKitRoomAlias(jobDescription.LiveKitIdentity))
 	if !ok {
 		slog.Info("Handler: Creating new LiveKitRoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
 		targetMonitor = NewLiveKitRoomMonitor(&h.liveKitAuth, jobDescription.LiveKitRoom)
@@ -357,8 +357,8 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	slog.Info(
-		"Handler: Got Matrix user info", "userInfo.Sub", 
-		userInfo.Sub, 
+		"Handler: Got Matrix user info", "userInfo.Sub",
+		userInfo.Sub,
 		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
 	)
 
@@ -442,7 +442,7 @@ func (h *Handler) addRoomMonitor(m *LiveKitRoomMonitor) {
 func (h* Handler) getRoomMonitor(name LiveKitRoomAlias) (*LiveKitRoomMonitor, bool) {
 	h.Lock()
 	defer h.Unlock()
-	
+
 	monitor, ok := h.LiveKitRoomMonitors[name]
 	return monitor, ok
 }
@@ -453,7 +453,7 @@ func (h* Handler) removeRoomMonitor(name LiveKitRoomAlias) {
     if _, ok := h.LiveKitRoomMonitors[name]; ok {
         delete(h.LiveKitRoomMonitors, name)
         h.wg.Done()
-    }	
+    }
 }
 
 func (h *Handler) prepareMux() *http.ServeMux {
@@ -630,7 +630,7 @@ func (h *Handler) handleSfuWebhook (w http.ResponseWriter, r *http.Request) {
 			monitorSnapshot, ok := h.getRoomMonitor(LiveKitRoomAlias(event.Room.Name))
 			if ok {
 				monitorSnapshot.SFUCommChan <- SFUMessage{
-					Type: ParticipantConnected, 
+					Type: ParticipantConnected,
 					LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
 				}
 			}
@@ -640,12 +640,12 @@ func (h *Handler) handleSfuWebhook (w http.ResponseWriter, r *http.Request) {
 			if ok {
 				if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
 					monitorSnapshot.SFUCommChan <- SFUMessage{
-						Type: ParticipantDisconnectedIntentionally, 
+						Type: ParticipantDisconnectedIntentionally,
 						LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
 					}
 				} else  {
 					monitorSnapshot.SFUCommChan <- SFUMessage{
-						Type: ParticipantConnectionAborted, 
+						Type: ParticipantConnectionAborted,
 						LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
 					}
 				}
@@ -803,7 +803,7 @@ func main() {
 		LiveKitAuth{
 			key:          config.Key,
 			secret:       config.Secret,
-			// for LiveKit webhooks we need authProvider, for createLiveKitRoom we need 
+			// for LiveKit webhooks we need authProvider, for createLiveKitRoom we need
 			// key and secret which is not exposed by authProvider, hence redundancy
 			authProvider: auth.NewSimpleKeyProvider(config.Key, config.Secret),
 			lkUrl:        config.LkUrl,
@@ -816,7 +816,7 @@ func main() {
 	// check if we can create a proper connection to SFU in order to fail fast
 
 	slog.Info(
-		"Starting service", 
+		"Starting service",
 		"LIVEKIT_URL", config.LkUrl,
 		"LIVEKIT_JWT_BIND", config.LkJwtBind,
 		"LIVEKIT_FULL_ACCESS_HOMESERVERS", config.FullAccessHomeservers,
