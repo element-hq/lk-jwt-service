@@ -1,0 +1,31 @@
+name: Trigger PR docker image
+on:
+  pull_request:
+    types:
+      - labeled
+
+jobs:
+  prdetails:
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.prdetails.outputs.pr_id }}
+      pr_data_json: ${{ steps.prdetails.outputs.data }}
+    steps:
+      - id: prdetails
+        uses: matrix-org/pr-details-action@15bde5285d7850ba276cc3bd8a03733e3f24622a # v1.3
+        continue-on-error: true
+        with:
+          owner: ${{ github.event.workflow_run.head_repository.owner.login }}
+          branch: ${{ github.event.workflow_run.head_branch }}
+
+  docker:
+    if: ${{ needs.prdetails.outputs.pr_data_json && contains(fromJSON(needs.prdetails.outputs.pr_data_json).labels.*.name, 'docker build') }}
+    needs: prdetails
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/build-and-publish-docker.yaml
+    with:
+      docker_tags: |
+        type=sha,format=short,event=branch
+        type=raw,value=pr_${{ needs.prdetails.outputs.pr_number }}

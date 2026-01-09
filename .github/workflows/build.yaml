@@ -1,0 +1,22 @@
+name: Trigger Build and publish Docker image
+
+on:
+  push:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-docker:
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/build-and-publish-docker.yaml
+    with:
+      docker_tags: |
+        type=sha,format=short,event=branch
+        type=ref,event=pr
+        type=semver,pattern={{version}}
+        type=raw,value=latest-ci_{{date 'X'}},enable={{is_default_branch}}
+        latest-ci

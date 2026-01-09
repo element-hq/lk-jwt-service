@@ -113,6 +113,8 @@ type ValidatableSFURequest interface {
 	Validate() error
 }
 
+var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
+
 func (e *MatrixErrorResponse) Error() string {
 	return e.Err
 }
@@ -365,9 +367,11 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
 	lkIdentityRaw := userInfo.Sub + "|" + req.Member.ClaimedDeviceID + "|" + req.Member.ID
 	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
-	lkIdentity := LiveKitIdentity(base64.StdEncoding.EncodeToString(lkIdentityHash[:]))
-	roomHash := sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID))
-	lkRoomAlias := LiveKitRoomAlias(base64.StdEncoding.EncodeToString(roomHash[:]))
+	lkIdentity := LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
+
+    lkRoomAliasHash := sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID))
+	lkRoomAlias := LiveKitRoomAlias(unpaddedBase64.EncodeToString(lkRoomAliasHash[:]))
+
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
 		slog.Error("Handler: Error getting LiveKit token", "userInfo.Sub", userInfo.Sub, "err", err)
