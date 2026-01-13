@@ -812,8 +812,8 @@ func main() {
 
 	handler := NewHandler(
 		LiveKitAuth{
-			key:          config.Key,
-			secret:       config.Secret,
+			key:    config.Key,
+			secret: config.Secret,
 			// for LiveKit webhooks we need authProvider, for createLiveKitRoom we need
 			// key and secret which is not exposed by authProvider, hence redundancy
 			authProvider: auth.NewSimpleKeyProvider(config.Key, config.Secret),
