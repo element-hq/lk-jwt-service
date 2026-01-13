@@ -230,11 +230,13 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	// We can hard-code the slotId since for the m.call application only the m.call#ROOM slot is defined. 
 	// This ensures that the same LiveKit room alias being derived for the same Matrix room for both the 
 	// LegacySFURequest (/sfu/get endpoint) and the SFURequest (/get_token endpoint). 
-    // Note A mismatch between the legacy livekit_alias field in the MatrixRTC membership event 
-	// and the actual livekitAlias (req.Room) as part of the LiveKit JWT Token does in general NOT
-	// confuse clients as the JWT token is passed as is to the livekit-client SDK.
+    // 
+	// Note a mismatch between the legacy livekit_alias (which is the Matrix roomId) field in the MatrixRTC 
+	// membership state event and the actual lkRoomAlias (as derived below and used on the SFU) which is 
+	// part of the LiveKit JWT Token does in general NOT confuse clients as the JWT token is passed as is
+	// to the livekit-client SDK.
 	// 
-    // This change ensures compatibility with clients using MatrixRTC slots.
+    // This change ensures compatibility with clients using pseudonymous livekit_aliases.
     slotId := "m.call#ROOM"
     lkRoomAliasHash := sha256.Sum256([]byte(req.Room + "|" + slotId))
     lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
