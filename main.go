@@ -226,6 +226,10 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
     // TODO: is DeviceID required? If so then we should have validated at the start
     lkIdentity := userInfo.Sub + ":" + req.DeviceID
+    // We hard code the slotId to end up in the same room when not using any slot id with this and the `get_token` endpoint.
+    // The same applies to why we hash the alias.
+    // Clients are not expected to care about the actual id. They just need the property that passing the same req.Room lets them end up in the same lk room (same alias)
+    // This makes it still compatible with clients using slots. req.Room will be room + slot.
     slotId := "m.call#ROOM"
     lkRoomAliasHash := sha256.Sum256([]byte(req.Room + "|" + slotId))
     lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
