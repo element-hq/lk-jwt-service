@@ -226,7 +226,10 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
     // TODO: is DeviceID required? If so then we should have validated at the start
     lkIdentity := userInfo.Sub + ":" + req.DeviceID
-    token, err := getJoinToken(h.key, h.secret, req.Room, lkIdentity)
+    slotId := "m.call#ROOM"
+    lkRoomAliasHash := sha256.Sum256([]byte(req.Room + "|" + slotId))
+    lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
+    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
     if err != nil {
 		return nil, &MatrixErrorResponse{
 			Status: http.StatusInternalServerError,
@@ -236,7 +239,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
     }
 
     if isFullAccessUser {
-        if err := createLiveKitRoom(r.Context(), h, req.Room, userInfo.Sub, lkIdentity); err != nil {
+        if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status: http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
