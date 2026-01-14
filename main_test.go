@@ -250,9 +250,10 @@ func TestLegacyHandlePost(t *testing.T) {
 	u, _ := url.Parse(testServer.URL)
 
 	matrixServerName = u.Host
+	matrixRoom := "testRoom"
 
 	testCase := map[string]interface{}{
-		"room": "testRoom",
+		"room": matrixRoom,
 		"openid_token": map[string]interface{}{
 			"access_token":       "testAccessToken",
 			"token_type":         "testTokenType",
@@ -313,9 +314,13 @@ func TestLegacyHandlePost(t *testing.T) {
 			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName+":testDevice")
 		}
 
+		slotId := "m.call#ROOM"
+		lkRoomAliasHash := sha256.Sum256([]byte(matrixRoom + "|" + slotId))
+		lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
+
 		// should have permission for the room
-		if claims["video"].(map[string]interface{})["room"] != "testRoom" {
-			t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
+		if claims["video"].(map[string]interface{})["room"] != lkRoomAlias {
+			t.Errorf("unexpected room: got %v want %v", claims["room"], lkRoomAlias)
 		}
 }
 
