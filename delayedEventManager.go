@@ -503,7 +503,7 @@ func (m *LiveKitRoomMonitor) AddJob(name LiveKitIdentity, job *DelayedEventJob) 
         )
 
         if err != nil {
-            slog.Warn("Error while issuing delayed disconnect event <restart> action", "room", job.LiveKitIdentity, "lkId", job.LiveKitIdentity, "err", err)
+            slog.Warn("Error while issuing delayed disconnect event <restart> action", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "err", err)
         }
     }()
 
