@@ -599,11 +599,14 @@ func NewLiveKitRoomMonitor(lkAuth *LiveKitAuth, roomAlias LiveKitRoomAlias) *Liv
 
 func (m *LiveKitRoomMonitor) addDelayedEventJob(job *DelayedEventJob) {
     slog.Info("RoomMonitor: Adding delayed event job", "room", m.RoomAlias, "lkId", job.LiveKitIdentity)
-    _, ok := m.GetJob(job.LiveKitIdentity)
+    existingJob, ok := m.GetJob(job.LiveKitIdentity)
     if ok {
         slog.Warn("RoomMonitor: Job already exists", "room", m.RoomAlias, "lkId", job.LiveKitIdentity)
-        return
+        existingJob.setState(Replaced)
+        existingJob.Close()
     }
-    job.MonitorChannel = m.JobCommChan
     m.AddJob(job.LiveKitIdentity, job)
+    if ok {
+        m.wg.Done()
+    }
 }
