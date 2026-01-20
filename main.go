@@ -289,10 +289,10 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-	log.Printf(
-		"Got Matrix user info for %s (%s)",
+	slog.Info(
+		"Handler: Got Matrix user info", "userInfo.Sub",
 		userInfo.Sub,
-		map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
+		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
 	)
 
 	// TODO: is DeviceID required? If so then we should have validated at the start
