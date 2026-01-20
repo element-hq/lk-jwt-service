@@ -518,8 +518,8 @@ func (m *LiveKitRoomMonitor) AddJob(name LiveKitIdentity, job *DelayedEventJob) 
 func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity) {
     m.Lock()
     defer m.Unlock()
-    if _, ok := m.jobs[name]; ok {
-        // TODO maybe shutdown the job properly
+    if job, ok := m.jobs[name]; ok {
+        job.Close()
         delete(m.jobs, name)
         m.wg.Done()
     }
