@@ -241,7 +241,7 @@ func (h *Handler) addDelayedEventJob(jobDescription *DelayedEventJob) {
 
 	slog.Debug("Handler: Adding delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
 
-	targetMonitor, ok := h.getRoomMonitor(LiveKitRoomAlias(jobDescription.LiveKitIdentity))
+	targetMonitor, ok := h.getRoomMonitor(LiveKitRoomAlias(jobDescription.LiveKitRoom))
 	if !ok {
 		slog.Info("Handler: Creating new LiveKitRoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
 		targetMonitor = NewLiveKitRoomMonitor(&h.liveKitAuth, jobDescription.LiveKitRoom)
