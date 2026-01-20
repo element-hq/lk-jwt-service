@@ -29,6 +29,7 @@ const (
     Connected
     Disconnected
     Completed
+    Replaced
 )
 
 type DelayedEventSignal int
