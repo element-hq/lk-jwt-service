@@ -433,6 +433,12 @@ func (job *DelayedEventJob) handleEventWaitingStateTimedOut(event DelayedEventSi
     return false
 }
 
+func (job *DelayedEventJob) Close() {
+    job.FsmTimerWaitingStateStop()
+    job.FsmTimerDelayedEventStop()
+    close(job.EventChannel)
+    slog.Debug("Job -> closed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)}
+
 func NewDelayedEventJob(csApiUrl string, delayID string, delayTimeout time.Duration, liveKitRoom LiveKitRoomAlias, liveKitIdentity LiveKitIdentity, MonitorChannel chan<- MonitorMessage) (*DelayedEventJob, error) {
     job := &DelayedEventJob{
         CsApiUrl:        csApiUrl,
