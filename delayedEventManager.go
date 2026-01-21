@@ -440,7 +440,9 @@ func (job *DelayedEventJob) Close() {
     close(job.EventChannel)
     slog.Debug("Job -> closed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)}
 
-func NewDelayedEventJob(csApiUrl string, delayID string, delayTimeout time.Duration, liveKitRoom LiveKitRoomAlias, liveKitIdentity LiveKitIdentity, MonitorChannel chan<- MonitorMessage) (*DelayedEventJob, error) {
+    if delayTimeout <= 0 {
+        return nil, fmt.Errorf("invalid delay timeout for delayed event job: %d", delayTimeout)
+    }
     job := &DelayedEventJob{
         CsApiUrl:        csApiUrl,
         DelayID:         delayID,
@@ -450,10 +452,6 @@ func NewDelayedEventJob(csApiUrl string, delayID string, delayTimeout time.Durat
         State:           WaitingForInitialConnect,
         MonitorChannel:  MonitorChannel,
         EventChannel:    make(chan DelayedEventSignal, 10),
-    }
-
-    if job.DelayTimeout <= 0 {
-        return nil, fmt.Errorf("invalid delay timeout for delayed event job: %d", job.DelayTimeout)
     }
 
     go func() {
