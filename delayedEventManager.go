@@ -379,7 +379,7 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
         */
 
 
-        go func(t *DelayedEventTimer, remaining time.Duration, dt time.Duration, nextReset time.Duration,lkRm LiveKitRoomAlias, lkId LiveKitIdentity, ch chan DelayedEventSignal) {
+        go func(t *DelayedEventTimer, remaining time.Duration, timeout time.Duration, nextReset time.Duration,lkRm LiveKitRoomAlias, lkId LiveKitIdentity, ch chan DelayedEventSignal) {
             // Create an exponential backoff policy with defaults
             expBackOff := backoff.NewExponentialBackOff()
             expBackOff.InitialInterval = 1000 * time.Millisecond
@@ -408,7 +408,7 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
             }
 
             // Schedule next reset in 80% of original timeout, but do not exceed remaining TTL
-            t.Reset(nextReset, dt)
+            t.Reset(nextReset, timeout)
             slog.Debug(fmt.Sprintf("FSM DelayedEvent -> Event: ActionRestart (scheduled next reset action in %s)", nextReset), "room", lkRm, "lkId", lkId)
         }(
             fsmDelayedEventTimer,
