@@ -161,9 +161,9 @@ type DelayedEventJob struct {
 }
 
 func (job *DelayedEventJob) String() string {
-    return fmt.Sprintf("DelayedEventJob{CSAPI: %s, DelayID: %s, DelayTimeout: %s, LiveKitRoom: %s, LiveKitIdentity: %s, State: %d}",
+    return fmt.Sprintf("DelayedEventJob{CSAPI: %s, DelayId: %s, DelayTimeout: %s, LiveKitRoom: %s, LiveKitIdentity: %s, State: %d}",
         job.CsApiUrl,
-        job.DelayID,
+        job.DelayId,
         job.DelayTimeout.String(),
         job.LiveKitRoom,
         job.LiveKitIdentity,
@@ -175,6 +175,7 @@ func (job *DelayedEventJob) setState(state DelayEventState) {
     job.Lock()
     defer job.Unlock()
     job.State = state
+    slog.Debug("Job: FSM -> State set", "newState", state, "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId)
 }
 
 func (job *DelayedEventJob) getState() DelayEventState {
@@ -237,6 +238,7 @@ func (job *DelayedEventJob) StopFsmTimerWaitingState() bool {
 }
 
 func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) bool {
+    slog.Debug("Job: FSM -> Event", "event", event, "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId)
     switch event {
     case ParticipantConnected:
         return job.handleEventParticipantConnected(event)
@@ -257,7 +259,7 @@ func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) bool {
     case SFUNotAvailable:
         // noop
     default:
-        slog.Warn("Job received unknown Event", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "event", event)
+        slog.Error("Job: FSM -> Event: Received unknown Event", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "event", event)
     }
     return false
 }
@@ -304,7 +306,7 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
         expBackOff.MaxInterval = 60 * time.Second
 
         operation := func() (*http.Response, error) {
-            return helperExecuteDelayedEventAction(job.CsApiUrl, job.DelayID, ActionSend)
+            return helperExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionSend)
         }
         
         resp, err := backoff.Retry(
@@ -315,13 +317,21 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
         )
         
         if err != nil {
-            slog.Warn("Error while issuing delayed disconnect event <send> action", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "err", err)
+            slog.Warn(
+                "Job: StateEntryAction -> ExecuteDelayedEventAction (ActionSend): Error while issuing action",
+                "state", Disconnected, "event", event,
+                "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
+            )
             // TODO ???
         }
 
         // If we exited loop without a successful response, notify and return
         if resp == nil || resp.StatusCode < 200 || (resp.StatusCode >= 300 && resp.StatusCode != 404) {
-            slog.Warn("Error while issuing delayed disconnect event <send> action within remaining time", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+            slog.Warn(
+                "Job: StateEntryAction -> ExecuteDelayedEventAction (ActionSend): Error while issuing action within remaining time",
+                "state", Disconnected, "event", event,
+                "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
+            )
             // TODO ???
         }
 
@@ -339,7 +349,11 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
             Event:           event,
             JobId:           job.JobId,
         }
-        slog.Info("FSM Job -> State Entry Action: Disconnect -> Action: completed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "err", err)
+        slog.Debug(
+            "Job: StateEntryAction -> Emit event <MonitorMessage->Disconnected>",
+            "state", Disconnected, "event", event,
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
+        )
 
     case Completed:
         job.StopFsmTimerDelayedEvent()
@@ -351,13 +365,26 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
             Event:           event,
             JobId:           job.JobId,
         }
-        slog.Info("FSM Job -> State Entry Action: Disconnect -> Action: completed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+        slog.Debug(
+            "Job: StateEntryAction -> Emit event <MonitorMessage->Completed>",
+            "state", Completed, "event", event,
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
+        )
     }
 }
 
 func (job *DelayedEventJob) handleEventParticipantConnected(event DelayedEventSignal) (stateChanged bool) {
     if job.getState() == WaitingForInitialConnect {
         job.setState(Connected)
+        slog.Info(
+            "Job: State -> Connected (by Event: ParticipantConnected)", 
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
+        )
+        return true
+    }
+    return false
+}
+
 func (job *DelayedEventJob) handleEventParticipantLookupSuccessful(event DelayedEventSignal) (stateChanged bool) {
     if job.getState() == WaitingForInitialConnect {
         job.setState(Connected)
@@ -373,7 +400,10 @@ func (job *DelayedEventJob) handleEventParticipantLookupSuccessful(event Delayed
 func (job *DelayedEventJob) handleEventParticipantDisconnected(event DelayedEventSignal) (stateChanged bool) {
     if job.getState() == Connected {
         job.setState(Disconnected)
-        slog.Info("FSM Job -> State changed: Disconnected (Event: LiveKit participant disconnected)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+        slog.Info(
+            "Job: State -> Disconnected (by Event: ParticipantDisconnected)", 
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
+        )
         return true
     }
     return false
@@ -382,7 +412,10 @@ func (job *DelayedEventJob) handleEventParticipantDisconnected(event DelayedEven
 func (job *DelayedEventJob) handleEventParticipantConnectionAborted(event DelayedEventSignal) (stateChanged bool) {
     if job.getState() == Connected {
         job.setState(Completed)
-        slog.Info("FSM Job -> State changed: Completed (Event: LiveKit participant connection aborted)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+        slog.Info(
+            "Job: State -> Completed (by Event: ParticipantConnectionAborted)", 
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
+        )
         return true
     }
     return false
@@ -392,6 +425,15 @@ func (job *DelayedEventJob) handleEventDelayedEventTimedOut(event DelayedEventSi
     curState := job.getState()
     if curState == WaitingForInitialConnect || curState == Connected {
         job.setState(Disconnected)
+        slog.Info(
+            "Job: State -> Disconnected (by Event: DelayedEventTimedOut)", 
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
+        )
+        return true
+    }
+    return false
+}
+
 func (job *DelayedEventJob) handleEventDelayedEventNotFound(event DelayedEventSignal) (stateChanged bool) {
     curState := job.getState()
     if curState == WaitingForInitialConnect || curState == Connected {
@@ -419,13 +461,18 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
         //  - The general case of races where the remaining time is already elapsed due to delays in
         //    processing
         if remainingSnapshot <= 0 {
+            // instead of issuing DelayedEventTimedOut event we directly transition to Disconnected state here for simplicity
             job.setState(Disconnected)
-            slog.Info("FSM Job -> State changed: Disconnected (Event: DelayedEvent timed out)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+            slog.Info(
+                "Job: State -> Disconnected (by Event: DelayedEventTimedOut)", 
+                "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
+            )
+            //slog.Info("Job: FSM -> State Update: Disconnected (Event: DelayedEvent timed out)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId)
             return true
         }
 
         operation := func() (*http.Response, error) {
-            return helperExecuteDelayedEventAction(job.CsApiUrl, job.DelayID, ActionRestart)
+            return helperExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionRestart)
         }
         /*
         operation := func()(*http.Response, error){log.Printf("huhu");return &http.Response{
@@ -457,7 +504,11 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
             )
 
             if err != nil {
-                slog.Warn("Error while issuing delayed disconnect event <restart> action", "room", lkRm, "lkId", lkId, "err", err)
+                slog.Warn(
+                    "Job: FSM DelayedEvent -> ExecuteDelayedEventAction (ActionRestart): Error while issuing action (Emit event <DelayedEventTimedOut>)", 
+                    "room", lkRm, "lkId", lkId, "jobId", job.JobId,
+                    "err", err,
+                )
                 ch <- DelayedEventTimedOut
                 return
             }
@@ -473,14 +524,17 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
 
             // If we exited loop without a successful response, notify and return
             if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-                slog.Warn("Error while issuing delayed disconnect event <restart> action within remaining time", "room", lkRm, "lkId", lkId)
+                slog.Warn(
+                    "Job: FSM DelayedEvent -> ExecuteDelayedEventAction (ActionRestart): Error while issuing action within remaining time (Emit event <DelayedEventTimedOut>)", 
+                    "room", lkRm, "lkId", lkId, "jobId", job.JobId,
+                )
                 ch <- DelayedEventTimedOut
                 return
             }
 
             // Schedule next reset in 80% of original timeout, but do not exceed remaining TTL
             t.Reset(nextReset, timeout)
-            slog.Debug(fmt.Sprintf("FSM DelayedEvent -> Event: ActionRestart (scheduled next reset action in %s)", nextReset), "room", lkRm, "lkId", lkId)
+            slog.Debug(fmt.Sprintf("Job: FSM DelayedEvent -> Event: ExecuteDelayedEventAction->ActionRestart (scheduled next reset action in %s)", nextReset), "room", lkRm, "lkId", lkId)
         }(
             fsmDelayedEventTimer,
             remainingSnapshot,
@@ -499,7 +553,11 @@ func (job *DelayedEventJob) handleEventWaitingStateTimedOut(event DelayedEventSi
     defer job.Unlock()
     if job.State == WaitingForInitialConnect {
         job.State = Disconnected
-        slog.Info("FSM Job -> state update: Disconnected (Event: WaitingState timed out)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+        slog.Info(
+            "Job: State -> Disconnected (by Event: WaitingStateTimedOut)", 
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
+        )
+        //slog.Info("Job: FSM -> State Update: Disconnected (Event: WaitingState timed out)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
         return true
     }
     return false
@@ -511,13 +569,14 @@ func (job *DelayedEventJob) Close() {
     close(job.EventChannel)
     slog.Debug("Job -> closed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)}
 
+func NewDelayedEventJob(parentCtx context.Context, csApiUrl string, delayId string, delayTimeout time.Duration, liveKitRoom LiveKitRoomAlias, liveKitIdentity LiveKitIdentity, MonitorChannel chan<- MonitorMessage) (*DelayedEventJob, error) {
     if delayTimeout <= 0 {
         return nil, fmt.Errorf("invalid delay timeout for delayed event job: %d", delayTimeout)
     }
     job := &DelayedEventJob{
         JobId:           NewUniqueID(),
         CsApiUrl:        csApiUrl,
-        DelayID:         delayID,
+        DelayId:         delayId,
         DelayTimeout:    delayTimeout,
         LiveKitRoom:     liveKitRoom,
         LiveKitIdentity: liveKitIdentity,
