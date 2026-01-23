@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/base32"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,6 +17,28 @@ import (
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
+
+type UniqueID string
+
+func NewUniqueID() UniqueID {
+	// 8 bytes for nano-timestamp + 8 bytes for randomness = 16 bytes (128 bits)
+	b := make([]byte, 16)
+
+	// 1. 64-bit Microsecond Timestamp
+	// Big-Endian ensures higher time units come first, making it sortable.
+	binary.BigEndian.PutUint64(b[0:8], uint64(time.Now().UnixMicro()))
+
+	// 2. 64-bit Randomness (Entropy)
+	// Provides 18 quintillion possibilities per microsecond to prevent collisions.
+	if _, err := rand.Read(b[8:16]); err != nil {
+		panic(err)
+	}
+
+    // Because Base32Hex uses an alphabet that is naturally ordered in the 
+    // ASCII/Unicode table (0-9 then A-V), the string comparison results will match 
+    // the chronological order of your original timestamp.
+    return UniqueID(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
+}
 
 var helperLiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
     roomClient := lksdk.NewRoomServiceClient(
