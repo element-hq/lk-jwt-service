@@ -51,6 +51,7 @@ const(
 type HandlerMessage struct {
 	RoomAlias LiveKitRoomAlias
 	Event     RoomMonitorEvent
+	MonitorId UniqueID
 }
 type Handler struct {
 	sync.Mutex
@@ -238,31 +239,18 @@ var exchangeOpenIdUserInfo = func(
 }
 
 func (h *Handler) addDelayedEventJob(jobDescription *DelayedEventJob) {
+	slog.Debug("Handler: Adding delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayId", jobDescription.DelayId)
 
-	slog.Debug("Handler: Adding delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
+	targetMonitor, releaseJobHandover := h.acquireRoomMonitorForJob(jobDescription.LiveKitRoom)
 
-	targetMonitor, ok := h.getRoomMonitor(LiveKitRoomAlias(jobDescription.LiveKitRoom))
+	ok, jobId := targetMonitor.HandoverDelayedEventJob(jobDescription)
 	if !ok {
-		slog.Info("Handler: Creating new LiveKitRoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
-		targetMonitor = NewLiveKitRoomMonitor(&h.liveKitAuth, jobDescription.LiveKitRoom)
-		targetMonitor.HandlerCommChan = h.MonitorCommChan
-		h.addRoomMonitor(targetMonitor)
+		slog.Error("Handler: Failed to handover job to RoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "jobId", jobId)
 	}
-
-	job, err := NewDelayedEventJob(
-		jobDescription.CsApiUrl,
-		jobDescription.DelayID,
-		jobDescription.DelayTimeout,
-		jobDescription.LiveKitRoom,
-		jobDescription.LiveKitIdentity,
-		targetMonitor.JobCommChan,
-	)
-	slog.Debug("Handler: Created delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayID", jobDescription.DelayID)
-	if err != nil {
-		slog.Error("Error creating delayed event job",  "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "err", err)
-		return
+	ok = releaseJobHandover()
+	if !ok {
+		slog.Error("Handler: Failed to release job handover to RoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "jobId", jobId)
 	}
-	targetMonitor.addDelayedEventJob(job)
 }
 
 func (h *Handler) isFullAccessUser(matrixServerName string) bool {
@@ -443,11 +431,51 @@ var helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth
 	return nil
 }
 
-func (h *Handler) addRoomMonitor(m *LiveKitRoomMonitor) {
+func (h *Handler) acquireRoomMonitorForJob(lkRoom LiveKitRoomAlias) (monitor *LiveKitRoomMonitor, releaseJobHandover func() bool) {
 	h.Lock()
 	defer h.Unlock()
-	h.LiveKitRoomMonitors[m.RoomAlias] = m
-	h.wg.Add(1)
+
+	var acquireSuccessfully bool = false
+
+	monitor, monitorExists := h.LiveKitRoomMonitors[lkRoom]
+
+	if monitorExists {
+		releaseJobHandover, acquireSuccessfully = monitor.StartJobHandover()
+	}
+
+	if !monitorExists || !acquireSuccessfully {
+		replacingMonitor := NewLiveKitRoomMonitor(context.TODO(), &h.liveKitAuth, lkRoom)
+		replacingMonitor.HandlerCommChan = h.MonitorCommChan
+		h.LiveKitRoomMonitors[lkRoom] = replacingMonitor
+		if monitorExists {
+			slog.Info("Handler: Replacing existing LiveKitRoomMonitor", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
+		} else {
+			slog.Debug("Handler: Created new LiveKitRoomMonitor", "room", lkRoom, "MonitorId", replacingMonitor.MonitorId)
+		}
+
+		// As the replacingMonitor is newly created and we have locked access to h.LiveKitRoomMonitors,
+		// we can be sure to acquire successfully
+		releaseJobHandover, _ = replacingMonitor.StartJobHandover()
+		if monitorExists {
+			if replacingMonitor.MonitorId <= monitor.MonitorId {
+				slog.Error("Handler: New LiveKitRoomMonitor MonitorId is not greater than existing MonitorId", "room", lkRoom, "existingMonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
+				panic(0)
+			}
+			h.wg.Add(1)
+			go func() {
+				defer h.wg.Done()
+				if monitor.tearingDown {
+					slog.Info("Handler: Closing replaced LiveKitRoomMonitor", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
+					monitor.Close()
+				} else {
+					slog.Error("Handler: Replaced LiveKitRoomMonitor is still active!", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
+				}
+			}()
+		}
+		return replacingMonitor, releaseJobHandover
+	}
+
+	return monitor, releaseJobHandover
 }
 
 func (h* Handler) getRoomMonitor(name LiveKitRoomAlias) (*LiveKitRoomMonitor, bool) {
@@ -463,7 +491,6 @@ func (h* Handler) removeRoomMonitor(name LiveKitRoomAlias) {
 	defer h.Unlock()
     if _, ok := h.LiveKitRoomMonitors[name]; ok {
         delete(h.LiveKitRoomMonitors, name)
-        h.wg.Done()
     }
 }
 
@@ -782,7 +809,9 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		LiveKitRoomMonitors:   make(map[LiveKitRoomAlias]*LiveKitRoomMonitor),
 	}
 
+	handler.wg.Add(1)
 	go func() {
+		defer handler.wg.Done()
 		for event := range handler.MonitorCommChan {
 			switch event.Event {
 			case NoJobsLeft:
