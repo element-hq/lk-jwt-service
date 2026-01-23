@@ -613,6 +613,45 @@ func NewDelayedEventJob(parentCtx context.Context, csApiUrl string, delayId stri
 }
 
 // LiveKitRoomMonitor manages DelayedEventJobs for a specific LiveKit Room.
+//
+// The monitor is responsible for:
+//   - Hosting DelayedEventJobs for a specific LiveKit room
+//     - HandoverJob() - creates and registers a new DelayedEventJob
+//     - Removes completed jobs and triggers their final shutdown
+//   - Coordinating job lifecycle
+//   - Starting a LiveKitParticipantLookup goroutine when a new DelayedEventJobs is added using exponential backoff
+//   - Dispatching events
+//       - Passing from SFU webhooks (ParticipantConnected, ParticipantDisconnected, etc.) to the corresponding job
+//       - Receiving MonitorMessage from individual DelayedEventJob (Disconnected/Completed state) 
+//   - Trigger Monitor teardown by sending NoJobsLeft event to Handler if no more active jobs AND no upcoming jobs
+//
+// TODO: Create FSM of LiveKitRoomMonitor
+//
+// Job Replacement Strategy (see HandoverJob()):
+//   Why Multiple Jobs Can Exist: Client implementations may have race conditions or bugs that result in
+//   multiple concurrent delayed event delegation requests for the same LiveKitRoom and LiveKitIdentity. 
+//   The monitor must gracefully handle these scenarios.
+//
+//   SFU Limitation: The SFU webhook only contains LiveKitIdentity and LiveKitRoom information. It has NO
+//   knowledge of JobId or MonitorId. This means when events arrive from the SFU, the monitor can only
+//   identify the target job by (LiveKitRoom, LiveKitIdentity) pair, not by specific JobId.
+//
+//   Replacement Logic: When a new delayed event job is created for the same room/participant combination:
+//     - A new UniqueID (JobId) is generated for the job
+//     - Since UniqueID is chronologically sorted (timestamp-based), the new JobId is always greater than any previous JobId
+//     - The monitor stores only the LATEST (highest JobId) job for each LiveKitIdentity in the jobs map
+//     - The previous job is asynchronously teared down / closed in a separate goroutine
+//   
+//   This ensures:
+//     - SFU events (which reference lkId/room, not JobId) always reach the current active (latest) job
+//       - Should an SFU event nevertheless fail to reach the job, the LiveKitParticipantLookup goroutine started alongside the job enqueuing ensures the participant is looked up properly.
+//     - Previous jobs gracefully shut down without race conditions or stuck goroutines. No orphaned or "zombie" jobs left in memory
+//     - Rapid successive delayed event updates replace their predecessors cleanly
+//
+// Thread Safety:
+//   - All state mutations protected by sync.Mutex
+//   - WaitGroup tracks active goroutines for graceful shutdown
+//   - Cleanup Closure Pattern: Release function from StartJobHandover() MUST be called to decrement upcomingJobs counter
 
 type LiveKitRoomMonitor struct {
 	sync.Mutex
@@ -816,7 +855,7 @@ func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
 		if m.upcomingJobs <= 0 {
 			slog.Warn("RoomMonitor: Attempt to release upcoming job when none are registered", "room", m.RoomAlias, "monitorId", m.MonitorId)
 			return false
-		}   
+		}
 		m.upcomingJobs--
 		return true
 	}
