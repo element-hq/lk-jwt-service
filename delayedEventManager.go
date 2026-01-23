@@ -64,7 +64,8 @@ type MonitorMessage struct {
 
 	LiveKitIdentity LiveKitIdentity
 	State           DelayEventState
-	Event 			DelayedEventSignal
+	Event           DelayedEventSignal
+	JobId           UniqueID
 }
 
 type LiveKitRoomMonitor struct {
@@ -129,8 +130,9 @@ func (s *DelayedEventTimer) TimeRemaining() time.Duration {
 
 type DelayedEventJob struct {
     sync.Mutex
+    JobId                UniqueID
     CsApiUrl             string
-    DelayID              string
+    DelayId              string
     DelayTimeout         time.Duration
     LiveKitRoom          LiveKitRoomAlias
     LiveKitIdentity      LiveKitIdentity
@@ -318,6 +320,7 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
             LiveKitIdentity: job.LiveKitIdentity,
             State:           Disconnected,
             Event:           event,
+            JobId:           job.JobId,
         }
         slog.Info("FSM Job -> State Entry Action: Disconnect -> Action: completed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "err", err)
 
@@ -329,6 +332,7 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
             LiveKitIdentity: job.LiveKitIdentity,
             State:           Completed,
             Event:           event,
+            JobId:           job.JobId,
         }
         slog.Info("FSM Job -> State Entry Action: Disconnect -> Action: completed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
     }
@@ -494,6 +498,7 @@ func (job *DelayedEventJob) Close() {
         return nil, fmt.Errorf("invalid delay timeout for delayed event job: %d", delayTimeout)
     }
     job := &DelayedEventJob{
+        JobId:           NewUniqueID(),
         CsApiUrl:        csApiUrl,
         DelayID:         delayID,
         DelayTimeout:    delayTimeout,
@@ -564,11 +569,20 @@ func (m *LiveKitRoomMonitor) AddJob(name LiveKitIdentity, job *DelayedEventJob) 
 
 }
 
-func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity) {
+func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity, jobId UniqueID) {
     m.Lock()
     defer m.Unlock()
     if job, ok := m.jobs[name]; ok {
-        job.Close()
+        if job.JobId != jobId {
+            slog.Error("RoomMonitor: Ignore attempt to remove job with mismatching JobId", "room", m.RoomAlias, "lkId", name, "jobId", job.JobId, "requestedJobId", jobId)
+            return
+        }
+        // move teardown outside of the lock
+        m.wg.Add(1)
+        go func() {
+            defer m.wg.Done()
+            job.Close()
+        }()
         delete(m.jobs, name)
         m.wg.Done()
     }
