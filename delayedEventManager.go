@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -151,6 +150,9 @@ func (dt *DelayedEventTimer) TimeRemaining() time.Duration {
 
 type DelayedEventJob struct {
     sync.Mutex
+    ctx                  context.Context
+    cancel               context.CancelFunc
+    wg                   sync.WaitGroup
     JobId                UniqueID
     CsApiUrl             string
     DelayId              string
@@ -314,7 +316,7 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
         }
         
         resp, err := backoff.Retry(
-            context.Background(),
+            job.ctx,
             operation,
             backoff.WithBackOff(expBackOff),
             backoff.WithMaxElapsedTime(remainingSnapshot),
@@ -491,8 +493,10 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
         }, nil}
         */
 
-
+        job.wg.Add(1)
         go func(t *DelayedEventTimer, remaining time.Duration, timeout time.Duration, nextReset time.Duration,lkRm LiveKitRoomAlias, lkId LiveKitIdentity, ch chan DelayedEventSignal) {
+            defer job.wg.Done()
+
             // Create an exponential backoff policy with defaults
             expBackOff := backoff.NewExponentialBackOff()
             expBackOff.InitialInterval = 1000 * time.Millisecond
@@ -501,7 +505,7 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
             expBackOff.MaxInterval = 60 * time.Second
             
             resp, err := backoff.Retry(
-                context.Background(),
+                job.ctx,
                 operation,
                 backoff.WithBackOff(expBackOff),
                 backoff.WithMaxElapsedTime(remaining),
@@ -568,6 +572,7 @@ func (job *DelayedEventJob) handleEventWaitingStateTimedOut(event DelayedEventSi
 }
 
 func (job *DelayedEventJob) Close() {
+    job.cancel()
     job.StopFsmTimerWaitingState()
     job.StopFsmTimerDelayedEvent()
     close(job.EventChannel)
@@ -577,7 +582,11 @@ func NewDelayedEventJob(parentCtx context.Context, csApiUrl string, delayId stri
     if delayTimeout <= 0 {
         return nil, fmt.Errorf("invalid delay timeout for delayed event job: %d", delayTimeout)
     }
+
+    ctx, cancel := context.WithCancel(parentCtx)
     job := &DelayedEventJob{
+        ctx:             ctx,
+        cancel:          cancel,
         JobId:           NewUniqueID(),
         CsApiUrl:        csApiUrl,
         DelayId:         delayId,
@@ -589,20 +598,32 @@ func NewDelayedEventJob(parentCtx context.Context, csApiUrl string, delayId stri
         EventChannel:    make(chan DelayedEventSignal, 10),
     }
 
+    job.wg.Add(1)
     go func() {
-        for event := range job.EventChannel {
-            slog.Debug("Job: Dispatching Event", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "event", event)
-            stateChanged := job.handleEvent(event)
-            if  stateChanged {
-                job.handleStateEntryAction(event)
+        defer job.wg.Done()
+
+        for {
+            select {
+            case <-job.ctx.Done():
+                slog.Debug("Job: Dispatching Events -> goroutine done", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+                return
+            case event := <- job.EventChannel:
+                slog.Debug("Job: Dispatching Event", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "event", event)
+                stateChanged := job.handleEvent(event)
+                if stateChanged {
+                    job.handleStateEntryAction(event)
+                }
             }
         }
     }()
 
     var waitingDuration = min(time.Hour, job.DelayTimeout)
 
+    job.wg.Add(1)
     job.fsmTimerWaitingState = time.AfterFunc(waitingDuration, func() {
-        slog.Debug("FSM WaitingState -> Event: WaitingStateTimedOut", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+        defer job.wg.Done()
+
+        slog.Debug("Job: FSM WaitingState -> Event: WaitingStateTimedOut", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
         job.EventChannel <- WaitingStateTimedOut
     })
 
