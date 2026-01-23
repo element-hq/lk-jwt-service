@@ -82,46 +82,63 @@ type LiveKitRoomMonitor struct {
 
 type DelayedEventTimer struct {
     sync.Mutex
+    wg                *sync.WaitGroup
     timer             *time.Timer
     timeout           time.Time
 }
 
-func NewDelayedEventTimer(restartDuration time.Duration, timeoutDuration time.Duration, f func()) *DelayedEventTimer {
-    dt := &DelayedEventTimer{}
+func NewDelayedEventTimer(wg *sync.WaitGroup, restartDuration time.Duration, timeoutDuration time.Duration, f func()) *DelayedEventTimer {
+    dt := &DelayedEventTimer{
+        wg: wg,
+    }
     dt.timeout = time.Now().Add(timeoutDuration)
     if restartDuration <= 0 {
         restartDuration = timeoutDuration
     }
-    dt.timer = time.AfterFunc(restartDuration , f)
+    dt.wg.Add(1)
+    dt.timer = time.AfterFunc(
+        restartDuration, 
+        func() {
+            defer dt.wg.Done()
+            f()
+        },
+    )
     return dt
 }
 
-func (s *DelayedEventTimer) Reset(restartDuration time.Duration, timeoutDuration time.Duration) bool {
-    s.Lock()
-    defer s.Unlock()
+func (dt *DelayedEventTimer) Reset(restartDuration time.Duration, timeoutDuration time.Duration) bool {
+    dt.Lock()
+    defer dt.Unlock()
     if restartDuration <= 0 {
         restartDuration = timeoutDuration
     }
-    s.timeout = time.Now().Add(timeoutDuration)
-    if s.timer != nil {
-        s.timer.Reset(restartDuration)
+    dt.timeout = time.Now().Add(timeoutDuration)
+    if dt.timer != nil {
+        dt.wg.Add(1)
+        dt.timer.Reset(restartDuration)
         return true
     }
     return false
 }
 
-func (s *DelayedEventTimer) Stop() {
-    s.Lock()
-    defer s.Unlock()
-    if s.timer != nil {
-        s.timer.Stop()
+func (dt *DelayedEventTimer) Stop() bool {
+    dt.Lock()
+    defer dt.Unlock()
+    if dt.timer != nil {
+        isStopped := dt.timer.Stop()
+        if isStopped {
+            dt.wg.Done()
+        }
+       return isStopped
     }
+    // Non existing timer is considered not as transitioning to stopped state
+    return false
 }
 
-func (s *DelayedEventTimer) TimeRemaining() time.Duration {
-    s.Lock()
-    defer s.Unlock()
-    remaining := time.Until(s.timeout)
+func (dt *DelayedEventTimer) TimeRemaining() time.Duration {
+    dt.Lock()
+    defer dt.Unlock()
+    remaining := time.Until(dt.timeout)
     if remaining < 0 {
         return 0
     }
