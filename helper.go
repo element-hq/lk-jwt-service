@@ -28,7 +28,7 @@ var helperLiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAut
     })
 
     if err == nil {
-        ch <- SFUMessage{Type: ParticipantConnected, LiveKitIdentity: lkId}
+        ch <- SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: lkId}
     }
 
     return (err==nil), err

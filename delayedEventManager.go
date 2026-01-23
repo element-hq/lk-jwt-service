@@ -35,6 +35,7 @@ const (
 type DelayedEventSignal int
 const (
     ParticipantConnected DelayedEventSignal = iota
+    ParticipantLookupSuccessful
     ParticipantDisconnectedIntentionally
     ParticipantConnectionAborted
     DelayedEventReset
@@ -209,6 +210,8 @@ func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) bool {
     switch event {
     case ParticipantConnected:
         return job.handleEventParticipantConnected(event)
+    case ParticipantLookupSuccessful:
+        return job.handleEventParticipantLookupSuccessful(event)
     case ParticipantDisconnectedIntentionally:
         return job.handleEventParticipantDisconnected(event)
     case ParticipantConnectionAborted:
@@ -314,8 +317,13 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 func (job *DelayedEventJob) handleEventParticipantConnected(event DelayedEventSignal) (stateChanged bool) {
     if job.getState() == WaitingForInitialConnect {
         job.setState(Connected)
-        
-        slog.Info("FSM Job -> State changed: Connected (Event: ParticipantConnected)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+func (job *DelayedEventJob) handleEventParticipantLookupSuccessful(event DelayedEventSignal) (stateChanged bool) {
+    if job.getState() == WaitingForInitialConnect {
+        job.setState(Connected)
+        slog.Info(
+            "Job: State -> Connected (by Event: ParticipantLookupSuccessful)", 
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
+        )
         return true
     }
     return false
@@ -570,6 +578,11 @@ func NewLiveKitRoomMonitor(lkAuth *LiveKitAuth, roomAlias LiveKitRoomAlias) *Liv
                     slog.Debug("FSM SFU: Event -> ParticipantConnected", "lkId", event.LiveKitIdentity)
                     if job, ok := monitor.GetJob(event.LiveKitIdentity); ok {
                         job.EventChannel <- ParticipantConnected
+                    }
+                case ParticipantLookupSuccessful:
+                    slog.Debug("FSM SFU: Event -> ParticipantLookupSuccessful", "lkId", event.LiveKitIdentity)
+                    if job, ok := monitor.GetJob(event.LiveKitIdentity); ok {
+                        job.EventChannel <- ParticipantLookupSuccessful
                     }
                 case ParticipantDisconnectedIntentionally:
                     slog.Debug("FSM SFU: Event -> ParticipantDisconnectedIntentionally", "lkId", event.LiveKitIdentity)
