@@ -40,7 +40,7 @@ const (
     ParticipantConnectionAborted
     DelayedEventReset
     DelayedEventTimedOut
-    DelayedEventSent
+    DelayedEventNotFound
     WaitingStateTimedOut
     SFUNotAvailable
 )
@@ -220,8 +220,8 @@ func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) bool {
         return job.handleEventDelayedEventReset(event)
     case DelayedEventTimedOut:
         return job.handleEventDelayedEventTimedOut(event)
-    case DelayedEventSent:
-        // noop
+    case DelayedEventNotFound:
+        return job.handleEventDelayedEventNotFound(event)
     case WaitingStateTimedOut:
         return job.handleEventWaitingStateTimedOut(event)
     case SFUNotAvailable:
@@ -291,7 +291,11 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
         }
 
         if resp != nil && resp.StatusCode == 404 {
-            slog.Warn("Delayed disconnect event <send> action already sent", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+            slog.Info(
+                "Job: StateEntryAction -> ExecuteDelayedEventAction (ActionSend): DelayedEventNotFound (already sent or cancelled)",
+                "state", Disconnected, "event", event,
+                "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
+            )
         }
         
         job.MonitorChannel <- MonitorMessage{
@@ -351,7 +355,14 @@ func (job *DelayedEventJob) handleEventDelayedEventTimedOut(event DelayedEventSi
     curState := job.getState()
     if curState == WaitingForInitialConnect || curState == Connected {
         job.setState(Disconnected)
-        slog.Info("FSM Job -> State changed: Disconnected (Event: DelayedEvent timed out)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+func (job *DelayedEventJob) handleEventDelayedEventNotFound(event DelayedEventSignal) (stateChanged bool) {
+    curState := job.getState()
+    if curState == WaitingForInitialConnect || curState == Connected {
+        job.setState(Disconnected)
+        slog.Info(
+            "Job: State -> Disconnected (by Event: DelayedEventNotFound; already sent or cancelled)", 
+            "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
+        )
         return true
     }
     return false
@@ -405,6 +416,15 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
             if err != nil {
                 slog.Warn("Error while issuing delayed disconnect event <restart> action", "room", lkRm, "lkId", lkId, "err", err)
                 ch <- DelayedEventTimedOut
+                return
+            }
+
+            if resp == nil || resp.StatusCode == 404 {
+                slog.Warn(
+                    "Job: FSM DelayedEvent -> ExecuteDelayedEventAction (ActionRestart): Already sent or cancelled (Emit event <DelayedEventSent>)", 
+                    "room", lkRm, "lkId", lkId, "jobId", job.JobId,
+                )
+                ch <- DelayedEventNotFound
                 return
             }
 
