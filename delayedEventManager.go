@@ -70,14 +70,18 @@ type MonitorMessage struct {
 
 type LiveKitRoomMonitor struct {
     sync.Mutex
-    lkAuth      *LiveKitAuth
-    RoomAlias   LiveKitRoomAlias
-    jobs        map[LiveKitIdentity]*DelayedEventJob
-    JobCommChan chan MonitorMessage
-    SFUCommChan chan SFUMessage
-    HandlerCommChan           chan HandlerMessage
-    wg          sync.WaitGroup
-    quit        chan bool
+    ctx             context.Context
+    cancel          context.CancelFunc
+    tearingDown     bool
+    upcomingJobs    int
+    MonitorId       UniqueID
+    lkAuth          *LiveKitAuth
+    RoomAlias       LiveKitRoomAlias
+    jobs            map[LiveKitIdentity]*DelayedEventJob
+    JobCommChan     chan MonitorMessage
+    SFUCommChan     chan SFUMessage
+    HandlerCommChan chan HandlerMessage
+    wg              sync.WaitGroup
 }
 
 type DelayedEventTimer struct {
@@ -612,19 +616,59 @@ func (m *LiveKitRoomMonitor) GetJob(name LiveKitIdentity) (*DelayedEventJob, boo
     return job, ok
 }
 
-func (m *LiveKitRoomMonitor) AddJob(name LiveKitIdentity, job *DelayedEventJob) {
+func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
     m.Lock()
     defer m.Unlock()
-    m.jobs[name] = job
+    if m.tearingDown {
+        return nil, false
+    }
+    
+    m.upcomingJobs++
+
     m.wg.Add(1)
+    release = func() bool {
+        defer m.wg.Done()
+
+        m.Lock()
+        defer m.Unlock()
+        
+        if m.tearingDown {
+            return false
+        }
+        if m.upcomingJobs <= 0 {
+            slog.Warn("RoomMonitor: Attempt to release upcoming job when none are registered", "room", m.RoomAlias, "monitorId", m.MonitorId)
+            return false
+        }   
+        m.upcomingJobs--
+        return true
+    }
+
+    return release, true
+}
+
+func (m *LiveKitRoomMonitor) AddJob(job *DelayedEventJob) bool {
+    m.Lock()
+    defer m.Unlock()
+
+    if m.tearingDown {
+        slog.Warn("RoomMonitor: Attempt to add job to closed monitor", "room", m.RoomAlias,"monitorId", m.MonitorId, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId)
+        return false
+    }
+
+    m.jobs[job.LiveKitIdentity] = job
+    slog.Info("RoomMonitor: Added Job", "room", m.RoomAlias, "monitorId", m.MonitorId, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId)
 
     var waitingDuration = min(time.Hour, job.DelayTimeout)
 
     opParticipantLookup := func() (bool, error) {
-        return helperLiveKitParticipantLookup(context.TODO(), *m.lkAuth, job.LiveKitRoom, job.LiveKitIdentity, m.SFUCommChan)
+        return helperLiveKitParticipantLookup(job.ctx, *m.lkAuth, job.LiveKitRoom, job.LiveKitIdentity, m.SFUCommChan)
     }
 
+    m.wg.Add(1)
     go func() {
+        defer m.wg.Done()
+
+        // Create an exponential backoff policy
         expBackOff := backoff.NewExponentialBackOff()
         expBackOff.InitialInterval = 1000 * time.Millisecond
         expBackOff.Multiplier = 1.5
@@ -632,17 +676,18 @@ func (m *LiveKitRoomMonitor) AddJob(name LiveKitIdentity, job *DelayedEventJob) 
         expBackOff.MaxInterval = 60 * time.Second
         
         _, err := backoff.Retry(
-            context.Background(),
+            job.ctx,
             opParticipantLookup,
             backoff.WithBackOff(expBackOff),
             backoff.WithMaxElapsedTime(waitingDuration),
         )
 
         if err != nil {
-            slog.Warn("Error while looking up LiveKit participant", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "err", err)
+            slog.Warn("RoomMonitor: Error while looking up LiveKit participant", "room", job.LiveKitRoom, "monitorId", m.MonitorId,"lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId, "err", err)
         }
     }()
 
+    return true
 }
 
 func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity, jobId UniqueID) {
@@ -660,49 +705,68 @@ func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity, jobId UniqueID) {
             job.Close()
         }()
         delete(m.jobs, name)
-        m.wg.Done()
     }
 
-    if len(m.jobs) == 0 {
+    slog.Info("RoomMonitor: Removed delayed event job", "room", m.RoomAlias, "lkId", name, "monitorId", m.MonitorId, "jobId", jobId, "leftNumJobs", len(m.jobs))
+
+    if len(m.jobs) == 0 && m.upcomingJobs == 0 {
+        m.tearingDown = true
         m.HandlerCommChan <- HandlerMessage{
             RoomAlias: m.RoomAlias,
-            Event: NoJobsLeft,
+            Event:     NoJobsLeft,
+            MonitorId: m.MonitorId,
         }
+        slog.Info("RoomMonitor: Emit event <HandlerMessage->NoJobsLeft>", "room", m.RoomAlias, "lkId", name, "monitorId", m.MonitorId, "jobId", jobId)
     }
 }
 
-func NewLiveKitRoomMonitor(lkAuth *LiveKitAuth, roomAlias LiveKitRoomAlias) *LiveKitRoomMonitor {
+func (m *LiveKitRoomMonitor) Close() {
+    m.cancel()
+    m.wg.Wait()
+    slog.Debug("RoomMonitor -> closed", "room", m.RoomAlias, "monitorId", m.MonitorId)
+}
+
+func NewLiveKitRoomMonitor(parentCtx context.Context, lkAuth *LiveKitAuth, roomAlias LiveKitRoomAlias) *LiveKitRoomMonitor {
+
+    ctx, cancel := context.WithCancel(parentCtx)
 
     monitor := &LiveKitRoomMonitor{
-        lkAuth:      lkAuth,
-        RoomAlias:   roomAlias,
-        jobs:        make(map[LiveKitIdentity]*DelayedEventJob),
-        JobCommChan: make(chan MonitorMessage),
-        SFUCommChan: make(chan SFUMessage, 100),
-        quit:        make(chan bool),
-        wg:          sync.WaitGroup{},
+        ctx:          ctx,
+        cancel:       cancel,
+        wg:           sync.WaitGroup{},
+        tearingDown:  false,
+        upcomingJobs: 0,
+        MonitorId:    NewUniqueID(),
+        lkAuth:       lkAuth,
+        RoomAlias:    roomAlias,
+        jobs:         make(map[LiveKitIdentity]*DelayedEventJob),
+        JobCommChan:  make(chan MonitorMessage),
+        SFUCommChan:  make(chan SFUMessage, 100),
     }
 
     // Dispatching goroutine for handling Events from Jobs and SFU
+    monitor.wg.Add(1)
     go func() {
+        defer monitor.wg.Done()
+
         for {
             select {
             case event := <- monitor.JobCommChan:
-                slog.Debug("RoomMonitor: MonitorMessage received", "room", monitor.RoomAlias, "lkId", event.LiveKitIdentity, "event", event.Event)
-                job, ok := monitor.GetJob(event.LiveKitIdentity)
+                slog.Debug("RoomMonitor Dispatching: MonitorMessage received", "room", monitor.RoomAlias, "lkId", event.LiveKitIdentity, "event", event.Event)
+                _, ok := monitor.GetJob(event.LiveKitIdentity)
                 if !ok {
                     slog.Warn("RoomMonitor: Job not found", "room", monitor.RoomAlias, "lkId", event.LiveKitIdentity)
                     continue
                 }
                 switch event.State {
-                 case Disconnected:                    
-                    slog.Info("RoomMonitor: Removing Job (Event: Disconnected)", "room", monitor.RoomAlias, "lkId", event.LiveKitIdentity)
-                    monitor.RemoveJob(event.LiveKitIdentity)
-                 case Completed:
-                    slog.Info("RoomMonitor: Removing Job (Event: Completed)", "room", monitor.RoomAlias, "lkId", event.LiveKitIdentity)
-                    monitor.RemoveJob(event.LiveKitIdentity)
+                case Disconnected:                    
+                    slog.Debug("RoomMonitor: Removing Job (Event: Disconnected)", "room", monitor.RoomAlias, "lkId", event.LiveKitIdentity)
+                    monitor.RemoveJob(event.LiveKitIdentity, event.JobId)
+                case Completed:
+                    slog.Debug("RoomMonitor: Removing Job (Event: Completed)", "room", monitor.RoomAlias, "lkId", event.LiveKitIdentity)
+                    monitor.RemoveJob(event.LiveKitIdentity, event.JobId)
                  default:
-                    log.Printf("LkId: %s, Job %s in Monitor %s changed state to %d", event.LiveKitIdentity, job.String(), monitor.RoomAlias, event.State)
+                    slog.Warn("RoomMonitor: MonitorMessage received with unhandled State", "room", monitor.RoomAlias, "lkId", event.LiveKitIdentity, "JobId", event.JobId, "state", event.State)
                 }
             case event := <-monitor.SFUCommChan:
                 switch event.Type {
@@ -727,30 +791,56 @@ func NewLiveKitRoomMonitor(lkAuth *LiveKitAuth, roomAlias LiveKitRoomAlias) *Liv
                         job.EventChannel <- ParticipantConnectionAborted
                     }
                 }
-            case <-monitor.quit:
-                log.Printf("Exiting AddJobChan goroutine for Monitor %s", monitor.RoomAlias)
-                //close(monitor.AddJobChan)
-                //close(monitor.JobCommChan)
+            case <-monitor.ctx.Done():
+                slog.Debug("RoomMonitor: Dispatching goroutine for handling Events from Jobs and SFU done.", "room", monitor.RoomAlias)
                 return
             }
         }
     }()
 
-    slog.Info("LiveKitRoomMonitor: Started", "room", roomAlias)
+    slog.Info("LiveKitRoomMonitor: Started", "room", roomAlias, "monitorId", monitor.MonitorId)
 
     return monitor
 }
 
-func (m *LiveKitRoomMonitor) addDelayedEventJob(job *DelayedEventJob) {
-    slog.Info("RoomMonitor: Adding delayed event job", "room", m.RoomAlias, "lkId", job.LiveKitIdentity)
+func (m *LiveKitRoomMonitor) HandoverDelayedEventJob(jobDescription *DelayedEventJob) (bool, UniqueID) {
+	job, err := NewDelayedEventJob(
+		m.ctx,
+		jobDescription.CsApiUrl,
+		jobDescription.DelayId,
+		jobDescription.DelayTimeout,
+		jobDescription.LiveKitRoom,
+		jobDescription.LiveKitIdentity,
+		m.JobCommChan,
+	)
+	slog.Debug("Handler: Created delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayId", jobDescription.DelayId, "JobId", job.JobId)
+	if err != nil {
+		slog.Error("Error creating delayed event job",  "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "JobId", job.JobId, "err", err)
+		return false, UniqueID("")
+	}    
+    slog.Debug("RoomMonitor: Adding delayed event job", "room", m.RoomAlias, "lkId", job.LiveKitIdentity)
     existingJob, ok := m.GetJob(job.LiveKitIdentity)
     if ok {
-        slog.Warn("RoomMonitor: Job already exists", "room", m.RoomAlias, "lkId", job.LiveKitIdentity)
-        existingJob.setState(Replaced)
-        existingJob.Close()
+        // TODO: Do we really want to have the replace semantics here?
+        // Alternatives include:
+        // - Rejecting the new job and passing the error back to the caller
+        // - Accepting the new job if the old job does not anymore exist on the homeserver (404 on lookup)
+        if job.JobId <= existingJob.JobId {
+            slog.Error("RoomMonitor: New JobId is not greater than existing JobId", "room", m.RoomAlias, "existingJobId", existingJob.JobId, "newJobId", job.JobId)
+            panic(0)
+        }
+        m.wg.Add(1)
+        go func() {
+            defer m.wg.Done()
+            slog.Warn(
+                "RoomMonitor: Replacing already existing Job", 
+                "room", m.RoomAlias, "lkId", existingJob.LiveKitIdentity, 
+                "delayId", existingJob.DelayId, "newDelayId", job.DelayId, 
+                "existingJobId", existingJob.JobId, "newJobId", job.JobId,
+            )
+            existingJob.setState(Replaced)
+            existingJob.Close()
+        }()
     }
-    m.AddJob(job.LiveKitIdentity, job)
-    if ok {
-        m.wg.Done()
-    }
+    return m.AddJob(job), job.JobId
 }
