@@ -693,6 +693,7 @@ func (h *Handler) handleSfuWebhook (w http.ResponseWriter, r *http.Request) {
 						LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
 					}
 				} else  {
+					//  When the media connection cannot be established, participant_connection_aborted webhook is sent 
 					monitorSnapshot.SFUCommChan <- SFUMessage{
 						Type: ParticipantConnectionAborted,
 						LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
