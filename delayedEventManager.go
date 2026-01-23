@@ -278,6 +278,7 @@ func (job *DelayedEventJob) Close() {
 	job.cancel()
 	job.StopFsmTimerWaitingState()
 	job.StopFsmTimerDelayedEvent()
+	job.wg.Wait()
 	close(job.EventChannel)
 	slog.Debug("Job -> closed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
 }
