@@ -171,13 +171,7 @@ func (job *DelayedEventJob) DelayRestartDuration() time.Duration {
     return job.DelayTimeout * 8 / 10
 }
 
-func (job *DelayedEventJob) FsmTimerDelayedEventGetTimer() *DelayedEventTimer {
-    job.Lock()
-    defer job.Unlock()
-    return job.fsmTimerDelayedEvent
-}
-
-func (job *DelayedEventJob) FsmTimerDelayedEventGetRemainingTime() time.Duration {
+func (job *DelayedEventJob) GetFsmTimerDelayedEventRemainingTime() time.Duration {
     job.Lock()
     defer job.Unlock()
     if job.fsmTimerDelayedEvent != nil {
@@ -186,26 +180,41 @@ func (job *DelayedEventJob) FsmTimerDelayedEventGetRemainingTime() time.Duration
     return -1
 }
 
-func (job *DelayedEventJob) FsmTimerDelayedEventCreate(t *DelayedEventTimer) {
+func (job *DelayedEventJob) SetFsmTimerDelayedEvent(t *DelayedEventTimer) {
     job.Lock()
     defer job.Unlock()
     job.fsmTimerDelayedEvent = t
 }
 
-func (job *DelayedEventJob) FsmTimerDelayedEventStop()  {
+func (job *DelayedEventJob) GetFsmTimerDelayedEvent() *DelayedEventTimer {
+    job.Lock()
+    defer job.Unlock()
+    return job.fsmTimerDelayedEvent
+}
+
+func (job *DelayedEventJob) StopFsmTimerDelayedEvent() bool {
     job.Lock()
     defer job.Unlock()
     if job.fsmTimerDelayedEvent != nil {
-        job.fsmTimerDelayedEvent.Stop()
+        // Note the wg.Done() handling is done inside DelayedEventTimer.Stop()
+        return job.fsmTimerDelayedEvent.Stop()
     }
+    // Non existing timer is considered not as transitioned to stopped state
+    return false
 }
 
-func (job *DelayedEventJob) FsmTimerWaitingStateStop()  {
+func (job *DelayedEventJob) StopFsmTimerWaitingState() bool {
     job.Lock()
     defer job.Unlock()
     if job.fsmTimerWaitingState != nil {
-        job.fsmTimerWaitingState.Stop()
+        isStopped := job.fsmTimerWaitingState.Stop()
+        if isStopped {
+            job.wg.Done()
+        }
+        return isStopped
     }
+    // Non existing timer is considered not as transitioned to stopped state
+    return false
 }
 
 func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) bool {
@@ -244,24 +253,29 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 
         // The timerWaitingState is used as a sufficient criteria during WaitingForInitialConnect state
         // to transition to Disconnected state. However, once in Connected state we do not need it anymore
-        job.FsmTimerWaitingStateStop()
+        job.StopFsmTimerWaitingState()
 
-        // Create a simple Finate State Machine maintaining the MatrixRTC Sessions disconnect delayed event
-        job.FsmTimerDelayedEventCreate(NewDelayedEventTimer(job.DelayRestartDuration(), job.DelayTimeout, func() {
-            slog.Debug("FSM DelayedEvent -> Event: ResetTimerExpired", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+        // Create a Finate State Machine maintaining the MatrixRTC Session's delayed disconnect event
+        // - Maintains the remaining time until the delayed event times out (and will be sent by the 
+        //   Matrix Homeserver)
+        // - Periodically issues the "DelayedEventReset" event to self which in turn handles (with 
+        //   sufficient headroom) the actual restart action towards the Matrix Homeserver.
+        // Note that NewDelayedEventTimer will maintain the wg counter for us
+        job.SetFsmTimerDelayedEvent(NewDelayedEventTimer(&job.wg, job.DelayRestartDuration(), job.DelayTimeout, func() {
+            slog.Debug("Job: FSM DelayedEvent -> Event: ResetTimerExpired", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId)
             job.EventChannel <- DelayedEventReset
         }))
 
         // As we do not now how much time has been elapsed during the creation of the delayed event 
-        // and connecting to the Matrix Authorisation Service we immediately trigger Delayed Event 
-        // Reset action to sync the internal timer.
-        job.FsmTimerDelayedEventStop() // Note the timer will be re-started as part of DelayedEventReset
+        // and connecting to the Matrix Authorisation Service we immediately trigger the delayed event 
+        // reset action to sync the internal timer.
+        job.StopFsmTimerDelayedEvent() // Note the timer will be re-started as part of DelayedEventReset
         job.EventChannel <- DelayedEventReset
     case Disconnected:
 
-        remainingSnapshot := job.FsmTimerDelayedEventGetRemainingTime()
-        job.FsmTimerDelayedEventStop()
-        job.FsmTimerWaitingStateStop()
+        remainingSnapshot := job.GetFsmTimerDelayedEventRemainingTime()
+        job.StopFsmTimerDelayedEvent()
+        job.StopFsmTimerWaitingState()
 
         // Create an exponential backoff policy
         expBackOff := backoff.NewExponentialBackOff()
@@ -308,8 +322,8 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
         slog.Info("FSM Job -> State Entry Action: Disconnect -> Action: completed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "err", err)
 
     case Completed:
-        job.FsmTimerDelayedEventStop()
-        job.FsmTimerWaitingStateStop()
+        job.StopFsmTimerDelayedEvent()
+        job.StopFsmTimerWaitingState()
 
         job.MonitorChannel <- MonitorMessage{
             LiveKitIdentity: job.LiveKitIdentity,
@@ -372,11 +386,17 @@ func (job *DelayedEventJob) handleEventDelayedEventNotFound(event DelayedEventSi
 
 func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSignal) (stateChanged bool) {
     curState := job.getState()
-    fsmDelayedEventTimer := job.FsmTimerDelayedEventGetTimer()
-    
+    fsmDelayedEventTimer := job.GetFsmTimerDelayedEvent()
 
     if (curState == Connected || curState == WaitingForInitialConnect) && fsmDelayedEventTimer != nil {
-        remainingSnapshot := job.FsmTimerDelayedEventGetRemainingTime()
+        remainingSnapshot := job.GetFsmTimerDelayedEventRemainingTime()
+
+        // This is addressing
+        //  - A potential race condition from the StateEntryAction of Connected state
+        //    where we stop the timer (job.FsmTimerDelayedEventStop()) and immediately trigger a reset 
+        //    event to sync the timer.
+        //  - The general case of races where the remaining time is already elapsed due to delays in
+        //    processing
         if remainingSnapshot <= 0 {
             job.setState(Disconnected)
             slog.Info("FSM Job -> State changed: Disconnected (Event: DelayedEvent timed out)", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
@@ -465,8 +485,8 @@ func (job *DelayedEventJob) handleEventWaitingStateTimedOut(event DelayedEventSi
 }
 
 func (job *DelayedEventJob) Close() {
-    job.FsmTimerWaitingStateStop()
-    job.FsmTimerDelayedEventStop()
+    job.StopFsmTimerWaitingState()
+    job.StopFsmTimerDelayedEvent()
     close(job.EventChannel)
     slog.Debug("Job -> closed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)}
 
