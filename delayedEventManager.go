@@ -22,6 +22,7 @@ const (
     ActionSend    DelayEventAction = "send"
 )
 
+//go:generate stringer -type=DelayEventState
 type DelayEventState int
 
 const (
@@ -32,6 +33,7 @@ const (
     Replaced
 )
 
+//go:generate stringer -type=DelayedEventSignal
 type DelayedEventSignal int
 const (
     ParticipantConnected DelayedEventSignal = iota
