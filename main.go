@@ -94,7 +94,7 @@ type SFURequest struct {
 	SlotID         string              `json:"slot_id"`
 	OpenIDToken    OpenIDTokenType     `json:"openid_token"`
 	Member         MatrixRTCMemberType `json:"member"`
-	DelayID        string              `json:"delay_id,omitempty"`
+	DelayId        string              `json:"delay_id,omitempty"`
 	DelayTimeout   int                 `json:"delay_timeout,omitempty"`
 	DelayCsApiUrl  string              `json:"delay_cs_api_url,omitempty"`
 }
@@ -146,11 +146,11 @@ func (r *SFURequest) Validate() error {
 		}
 	}
 
-	all_delayed_event_params_present := r.DelayID != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
-	at_least_one_delayed_event_param_present := r.DelayID != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
+	all_delayed_event_params_present := r.DelayId != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
+	at_least_one_delayed_event_param_present := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
 	if (at_least_one_delayed_event_param_present && !all_delayed_event_params_present) {
 		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
-			"DelayID", r.DelayID,
+			"DelayId", r.DelayId,
 			"DelayTimeout", r.DelayTimeout,
 			"DelayCsApiUrl", r.DelayCsApiUrl,
 		)
@@ -221,7 +221,7 @@ var exchangeOpenIdUserInfo = func(
 	}
 
 	if skipVerifyTLS {
-		slog.Warn("OpenIDUserInfo:: !!! WARNING !!! Skipping TLS verification", "MatrixServerName", token.MatrixServerName)
+		slog.Warn("OpenIDUserInfo: !!! WARNING !!! Skipping TLS verification", "MatrixServerName", token.MatrixServerName)
 		// Disable TLS verification on the default HTTP Transport for the well-known lookup
 		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
@@ -325,7 +325,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
 	// Check if validated userInfo.Sub matches req.Member.ClaimedUserID
 	if req.Member.ClaimedUserID != userInfo.Sub {
-		slog.Warn("Handler: Claimed user ID %s does not match token subject %s", "ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
+		slog.Warn("Handler: ClaimedUserID %s does not match token subject %s", "ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
@@ -336,13 +336,13 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	// Does the user belong to homeservers granted full access
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-	delayedEventDelegationRequested := req.DelayID != ""
+	delayedEventDelegationRequested := req.DelayId != ""
 	// if delayedEventDelegationRequested {
 	// 	// TODO: Check if homeserver supported delegation of delayed events
 	// 	// org.matrix.msc4140
 	// }
 
-	// Use a valid DelayID as indicator for delegation of delayed events (fail early)
+	// Use a valid DelayId as indicator for delegation of delayed events (fail early)
 	if delayedEventDelegationRequested && !isFullAccessUser {
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
@@ -351,7 +351,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 	}
 
-	slog.Info(
+	slog.Debug(
 		"Handler: Got Matrix user info", "userInfo.Sub",
 		userInfo.Sub,
 		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
@@ -361,7 +361,8 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
 	lkIdentity := LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
 
-    lkRoomAliasHash := sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID))
+	matrixRtcSlot := req.RoomID + "|" + req.SlotID
+    lkRoomAliasHash := sha256.Sum256([]byte(matrixRtcSlot))
 	lkRoomAlias := LiveKitRoomAlias(unpaddedBase64.EncodeToString(lkRoomAliasHash[:]))
 
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
@@ -385,10 +386,10 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
 		if delayedEventDelegationRequested {
 			// TODO verify support for delayed events
-			slog.Info("Handler: Scheduling delayed event job", "room", lkRoomAlias, "lkId", lkIdentity, "DelayID", req.DelayID, "CsApiUrl", req.DelayCsApiUrl)
+			slog.Info("Handler: Scheduling delayed event job request", "room", lkRoomAlias, "lkId", lkIdentity, "DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
 			h.addDelayedEventJob(&DelayedEventJob{
 				CsApiUrl:         req.DelayCsApiUrl,
-				DelayID:          req.DelayID,
+				DelayId:          req.DelayId,
 				DelayTimeout:     time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:      lkRoomAlias,
 				LiveKitIdentity:  lkIdentity,
@@ -397,6 +398,16 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 	}
 
+	slog.Info(
+		"Handler: Generated SFU access token", 
+		"matrixId", userInfo.Sub,
+		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
+		"Slot", matrixRtcSlot,
+		"ClaimedDeviceID", req.Member.ClaimedDeviceID,
+		"lkId", lkIdentity,
+		"room", lkRoomAlias,
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), 
+	)
 	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
@@ -420,12 +431,12 @@ var helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth
 	// Log the room creation time and the user info
 	isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
 	slog.Info(
-		fmt.Sprintf("createLiveKitRoom: %s Room for full-access Matrix user", map[bool]string{true: "Created", false: "Using"}[isNewRoom]),
+		fmt.Sprintf("createLiveKitRoom: %s Room", map[bool]string{true: "Created", false: "Using"}[isNewRoom]),
 		"room", room,
 		"roomSid", lkRoom.Sid,
 		"lkId", lkIdentity,
 		"matrixUser", matrixUser,
-		"access", "full access",
+		"access", "full",
 	)
 
 	return nil
@@ -615,7 +626,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
-		slog.Info("Handler: New Request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+		slog.Debug("Handler: New Request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 		var sfuAccessRequest SFURequest
 
 		decoder := json.NewDecoder(r.Body)
@@ -799,8 +810,6 @@ func parseConfig() (*Config, error) {
 
 func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string) *Handler {
 
-	//writeDelayedEventJobChan := make(chan writeDelayedEventJob)
-
 	handler := &Handler{
 		liveKitAuth:              lkAuth,
 		skipVerifyTLS:            skipVerifyTLS,
@@ -815,10 +824,15 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		for event := range handler.MonitorCommChan {
 			switch event.Event {
 			case NoJobsLeft:
-				_, ok := handler.getRoomMonitor(event.RoomAlias)
+				monitor, ok := handler.getRoomMonitor(event.RoomAlias)
 				if ok {
-					slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias)
-					handler.removeRoomMonitor(event.RoomAlias)
+					monitor.Close()
+					if monitor.MonitorId == event.MonitorId {
+						slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias, "MonitorId", monitor.MonitorId)
+						handler.removeRoomMonitor(event.RoomAlias)
+					} else {
+						slog.Error("Handler: Not removing LiveKitRoomMonitor as IDs do not match!", "room", event.RoomAlias, "MonitorId", monitor.MonitorId, "RequestedMonitorId", event.MonitorId)
+					}
 				}
 			}
 		}
