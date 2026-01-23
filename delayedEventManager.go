@@ -54,6 +54,8 @@ type SFUMessage struct {
 	LiveKitIdentity LiveKitIdentity
 }
 
+// MonitorMessage is sent from DelayedEventJob to LiveKitRoomMonitor
+
 type MonitorMessage struct {
 	// Types of messages:
 	// - ClientConnectedToSFU
@@ -67,6 +69,24 @@ type MonitorMessage struct {
 	JobId           UniqueID
 }
 
+// DelayedEventTimer manages the timer for delayed event reset actions.
+//
+// DelayedEventTimer models the lifecycle of the MatrixRTC member disconnect cancellable delayed event.
+// In order to ensure headroom for the Reset action before the delayed event is actually emitted (and 
+// the participant is marked as disconnected), this timer maintains two durations:
+//  - restartDuration: Duration after which the delayed event reset action is issued to the Matrix Homeserver
+//  - timeoutDuration: Total duration after which the delayed event will be emitted by the Matrix Homeserver
+//
+// Thread Safety:
+//   - All state mutations protected by sync.Mutex
+//   - As the AfterFunc is handed over by the underlying job the WaitGroup is a pointer to the parent WaitGroup
+//   - Here, the WaitGroup tracks AfterFunc goroutines which requires
+//      - incremented when the AfterFunc timer is created or reset
+//      - decremented when AfterFunc defer or the timer is stopped
+//
+// Usage:
+// Create with NewDelayedEventTimer(), then call Reset() to reschedule and Stop() to cancel.
+// Use TimeRemaining() to query the remaining duration until timeout.
 type DelayedEventTimer struct {
 	sync.Mutex
 	wg                *sync.WaitGroup
