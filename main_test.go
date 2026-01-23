@@ -745,7 +745,7 @@ func TestMapSFURequest(t *testing.T) {
 					ClaimedUserID:   "@test:example.com",
 					ClaimedDeviceID: "testDevice",
 				},
-				DelayID:     "delayed123",
+				DelayId:     "delayed123",
 				DelayTimeout: 30,
 				DelayCsApiUrl: "https://example.com/api",
 			},
@@ -1164,18 +1164,19 @@ func TestLiveKitRoomMonitor(t *testing.T) {
 
 	lkAlias := LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848")
 
-	monitor := NewLiveKitRoomMonitor(&handler.liveKitAuth, lkAlias)
+	monitor := NewLiveKitRoomMonitor(context.TODO(), &handler.liveKitAuth, lkAlias)
 
 	job, _ := NewDelayedEventJob(
+				context.TODO(),
 				"https://synapse.m.localhost",
-				"syd_astTzXBzAazONpxHCqzW", 
+				"syd_astTzXBzAazONpxHCqzW",
 				10 * time.Second, 
 				lkAlias, 
 				"@azure-colonial-otter:synapse.m.localhostQQVMKEAUKY", 
 				monitor.JobCommChan,
 	)
 
-	monitor.addDelayedEventJob(job)
+	monitor.AddJob(job)
 	job.EventChannel <- ParticipantConnected
 	monitor.wg.Wait()
 

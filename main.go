@@ -243,7 +243,7 @@ func (h *Handler) addDelayedEventJob(jobDescription *DelayedEventJob) {
 
 	targetMonitor, releaseJobHandover := h.acquireRoomMonitorForJob(jobDescription.LiveKitRoom)
 
-	ok, jobId := targetMonitor.HandoverDelayedEventJob(jobDescription)
+	ok, jobId := targetMonitor.HandoverJob(jobDescription)
 	if !ok {
 		slog.Error("Handler: Failed to handover job to RoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "jobId", jobId)
 	}
