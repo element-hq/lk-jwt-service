@@ -23,7 +23,6 @@ const (
 
 //go:generate stringer -type=DelayEventState
 type DelayEventState int
-
 const (
 	WaitingForInitialConnect DelayEventState = iota
 	Connected
@@ -69,9 +68,8 @@ type MonitorMessage struct {
 	JobId           UniqueID
 }
 
-// DelayedEventTimer manages the timer for delayed event reset actions.
+// DelayedEventTimer manages the timer for delayed event reset actions as part of the DelayedEventJob.
 //
-// DelayedEventTimer models the lifecycle of the MatrixRTC member disconnect cancellable delayed event.
 // In order to ensure headroom for the Reset action before the delayed event is actually emitted (and 
 // the participant is marked as disconnected), this timer maintains two durations:
 //  - restartDuration: Duration after which the delayed event reset action is issued to the Matrix Homeserver
@@ -152,9 +150,10 @@ func (dt *DelayedEventTimer) TimeRemaining() time.Duration {
 	return remaining
 }
 
-// DelayedEventJob models the complete lifecycle of a Matrix delayed event for a single participant in a LiveKit room.
-// It orchestrates communication with the Matrix homeserver while tracking the participant's connection state and
-// managing periodic reset actions to prevent the delayed event from timing out prematurely.
+// DelayedEventJob models the complete lifecycle of a MatrixRTC  cancellable delayed disconnect event 
+// for a single participant in a LiveKit room. It orchestrates communication with the Matrix homeserver
+// while tracking the participant's connection state and managing periodic reset actions to prevent 
+// the delayed event from timing out prematurely.
 //
 // State Machine (TODO: Diagram):
 // The job transitions through the following states:
@@ -188,11 +187,11 @@ func (dt *DelayedEventTimer) TimeRemaining() time.Duration {
 //   - All public accessor methods (Get*/Set*/Stop*) acquire the lock
 //
 // Lifecycle:
-// 1. Created by LiveKitRoomMonitor.HandoverJob()
-// 2. Starts two goroutines: event dispatcher and waiting-state timer
-// 3. Receives events via EventChannel (from SFU or timers)
-// 4. Processes events through state machine (handleEvent -> handleStateEntryAction)
-// 5. Closed via Close() which cancels context and stops all timers
+//   1. Created by LiveKitRoomMonitor.HandoverJob()
+//   2. Starts two goroutines: event dispatcher and waiting-state timer
+//   3. Receives events via EventChannel (from SFU or timers)
+//   4. Processes events through state machine (handleEvent -> handleStateEntryAction)
+//   5. Closed via Close() which cancels context and stops all timers
 type DelayedEventJob struct {
 	sync.Mutex
 	ctx                  context.Context
