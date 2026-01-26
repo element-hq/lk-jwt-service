@@ -659,15 +659,15 @@ func TestMapSFURequest(t *testing.T) {
 		{
 			name: "Valid legacy request",
 			input: `{
-                "room": "testRoom",
-                "openid_token": {
-                    "access_token": "test_token",
-                    "token_type": "Bearer",
-                    "matrix_server_name": "example.com",
-                    "expires_in": 3600
-                },
-                "device_id": "testDevice"
-            }`,
+				"room": "testRoom",
+				"openid_token": {
+					"access_token": "test_token",
+					"token_type": "Bearer",
+					"matrix_server_name": "example.com",
+					"expires_in": 3600
+				},
+				"device_id": "testDevice"
+			}`,
 			want: &LegacySFURequest{
 				Room: "testRoom",
 				OpenIDToken: OpenIDTokenType{
@@ -682,20 +682,20 @@ func TestMapSFURequest(t *testing.T) {
 		{
 			name: "Valid Matrix 2.0 request",
 			input: `{
-                "room_id": "!testRoom:example.com",
-                "slot_id": "123",
-                "openid_token": {
-                    "access_token": "test_token",
-                    "token_type": "Bearer",
-                    "matrix_server_name": "example.com",
-                    "expires_in": 3600
-                },
-                "member": {
-                    "id": "test_id",
-                    "claimed_user_id": "@test:example.com",
-                    "claimed_device_id": "testDevice"
-                }
-            }`,
+				"room_id": "!testRoom:example.com",
+				"slot_id": "123",
+				"openid_token": {
+					"access_token": "test_token",
+					"token_type": "Bearer",
+					"matrix_server_name": "example.com",
+					"expires_in": 3600
+				},
+				"member": {
+					"id": "test_id",
+					"claimed_user_id": "@test:example.com",
+					"claimed_device_id": "testDevice"
+				}
+			}`,
 			want: &SFURequest{
 				RoomID: "!testRoom:example.com",
 				SlotID: "123",
@@ -731,7 +731,7 @@ func TestMapSFURequest(t *testing.T) {
 				"delay_id": "delayed123",
 				"delay_timeout": 30,
 				"delay_cs_api_url": "https://example.com/api"
-            }`,
+			}`,
 			want: &SFURequest{
 				RoomID: "!testRoom:example.com",
 				SlotID: "123",
@@ -769,7 +769,7 @@ func TestMapSFURequest(t *testing.T) {
 				},
 				"delay_id": "delayed123",
 				"delay_timeout": 30
-            }`,
+			}`,
 			want:        nil,
 			wantErrCode: "M_BAD_JSON",
 
@@ -788,16 +788,16 @@ func TestMapSFURequest(t *testing.T) {
 		{
 			name: "Invalid legacy request with extra field",
 			input: `{
-                "room": "testRoom",
-                "openid_token": {
-                    "access_token": "test_token",
-                    "token_type": "Bearer",
-                    "matrix_server_name": "example.com",
-                    "expires_in": 3600
-                },
-                "device_id": "testDevice",
-                "extra_field": "should_fail"
-            }`,
+				"room": "testRoom",
+				"openid_token": {
+					"access_token": "test_token",
+					"token_type": "Bearer",
+					"matrix_server_name": "example.com",
+					"expires_in": 3600
+				},
+				"device_id": "testDevice",
+				"extra_field": "should_fail"
+			}`,
 			want:        nil,
 			wantErrCode: "M_BAD_JSON",
 		},
