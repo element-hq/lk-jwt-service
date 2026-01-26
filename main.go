@@ -432,8 +432,7 @@ func (h *Handler) acquireRoomMonitorForJob(lkRoom LiveKitRoomAlias) (monitor *Li
 	}
 
 	if !monitorExists || !acquireSuccessfully {
-		replacingMonitor := NewLiveKitRoomMonitor(context.TODO(), &h.liveKitAuth, lkRoom)
-		replacingMonitor.HandlerCommChan = h.MonitorCommChan
+		replacingMonitor := NewLiveKitRoomMonitor(context.TODO(), h.MonitorCommChan, &h.liveKitAuth, lkRoom)
 		h.LiveKitRoomMonitors[lkRoom] = replacingMonitor
 		if monitorExists {
 			slog.Info("Handler: Replacing existing LiveKitRoomMonitor", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)

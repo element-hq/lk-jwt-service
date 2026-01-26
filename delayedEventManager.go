@@ -732,7 +732,7 @@ type LiveKitRoomMonitor struct {
 	wg              sync.WaitGroup
 }
 
-func NewLiveKitRoomMonitor(parentCtx context.Context, lkAuth *LiveKitAuth, roomAlias LiveKitRoomAlias) *LiveKitRoomMonitor {
+func NewLiveKitRoomMonitor(parentCtx context.Context, handlerCommChan chan HandlerMessage, lkAuth *LiveKitAuth, roomAlias LiveKitRoomAlias) *LiveKitRoomMonitor {
 
 	ctx, cancel := context.WithCancel(parentCtx)
 
@@ -748,6 +748,7 @@ func NewLiveKitRoomMonitor(parentCtx context.Context, lkAuth *LiveKitAuth, roomA
 		jobs:         make(map[LiveKitIdentity]*DelayedEventJob),
 		JobCommChan:  make(chan MonitorMessage),
 		SFUCommChan:  make(chan SFUMessage, 100),
+		HandlerCommChan: handlerCommChan,
 	}
 
 	// Dispatching goroutine for handling Events from Jobs and SFU
