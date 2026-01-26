@@ -119,8 +119,6 @@ type ValidatableSFURequest interface {
 	Validate() error
 }
 
-var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
-
 func (e *MatrixErrorResponse) Error() string {
 	return e.Err
 }
@@ -292,8 +290,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
 
 	slotId := "m.call#ROOM"
-	lkRoomAliasHash := sha256.Sum256([]byte(req.Room + "|" + slotId))
-	lkRoomAlias := LiveKitRoomAlias(unpaddedBase64.EncodeToString(lkRoomAliasHash[:]))
+	lkRoomAlias := CreateLiveKitRoomAlias(req.Room, slotId)
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
 		return nil, &MatrixErrorResponse{
@@ -362,13 +359,8 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
 	)
 
-	lkIdentityRaw := userInfo.Sub + "|" + req.Member.ClaimedDeviceID + "|" + req.Member.ID
-	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
-	lkIdentity := LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
-
-	matrixRtcSlot := req.RoomID + "|" + req.SlotID
-    lkRoomAliasHash := sha256.Sum256([]byte(matrixRtcSlot))
-	lkRoomAlias := LiveKitRoomAlias(unpaddedBase64.EncodeToString(lkRoomAliasHash[:]))
+	lkIdentity := CreateLiveKitIdentity(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
+	lkRoomAlias := CreateLiveKitRoomAlias(req.RoomID, req.SlotID)
 
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
@@ -414,7 +406,8 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		"Handler: Generated SFU access token", 
 		"matrixId", userInfo.Sub,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
-		"Slot", matrixRtcSlot,
+		"MatrixRoom", req.RoomID,
+		"MatrixRTCSlot", req.SlotID,
 		"ClaimedDeviceID", req.Member.ClaimedDeviceID,
 		"lkId", lkIdentity,
 		"room", lkRoomAlias,
