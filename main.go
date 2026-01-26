@@ -280,7 +280,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-	slog.Info(
+	slog.Debug(
 		"Handler: Got Matrix user info", "userInfo.Sub",
 		userInfo.Sub,
 		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
@@ -310,6 +310,16 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 		}
 	}
 
+	slog.Info(
+		"Handler: Generated Legacy SFU access token", 
+		"matrixId", userInfo.Sub,
+		"ClaimedDeviceID", req.DeviceID,
+		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
+		"MatrixRoom", req.Room,
+		"lkId", lkIdentity,
+		"room", lkRoomAlias,
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), 
+	)
 	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
@@ -398,10 +408,10 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	slog.Info(
 		"Handler: Generated SFU access token", 
 		"matrixId", userInfo.Sub,
+		"ClaimedDeviceID", req.Member.ClaimedDeviceID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
 		"MatrixRoom", req.RoomID,
 		"MatrixRTCSlot", req.SlotID,
-		"ClaimedDeviceID", req.Member.ClaimedDeviceID,
 		"lkId", lkIdentity,
 		"room", lkRoomAlias,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), 
@@ -518,7 +528,7 @@ func mapSFURequest(data *[]byte) (any, error) {
 
 // TODO: This is deprecated and will be removed in future versions
 func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
-	slog.Info("Handler (legacy endpoint): New Request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+	slog.Debug("Handler (legacy endpoint): New Request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
 	w.Header().Set("Content-Type", "application/json")
 
