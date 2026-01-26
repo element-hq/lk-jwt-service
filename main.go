@@ -29,7 +29,6 @@ import (
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/webhook"
-	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/mattn/go-isatty"
 
 	"github.com/matrix-org/gomatrix"
@@ -424,37 +423,6 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), 
 	)
 	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
-}
-
-var helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
-	roomClient := lksdk.NewRoomServiceClient(liveKitAuth.lkUrl, liveKitAuth.key, liveKitAuth.secret)
-	creationStart := time.Now().Unix()
-	lkRoom, err := roomClient.CreateRoom(
-		ctx,
-		&livekit.CreateRoomRequest{
-			Name:             string(room),
-			EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
-			DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
-			MaxParticipants:  0,      // 0 == no limitation
-		},
-	)
-
-	if err != nil {
-		return fmt.Errorf("unable to create room %s: %w", room, err)
-	}
-
-	// Log the room creation time and the user info
-	isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
-	slog.Info(
-		fmt.Sprintf("createLiveKitRoom: %s Room", map[bool]string{true: "Created", false: "Using"}[isNewRoom]),
-		"room", room,
-		"roomSid", lkRoom.Sid,
-		"lkId", lkIdentity,
-		"matrixUser", matrixUser,
-		"access", "full",
-	)
-
-	return nil
 }
 
 func (h *Handler) acquireRoomMonitorForJob(lkRoom LiveKitRoomAlias) (monitor *LiveKitRoomMonitor, releaseJobHandover func() bool) {
