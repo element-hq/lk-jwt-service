@@ -210,9 +210,9 @@ type DelayedEventJob struct {
 	fsmTimerDelayedEvent *DelayedEventTimer
 }
 
-func NewDelayedEventJob(parentCtx context.Context, csApiUrl string, delayId string, delayTimeout time.Duration, liveKitRoom LiveKitRoomAlias, liveKitIdentity LiveKitIdentity, MonitorChannel chan<- MonitorMessage) (*DelayedEventJob, error) {
-	if delayTimeout <= 0 {
-		return nil, fmt.Errorf("invalid delay timeout for delayed event job: %d", delayTimeout)
+func NewDelayedEventJob(parentCtx context.Context, jobRequest *DelayedEventRequest, MonitorChannel chan<- MonitorMessage) (*DelayedEventJob, error) {
+	if jobRequest.DelayTimeout <= 0 {
+		return nil, fmt.Errorf("invalid delay timeout for delayed event job: %d", jobRequest.DelayTimeout)
 	}
 
 	ctx, cancel := context.WithCancel(parentCtx)
@@ -220,11 +220,11 @@ func NewDelayedEventJob(parentCtx context.Context, csApiUrl string, delayId stri
 		ctx:             ctx,
 		cancel:          cancel,
 		JobId:           NewUniqueID(),
-		CsApiUrl:        csApiUrl,
-		DelayId:         delayId,
-		DelayTimeout:    delayTimeout,
-		LiveKitRoom:     liveKitRoom,
-		LiveKitIdentity: liveKitIdentity,
+		CsApiUrl:        jobRequest.DelayCsApiUrl,
+		DelayId:         jobRequest.DelayId,
+		DelayTimeout:    jobRequest.DelayTimeout,
+		LiveKitRoom:     jobRequest.LiveKitRoom,
+		LiveKitIdentity: jobRequest.LiveKitIdentity,
 		State:           WaitingForInitialConnect,
 		MonitorChannel:  MonitorChannel,
 		EventChannel:    make(chan DelayedEventSignal, 10),
@@ -926,19 +926,15 @@ func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
 	return release, true
 }
 
-func (m *LiveKitRoomMonitor) HandoverJob(jobDescription *DelayedEventJob) (bool, UniqueID) {
+func (m *LiveKitRoomMonitor) HandoverJob(jobRequest *DelayedEventRequest) (bool, UniqueID) {
 	job, err := NewDelayedEventJob(
 		m.ctx,
-		jobDescription.CsApiUrl,
-		jobDescription.DelayId,
-		jobDescription.DelayTimeout,
-		jobDescription.LiveKitRoom,
-		jobDescription.LiveKitIdentity,
+		jobRequest,
 		m.JobCommChan,
 	)
-	slog.Debug("Handler: Created delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayId", jobDescription.DelayId, "JobId", job.JobId)
+	slog.Debug("Handler: Created delayed event job", "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "DelayId", jobRequest.DelayId, "JobId", job.JobId)
 	if err != nil {
-		slog.Error("Error creating delayed event job",  "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "JobId", job.JobId, "err", err)
+		slog.Error("Error creating delayed event job",  "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "JobId", job.JobId, "err", err)
 		return false, UniqueID("")
 	}    
 	slog.Debug("RoomMonitor: Adding delayed event job", "room", m.RoomAlias, "lkId", job.LiveKitIdentity)

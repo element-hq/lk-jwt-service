@@ -89,6 +89,14 @@ type LegacySFURequest struct {
 	DeviceID    string          `json:"device_id"`
 }
 
+type DelayedEventRequest struct {
+	DelayId         string 
+	DelayTimeout    time.Duration
+	DelayCsApiUrl   string 
+	LiveKitRoom     LiveKitRoomAlias
+	LiveKitIdentity LiveKitIdentity
+}
+
 type SFURequest struct {
 	RoomID         string              `json:"room_id"`
 	SlotID         string              `json:"slot_id"`
@@ -238,18 +246,18 @@ var exchangeOpenIdUserInfo = func(
 	return &userinfo, nil
 }
 
-func (h *Handler) addDelayedEventJob(jobDescription *DelayedEventJob) {
-	slog.Debug("Handler: Adding delayed event job", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "DelayId", jobDescription.DelayId)
+func (h *Handler) addDelayedEventJob(jobRequest *DelayedEventRequest) {
+	slog.Debug("Handler: Adding delayed event job", "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "DelayId", jobRequest.DelayId)
 
-	targetMonitor, releaseJobHandover := h.acquireRoomMonitorForJob(jobDescription.LiveKitRoom)
+	targetMonitor, releaseJobHandover := h.acquireRoomMonitorForJob(jobRequest.LiveKitRoom)
 
-	ok, jobId := targetMonitor.HandoverJob(jobDescription)
+	ok, jobId := targetMonitor.HandoverJob(jobRequest)
 	if !ok {
-		slog.Error("Handler: Failed to handover job to RoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "jobId", jobId)
+		slog.Error("Handler: Failed to handover job to RoomMonitor", "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "jobId", jobId)
 	}
 	ok = releaseJobHandover()
 	if !ok {
-		slog.Error("Handler: Failed to release job handover to RoomMonitor", "room", jobDescription.LiveKitRoom, "lkId", jobDescription.LiveKitIdentity, "jobId", jobId)
+		slog.Error("Handler: Failed to release job handover to RoomMonitor", "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "jobId", jobId)
 	}
 }
 
@@ -387,13 +395,20 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		if delayedEventDelegationRequested {
 			// TODO verify support for delayed events
 			slog.Info("Handler: Scheduling delayed event job request", "room", lkRoomAlias, "lkId", lkIdentity, "DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
-			h.addDelayedEventJob(&DelayedEventJob{
-				CsApiUrl:         req.DelayCsApiUrl,
+			h.addDelayedEventJob(&DelayedEventRequest{
+				DelayCsApiUrl:    req.DelayCsApiUrl,
 				DelayId:          req.DelayId,
 				DelayTimeout:     time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:      lkRoomAlias,
 				LiveKitIdentity:  lkIdentity,
 			},
+			// h.addDelayedEventJob(&DelayedEventJob{
+			// 	CsApiUrl:         req.DelayCsApiUrl,
+			// 	DelayId:          req.DelayId,
+			// 	DelayTimeout:     time.Duration(req.DelayTimeout) * time.Millisecond,
+			// 	LiveKitRoom:      lkRoomAlias,
+			// 	LiveKitIdentity:  lkIdentity,
+			// },
 			)
 		}
 	}
