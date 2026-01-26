@@ -391,13 +391,6 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 				LiveKitRoom:      lkRoomAlias,
 				LiveKitIdentity:  lkIdentity,
 			},
-			// h.addDelayedEventJob(&DelayedEventJob{
-			// 	CsApiUrl:         req.DelayCsApiUrl,
-			// 	DelayId:          req.DelayId,
-			// 	DelayTimeout:     time.Duration(req.DelayTimeout) * time.Millisecond,
-			// 	LiveKitRoom:      lkRoomAlias,
-			// 	LiveKitIdentity:  lkIdentity,
-			// },
 			)
 		}
 	}
