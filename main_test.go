@@ -255,9 +255,10 @@ func TestLegacyHandlePost(t *testing.T) {
 	u, _ := url.Parse(testServer.URL)
 
 	matrixServerName = u.Host
+	matrixRoom := "testRoom"
 
 	testCase := map[string]interface{}{
-		"room": "testRoom",
+		"room": matrixRoom,
 		"openid_token": map[string]interface{}{
 			"access_token":       "testAccessToken",
 			"token_type":         "testTokenType",
@@ -319,8 +320,8 @@ func TestLegacyHandlePost(t *testing.T) {
 	}
 
 	// should have permission for the room
-	if claims["video"].(map[string]interface{})["room"] != "testRoom" {
-		t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
+	if claims["video"].(map[string]interface{})["room"] != string(CreateLiveKitRoomAlias(matrixRoom, "m.call#ROOM")) {
+		t.Errorf("unexpected room: got %v want %v", claims["room"], string(CreateLiveKitRoomAlias(matrixRoom, "m.call#ROOM")))
 	}
 }
 
@@ -1151,11 +1152,17 @@ func TestProcessLegacySFURequest(t *testing.T) {
 }
 
 func TestLiveKitRoomMonitor(t *testing.T) {
+
+	original_LiveKitParticipantLookup := helperLiveKitParticipantLookup
+	helperLiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { helperLiveKitParticipantLookup = original_LiveKitParticipantLookup })
+
 	handler := NewHandler(
 		LiveKitAuth{
 			secret: "secret",
 			key:    "devkey",
-//			lkUrl:  "wss://matrix-rtc.m.localhost/livekit/sfu",
 			lkUrl:  "ws://127.0.0.1:7880",
 		},
 		true,
@@ -1166,19 +1173,25 @@ func TestLiveKitRoomMonitor(t *testing.T) {
 
 	monitor := NewLiveKitRoomMonitor(context.TODO(), &handler.liveKitAuth, lkAlias)
 
+	jobRequest := &DelayedEventRequest{
+		DelayCsApiUrl:    "https://synapse.m.localhost",
+		DelayId:          "syd_astTzXBzAazONpxHCqzW",
+		DelayTimeout:     10 * time.Second,
+		LiveKitRoom:      lkAlias,
+		LiveKitIdentity:  "@azure-colonial-otter:synapse.m.localhostQQVMKEAUKY",
+	}
+
 	job, _ := NewDelayedEventJob(
 				context.TODO(),
-				"https://synapse.m.localhost",
-				"syd_astTzXBzAazONpxHCqzW",
-				10 * time.Second, 
-				lkAlias, 
-				"@azure-colonial-otter:synapse.m.localhostQQVMKEAUKY", 
+				jobRequest,
 				monitor.JobCommChan,
 	)
 
 	monitor.AddJob(job)
-	job.EventChannel <- ParticipantConnected
-	monitor.wg.Wait()
+	monitor.RemoveJob(LiveKitIdentity(lkAlias), job.JobId)
+	monitor.Close()
+
+	
 
 	/*
 	var matrixServerName string
