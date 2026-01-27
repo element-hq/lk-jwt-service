@@ -882,9 +882,10 @@ func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity, jobId UniqueID) {
 			job.Close()
 		}()
 		delete(m.jobs, name)
+		slog.Info("RoomMonitor: Removed delayed event job", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId, "leftNumJobs", len(m.jobs))
+	} else {
+		slog.Warn("RoomMonitor: Attempt to remove non existing job", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId)
 	}
-
-	slog.Info("RoomMonitor: Removed delayed event job", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId, "leftNumJobs", len(m.jobs))
 
 	if len(m.jobs) == 0 && m.upcomingJobs == 0 {
 		m.tearingDown = true
@@ -893,7 +894,7 @@ func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity, jobId UniqueID) {
 			Event:     NoJobsLeft,
 			MonitorId: m.MonitorId,
 		}
-		slog.Info("RoomMonitor: Emit event <HandlerMessage->NoJobsLeft>", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId)
+		slog.Debug("RoomMonitor: Emit event <HandlerMessage->NoJobsLeft>", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId)
 	}
 }
 
