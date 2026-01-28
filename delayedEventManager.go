@@ -230,13 +230,23 @@ func NewDelayedEventJob(parentCtx context.Context, jobRequest *DelayedEventReque
 		EventChannel:    make(chan DelayedEventSignal, 10),
 	}
 
-	job.wg.Add(1)
+	// job run goroutine responsible for:
+	// - Dispatching events from SFU and timers
+	// - Teardown of job
 	go func() {
-		defer job.wg.Done()
-
 		for {
 			select {
 			case <-job.ctx.Done():
+				// Teardown is happening here regardless of whether
+				// Close() was called or the parent ctx was cancelled.
+				slog.Debug(
+					"Job: Context Done -> tearing down runner goroutine dispatching events from SFU and Timers", 
+					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
+				)
+				job.StopFsmTimerDelayedEvent()
+				job.StopFsmTimerWaitingState()
+				job.wg.Wait()
+				close(job.EventChannel)
 				slog.Debug("Job: Dispatching Events -> goroutine done", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
 				return
 			case event := <- job.EventChannel:
@@ -273,13 +283,13 @@ func (job *DelayedEventJob) String() string {
 	)
 }
 
-func (job *DelayedEventJob) Close() {
-	job.cancel()
-	job.StopFsmTimerWaitingState()
-	job.StopFsmTimerDelayedEvent()
+func (job *DelayedEventJob) Close() error {
+	// The actual Teardown is happening in the event dispatcher goroutine
+	// see NewDelayedEventJob() for details
+	job.cancel()    // Signals the run loop to tear down
 	job.wg.Wait()
-	close(job.EventChannel)
 	slog.Debug("Job -> closed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+	return nil
 }
 
 func (job *DelayedEventJob) getState() DelayEventState {
@@ -661,10 +671,9 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
 }
 
 func (job *DelayedEventJob) handleEventWaitingStateTimedOut(event DelayedEventSignal) (stateChanged bool) {
-	job.Lock()
-	defer job.Unlock()
-	if job.State == WaitingForInitialConnect {
-		job.State = Disconnected
+	curState := job.getState()
+	if curState == WaitingForInitialConnect {
+		job.setState(Disconnected)
 		slog.Info(
 			"Job: State -> Disconnected (by Event: WaitingStateTimedOut)", 
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId,
@@ -751,11 +760,10 @@ func NewLiveKitRoomMonitor(parentCtx context.Context, handlerCommChan chan Handl
 		HandlerCommChan: handlerCommChan,
 	}
 
-	// Dispatching goroutine for handling Events from Jobs and SFU
-	monitor.wg.Add(1)
+	// Monitor run goroutine responsible for
+	// - Dispatching events from Jobs and SFU
+	// - Teardown of Monitor
 	go func() {
-		defer monitor.wg.Done()
-
 		for {
 			select {
 			case event := <- monitor.JobCommChan:
@@ -799,6 +807,9 @@ func NewLiveKitRoomMonitor(parentCtx context.Context, handlerCommChan chan Handl
 					}
 				}
 			case <-monitor.ctx.Done():
+				// Teardown is happening here regardless of whether
+				// Close() was called or the parent ctx was cancelled.
+				monitor.wg.Wait()
 				slog.Debug("RoomMonitor: Dispatching goroutine for handling Events from Jobs and SFU done.", "room", monitor.RoomAlias)
 				return
 			}
@@ -810,10 +821,14 @@ func NewLiveKitRoomMonitor(parentCtx context.Context, handlerCommChan chan Handl
 	return monitor
 }
 
-func (m *LiveKitRoomMonitor) Close() {
-	m.cancel()
+func (m *LiveKitRoomMonitor) Close() error {
+	// The actual Teardown is happening in the event dispatcher goroutine
+	// see NewLiveKitRoomMonitor() for details
+
+	m.cancel()   // Signals the run loop to tear down
 	m.wg.Wait()
 	slog.Debug("RoomMonitor -> closed", "room", m.RoomAlias, "MonitorId", m.MonitorId)
+	return nil
 }
 
 func (m *LiveKitRoomMonitor) GetJob(name LiveKitIdentity) (*DelayedEventJob, bool) {
