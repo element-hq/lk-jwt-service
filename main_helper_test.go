@@ -1,8 +1,14 @@
 package main
 
 import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cenkalti/backoff/v5"
 )
 
 // TestNewUniqueIDUniqueness verifies that each call to NewUniqueID() returns a unique ID
@@ -88,3 +94,60 @@ func TestNewUniqueIDStringConversion(t *testing.T) {
 		t.Errorf("Round-trip conversion failed: %s != %s", id, idAgain)
 	}
 }
+func TestExecuteDelayedEventAction_RetryAfter_Formats(t *testing.T) {
+	
+	futureDate := time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat)
+
+	tests := []struct {
+		name               string
+		retryAfterValue    string
+		expectedMinSeconds int
+	}{
+		{
+			name:               "Retry-After as seconds",
+			retryAfterValue:    "30",
+			expectedMinSeconds: 30,
+		},
+		{
+			name:               "Retry-After as HTTP date",
+			retryAfterValue:    futureDate,
+			expectedMinSeconds: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Mock Server
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", tt.retryAfterValue)
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			defer ts.Close()
+
+			resp, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+
+			if err == nil {
+				t.Fatal("Did not expect err==nil")
+			}
+
+			if resp != nil {
+				t.Error("Response is expected to be nil")
+			}
+
+			if _, ok := err.(*backoff.RetryAfterError); !ok {
+				t.Errorf("Expected error type *backoff.RetryAfterErr, got %T", err)		
+			}
+
+			var retryAfter *backoff.RetryAfterError
+			errors.As(err, &retryAfter)
+
+			// validate retry duration
+			// Allow a small mismatch due to the race from futureDate and the actual execution
+			diff := tt.expectedMinSeconds - int(retryAfter.Duration.Seconds())
+			if diff > 1 {
+				t.Errorf("Expected min seconds to be %d, got %d", tt.expectedMinSeconds, int(retryAfter.Duration.Seconds()))
+			}
+		})
+	}
+}
+

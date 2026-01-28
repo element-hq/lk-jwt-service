@@ -136,12 +136,11 @@ var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action Dela
 	url := fmt.Sprintf("%s%s/%s/%s", baseUrl, DelayedEventsEndpoint, delayID, action)
 	var jsonStr = []byte(`{}`)
 
-	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonStr))
-	slog.Debug("helperExecuteDelayedEventAction", "time", time.Now(), "url", url, "StatusCode", resp.StatusCode, "err", err)
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonStr))	
 
 	if err != nil{
+		slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", url, "err", err)
 		return resp, err
 	}
 	defer func() {
@@ -150,14 +149,19 @@ var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action Dela
 		}
 	}()
 
-	// https://go.dev/src/net/http/status.go
-	
-	// In case the delayed event is already send we get a 404 http.StatusNotFound
+	slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", url, "StatusCode", resp.StatusCode, "err", err)
+
+	// As noted here
+	// https://github.com/matrix-org/matrix-spec-proposals/blob/toger5/expiring-events-keep-alive/proposals/4140-delayed-events-futures.md#managing-delayed-events
+	// http.StatusNotFound (404) indicates that the delayed event is already sent or does not exist.
 	if action == ActionSend && resp.StatusCode == http.StatusNotFound {
 		return resp, nil
 	}
 
-	// In case on non-retriable error, return Permanent error to stop retrying.
+	// TODO: Should we ignore non-retriable errors here?
+	//   - Reason: The purpose of the exponential backoff is to retry in case the server is temporarily unavailable.
+	//
+	// Return a Permanent error to stop retrying.
 	// For this HTTP example, client errors are non-retriable.
 	/*if resp.StatusCode == 400 {
 		return "", backoff.Permanent(errors.New("bad request"))
@@ -166,10 +170,21 @@ var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action Dela
 	// If we are being rate limited, return a RetryAfter to specify how long to wait.
 	// This will also reset the backoff policy.
 	if resp.StatusCode == http.StatusTooManyRequests {
-		seconds, err := strconv.ParseInt(resp.Header.Get("Retry-After"), 10, 64)
-		if err == nil {
-			return nil, backoff.RetryAfter(int(seconds))
+		retryAfter := resp.Header.Get("Retry-After")
+
+		// 1st attempt: Parse as an integer (seconds)
+		if seconds, err := strconv.Atoi(retryAfter); err == nil {
+			return nil, backoff.RetryAfter(seconds)
 		}
+
+		// 2nd attempt: Parse as HTTP date (e.g. Wed, 21 Oct 2015 07:28:00 GMT)
+		if date, err := http.ParseTime(retryAfter); err == nil {
+			duration := time.Until(date)
+			if duration > 0 {
+				return nil, backoff.RetryAfter(int(duration.Seconds()))
+			}
+			return nil, backoff.RetryAfter(0) // Date is in the past
+		}		
 	}
 	
 	return resp, err
