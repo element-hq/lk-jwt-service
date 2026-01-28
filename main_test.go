@@ -797,16 +797,16 @@ func TestProcessSFURequest(t *testing.T) {
 func TestProcessLegacySFURequest(t *testing.T) {
 	// mock createLiveKitRoom
 	var called_createLiveKitRoom bool
-	original_createLiveKitRoom := helperCreateLiveKitRoom
+	original_createLiveKitRoom := CreateLiveKitRoom
 	
-	helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+	CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
 		called_createLiveKitRoom = true
 		if room == "" {
 			t.Error("expected room name passed into mock")
 		}
 		return nil
 	}
-	t.Cleanup(func() { helperCreateLiveKitRoom = original_createLiveKitRoom })
+	t.Cleanup(func() { CreateLiveKitRoom = original_createLiveKitRoom })
 
 	// mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool

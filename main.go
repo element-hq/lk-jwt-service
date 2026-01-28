@@ -274,7 +274,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	if isFullAccessUser {
-		if err := helperCreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
@@ -356,7 +356,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	if isFullAccessUser {
-		if err := helperCreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
