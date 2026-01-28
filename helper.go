@@ -42,6 +42,26 @@ func NewUniqueID() UniqueID {
 	return UniqueID(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }
 
+var exchangeOpenIdUserInfo = func(
+	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
+) (*fclient.UserInfo, error) {
+	if token.AccessToken == "" || token.MatrixServerName == "" {
+		return nil, errors.New("missing parameters in openid token")
+	}
+
+	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
+
+	// validate the openid token by getting the user's ID
+	userinfo, err := client.LookupUserInfo(
+		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
+	)
+	if err != nil {
+		slog.Error("OpenIDUserInfo: Failed to look up user info", "err", err)
+		return nil, errors.New("failed to look up user info")
+	}
+	return &userinfo, nil
+}
+
 var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 
 func CreateLiveKitRoomAlias(matrixRoom string, matrixRtcSlot string) LiveKitRoomAlias {

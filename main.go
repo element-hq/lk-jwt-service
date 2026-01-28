@@ -30,8 +30,6 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/matrix-org/gomatrix"
-	"github.com/matrix-org/gomatrixserverlib/fclient"
-	"github.com/matrix-org/gomatrixserverlib/spec"
 )
 
 type LiveKitAuth struct {
@@ -214,31 +212,6 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 		SetValidFor(time.Hour)
 
 	return at.ToJWT()
-}
-
-var exchangeOpenIdUserInfo = func(
-	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
-) (*fclient.UserInfo, error) {
-	if token.AccessToken == "" || token.MatrixServerName == "" {
-		return nil, errors.New("missing parameters in openid token")
-	}
-
-	if skipVerifyTLS {
-		slog.Warn("OpenIDUserInfo: !!! WARNING !!! Skipping TLS verification", "MatrixServerName", token.MatrixServerName)
-		// Disable TLS verification on the default HTTP Transport for the well-known lookup
-		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	}
-	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
-
-	// validate the openid token by getting the user's ID
-	userinfo, err := client.LookupUserInfo(
-		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
-	)
-	if err != nil {
-		slog.Error("OpenIDUserInfo: Failed to look up user info", "err", err)
-		return nil, errors.New("failed to look up user info")
-	}
-	return &userinfo, nil
 }
 
 func (h *Handler) addDelayedEventJob(jobRequest *DelayedEventRequest) {
@@ -739,6 +712,7 @@ func parseConfig() (*Config, error) {
 		slog.Warn("!!! WARNING !!!  Allow to skip invalid TLS certificates  !!! WARNING !!!")
 		slog.Warn("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
 		slog.Warn("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
+		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
 	key, secret := readKeySecret()
