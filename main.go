@@ -48,15 +48,6 @@ type HandlerMessage struct {
 	Event     RoomMonitorEvent
 	MonitorId UniqueID
 }
-type Handler struct {
-	sync.Mutex
-	wg                       sync.WaitGroup
-	liveKitAuth              LiveKitAuth
-	fullAccessHomeservers    []string
-	skipVerifyTLS            bool
-	LiveKitRoomMonitors      map[LiveKitRoomAlias]*LiveKitRoomMonitor
-	MonitorCommChan          chan HandlerMessage
-}
 type Config struct {
 	Key                   string
 	Secret                string
@@ -212,6 +203,50 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 		SetValidFor(time.Hour)
 
 	return at.ToJWT()
+}
+
+// Handler 
+type Handler struct {
+	sync.Mutex
+	wg                       sync.WaitGroup
+	liveKitAuth              LiveKitAuth
+	fullAccessHomeservers    []string
+	skipVerifyTLS            bool
+	LiveKitRoomMonitors      map[LiveKitRoomAlias]*LiveKitRoomMonitor
+	MonitorCommChan          chan HandlerMessage
+}
+
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string) *Handler {
+
+	handler := &Handler{
+		liveKitAuth:              lkAuth,
+		skipVerifyTLS:            skipVerifyTLS,
+		fullAccessHomeservers:    fullAccessHomeservers,
+		MonitorCommChan: make(chan HandlerMessage),
+		LiveKitRoomMonitors:   make(map[LiveKitRoomAlias]*LiveKitRoomMonitor),
+	}
+
+	handler.wg.Add(1)
+	go func() {
+		defer handler.wg.Done()
+		for event := range handler.MonitorCommChan {
+			switch event.Event {
+			case NoJobsLeft:
+				monitor, ok := handler.GetRoomMonitor(event.RoomAlias)
+				if ok {
+					monitor.Close()
+					if monitor.MonitorId == event.MonitorId {
+						slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias, "MonitorId", monitor.MonitorId)
+						handler.RemoveRoomMonitor(event.RoomAlias)
+					} else {
+						slog.Error("Handler: Not removing LiveKitRoomMonitor as IDs do not match!", "room", event.RoomAlias, "MonitorId", monitor.MonitorId, "RequestedMonitorId", event.MonitorId)
+					}
+				}
+			}
+		}
+	}()
+
+	return handler
 }
 
 func (h *Handler) addDelayedEventJob(jobRequest *DelayedEventRequest) {
@@ -438,7 +473,7 @@ func (h *Handler) acquireRoomMonitorForJob(lkRoom LiveKitRoomAlias) (monitor *Li
 	return monitor, releaseJobHandover
 }
 
-func (h* Handler) getRoomMonitor(name LiveKitRoomAlias) (*LiveKitRoomMonitor, bool) {
+func (h* Handler) GetRoomMonitor(name LiveKitRoomAlias) (*LiveKitRoomMonitor, bool) {
 	h.Lock()
 	defer h.Unlock()
 
@@ -446,7 +481,7 @@ func (h* Handler) getRoomMonitor(name LiveKitRoomAlias) (*LiveKitRoomMonitor, bo
 	return monitor, ok
 }
 
-func (h* Handler) removeRoomMonitor(name LiveKitRoomAlias) {
+func (h* Handler) RemoveRoomMonitor(name LiveKitRoomAlias) {
 	h.Lock()
 	defer h.Unlock()
     if _, ok := h.LiveKitRoomMonitors[name]; ok {
@@ -625,7 +660,7 @@ func (h *Handler) handleSfuWebhook (w http.ResponseWriter, r *http.Request) {
 
 	switch event.Event {
 		case "participant_joined":
-			monitorSnapshot, ok := h.getRoomMonitor(LiveKitRoomAlias(event.Room.Name))
+			monitorSnapshot, ok := h.GetRoomMonitor(LiveKitRoomAlias(event.Room.Name))
 			if ok {
 				monitorSnapshot.SFUCommChan <- SFUMessage{
 					Type: ParticipantConnected,
@@ -634,7 +669,7 @@ func (h *Handler) handleSfuWebhook (w http.ResponseWriter, r *http.Request) {
 			}
 			slog.Debug("Handler: SFU Webhook -> Participant joined", "lkId", event.Participant.Identity, "room", event.Room.Name)
 		case "participant_left", "participant_connection_aborted":
-			monitorSnapshot, ok := h.getRoomMonitor(LiveKitRoomAlias(event.Room.Name))
+			monitorSnapshot, ok := h.GetRoomMonitor(LiveKitRoomAlias(event.Room.Name))
 			if ok {
 				if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
 					monitorSnapshot.SFUCommChan <- SFUMessage{
@@ -757,39 +792,6 @@ func parseConfig() (*Config, error) {
 		FullAccessHomeservers: strings.Fields(strings.ReplaceAll(fullAccessHomeservers, ",", " ")),
 		LkJwtBind:             lkJwtBind,
 	}, nil
-}
-
-func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string) *Handler {
-
-	handler := &Handler{
-		liveKitAuth:              lkAuth,
-		skipVerifyTLS:            skipVerifyTLS,
-		fullAccessHomeservers:    fullAccessHomeservers,
-		MonitorCommChan: make(chan HandlerMessage),
-		LiveKitRoomMonitors:   make(map[LiveKitRoomAlias]*LiveKitRoomMonitor),
-	}
-
-	handler.wg.Add(1)
-	go func() {
-		defer handler.wg.Done()
-		for event := range handler.MonitorCommChan {
-			switch event.Event {
-			case NoJobsLeft:
-				monitor, ok := handler.getRoomMonitor(event.RoomAlias)
-				if ok {
-					monitor.Close()
-					if monitor.MonitorId == event.MonitorId {
-						slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias, "MonitorId", monitor.MonitorId)
-						handler.removeRoomMonitor(event.RoomAlias)
-					} else {
-						slog.Error("Handler: Not removing LiveKitRoomMonitor as IDs do not match!", "room", event.RoomAlias, "MonitorId", monitor.MonitorId, "RequestedMonitorId", event.MonitorId)
-					}
-				}
-			}
-		}
-	}()
-
-	return handler
 }
 
 func main() {

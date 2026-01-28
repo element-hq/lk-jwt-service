@@ -597,18 +597,6 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
 		operation := func() (*http.Response, error) {
 			return ExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionRestart)
 		}
-		/*
-		operation := func()(*http.Response, error){log.Printf("huhu");return &http.Response{
-			Status:        "200 OK",
-			StatusCode:    200,
-			Proto:         "HTTP/1.1",
-			ProtoMajor:    1,
-			ProtoMinor:    1,
-			Body:          ioutil.NopCloser(bytes.NewBufferString(url)),
-			ContentLength: int64(len(url)),
-			Header:        make(http.Header, 0),
-		}, nil}
-		*/
 
 		job.wg.Add(1)
 		go func(t *DelayedEventTimer, remaining time.Duration, timeout time.Duration, nextReset time.Duration,lkRm LiveKitRoomAlias, lkId LiveKitIdentity, ch chan DelayedEventSignal) {
