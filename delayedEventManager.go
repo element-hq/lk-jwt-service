@@ -430,7 +430,7 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 		expBackOff.MaxInterval = 60 * time.Second
 
 		operation := func() (*http.Response, error) {
-			return helperExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionSend)
+			return ExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionSend)
 		}
 		
 		resp, err := backoff.Retry(
@@ -595,7 +595,7 @@ func (job *DelayedEventJob) handleEventDelayedEventReset(event DelayedEventSigna
 		}
 
 		operation := func() (*http.Response, error) {
-			return helperExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionRestart)
+			return ExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionRestart)
 		}
 		/*
 		operation := func()(*http.Response, error){log.Printf("huhu");return &http.Response{
@@ -863,7 +863,7 @@ func (m *LiveKitRoomMonitor) AddJob(job *DelayedEventJob) bool {
 	var waitingDuration = min(time.Hour, job.DelayTimeout)
 
 	opParticipantLookup := func() (bool, error) {
-		return helperLiveKitParticipantLookup(job.ctx, *m.lkAuth, job.LiveKitRoom, job.LiveKitIdentity, m.SFUCommChan)
+		return LiveKitParticipantLookup(job.ctx, *m.lkAuth, job.LiveKitRoom, job.LiveKitIdentity, m.SFUCommChan)
 	}
 
 	m.wg.Add(1)

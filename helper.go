@@ -5,10 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,6 +18,8 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/matrix-org/gomatrixserverlib/fclient"
+	"github.com/matrix-org/gomatrixserverlib/spec"
 )
 
 type UniqueID string
@@ -79,7 +81,7 @@ func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) Li
 	return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
 }
 
-var helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
 	roomClient := lksdk.NewRoomServiceClient(liveKitAuth.lkUrl, liveKitAuth.key, liveKitAuth.secret)
 	creationStart := time.Now().Unix()
 	lkRoom, err := roomClient.CreateRoom(
@@ -110,7 +112,7 @@ var helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth
 	return nil
 }
 
-var helperLiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
+var LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
 	roomClient := lksdk.NewRoomServiceClient(
 		lkAuth.lkUrl,
 		lkAuth.key, 
@@ -129,7 +131,7 @@ var helperLiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAut
 	return (err==nil), err
 }
 
-var helperExecuteDelayedEventAction = func(baseUrl string, delayID string, action DelayEventAction) (*http.Response, error) {
+var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action DelayEventAction) (*http.Response, error) {
 
 	url := fmt.Sprintf("%s%s/%s/%s", baseUrl, DelayedEventsEndpoint, delayID, action)
 	var jsonStr = []byte(`{}`)
