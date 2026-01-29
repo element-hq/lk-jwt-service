@@ -914,6 +914,7 @@ func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity, jobId UniqueID) {
 func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
 	m.Lock()
 	defer m.Unlock()
+	
 	if m.tearingDown {
 		return nil, false
 	}
@@ -922,10 +923,9 @@ func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
 
 	m.wg.Add(1)
 	release = func() bool {
-		defer m.wg.Done()
-
 		m.Lock()
 		defer m.Unlock()
+		defer m.wg.Done()
 		
 		if m.tearingDown {
 			return false
