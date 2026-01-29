@@ -2,8 +2,9 @@ name: Trigger PR docker image
 on:
   pull_request:
     types:
+      - synchronize
+      - opened
       - labeled
-
 jobs:
   prdetails:
     runs-on: ubuntu-latest
