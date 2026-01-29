@@ -13,12 +13,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -664,15 +667,15 @@ func TestMapSFURequestMemoryLeak(t *testing.T) {
 func TestProcessSFURequest(t *testing.T) {
 	// mock createLiveKitRoom
 	var called_createLiveKitRoom bool
-	original_createLiveKitRoom := helperCreateLiveKitRoom
-	helperCreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
+	original_createLiveKitRoom := CreateLiveKitRoom
+	CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
 		called_createLiveKitRoom = true
 		if room == "" {
 			t.Error("expected room name passed into mock")
 		}
 		return nil
 	}
-	t.Cleanup(func() { helperCreateLiveKitRoom = original_createLiveKitRoom })
+	t.Cleanup(func() { CreateLiveKitRoom = original_createLiveKitRoom })
 
 	// mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool
@@ -907,14 +910,15 @@ func TestProcessLegacySFURequest(t *testing.T) {
 
 }
 
-func TestLiveKitRoomMonitor(t *testing.T) {
-
-	original_LiveKitParticipantLookup := helperLiveKitParticipantLookup
-	helperLiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
+ func TestLiveKitRoomMonitor_AddRemove_Job(t *testing.T) {
+	// Mock the helperLiveKitParticipantLookup function to return a fixed result
+	original_LiveKitParticipantLookup := LiveKitParticipantLookup
+	LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
 		return true, nil
 	}
-	t.Cleanup(func() { helperLiveKitParticipantLookup = original_LiveKitParticipantLookup })
+	t.Cleanup(func() { LiveKitParticipantLookup = original_LiveKitParticipantLookup })
 
+	// Create a new handler with the mock LiveKit server URL and secret
 	handler := NewHandler(
 		LiveKitAuth{
 			secret: "secret",
@@ -925,124 +929,303 @@ func TestLiveKitRoomMonitor(t *testing.T) {
 		[]string{"example.com"},
 	)
 
+	// Create a new LiveKit room monitor for the test room alias
 	lkAlias := LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848")
+	monitor := NewLiveKitRoomMonitor(context.TODO(), handler.MonitorCommChan, &handler.liveKitAuth, lkAlias)
 
-	monitor := NewLiveKitRoomMonitor(context.TODO(), &handler.liveKitAuth, lkAlias)
-
+	// Create a new delayed event job request for the test room alias and identity
 	jobRequest := &DelayedEventRequest{
 		DelayCsApiUrl:    "https://synapse.m.localhost",
 		DelayId:          "syd_astTzXBzAazONpxHCqzW",
 		DelayTimeout:     10 * time.Second,
 		LiveKitRoom:      lkAlias,
 		LiveKitIdentity:  "@azure-colonial-otter:synapse.m.localhostQQVMKEAUKY",
-	}
+	  }
 
+	// Create a new delayed event job for the test request and monitor job channel
 	job, _ := NewDelayedEventJob(
-				context.TODO(),
-				jobRequest,
-				monitor.JobCommChan,
+		context.TODO(),
+		jobRequest,
+		monitor.JobCommChan,
 	)
 
-	monitor.AddJob(job)
-	monitor.RemoveJob(LiveKitIdentity(lkAlias), job.JobId)
+	// Add the job to the monitor and check that it was added successfully
+	monitor.Lock()
+	monitor.addJobLocked(job)
+	monitor.Unlock()
+	if len(monitor.jobs) != 1 {
+		t.Errorf("expected 1 job in monitor, got %d", len(monitor.jobs))
+	}
+
+	// Remove the job from the monitor and check that it was removed successfully
+	monitor.RemoveJob(job.LiveKitIdentity, job.JobId)
+	if len(monitor.jobs) != 0 {
+		t.Errorf("expected 0 jobs in monitor, got %d", len(monitor.jobs))
+	}
+
+	monitor.Close()
+}
+
+ func TestLiveKitRoomMonitor_HandoverJobs(t *testing.T) {
+
+	// Mock the helperLiveKitParticipantLookup function to return a fixed result
+	original_LiveKitParticipantLookup := LiveKitParticipantLookup
+	LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { LiveKitParticipantLookup = original_LiveKitParticipantLookup })
+
+	// Create a new handler with the mock LiveKit server URL and secret
+	handler := NewHandler(
+		LiveKitAuth{
+			secret: "secret",
+			key:    "devkey",
+			lkUrl:  "ws://127.0.0.1:7880",
+		},
+		true,
+		[]string{"example.com"},
+	)
+
+	// Create a new LiveKit room monitor for the test room alias
+	lkAlias1 := LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848")
+	lkAlias2 := LiveKitRoomAlias("zz1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848")
+
+	// Create a new delayed event job request for the test room alias and identity
+	jobRequest1 := &DelayedEventRequest{
+		DelayCsApiUrl:    "https://synapse.m.localhost",
+		DelayId:          "syd_astTzXBzAazONpxHCqzW",
+		DelayTimeout:     10 * time.Second,
+		LiveKitRoom:      lkAlias1,
+		LiveKitIdentity:  "@azure-colonial-otter:synapse.m.localhostQQVMKEAUKY",
+	}
+
+	jobRequest2 := &DelayedEventRequest{
+		DelayCsApiUrl:    "https://synapse.m.localhost",
+		DelayId:          "syd_astTzXBzAazONpxHCqzW",
+		DelayTimeout:     10 * time.Second,
+		LiveKitRoom:      lkAlias2,
+		LiveKitIdentity:  "@zzzzzzzure-colonial-otter:synapse.m.localhostQQVMKEAUKY",
+	}
+
+	// Handover a job to another monitor and check that it was handed over successfully
+	monitor := NewLiveKitRoomMonitor(context.TODO(), handler.MonitorCommChan, &handler.liveKitAuth, lkAlias1)
+
+	release1, _ := monitor.StartJobHandover()
+	monitor.HandoverJob(jobRequest1)
+	release1()
+
+	release2, _ := monitor.StartJobHandover()
+	monitor.HandoverJob(jobRequest2)
+	
+	if len(monitor.jobs) != 2 {
+		t.Errorf("expected 2 jobs in monitor, got %d", len(monitor.jobs))
+	}
+
+	job1, _  := monitor.GetJob(jobRequest1.LiveKitIdentity)
+	monitor.RemoveJob(job1.LiveKitIdentity, job1.JobId)
+
+	if len(monitor.jobs) != 1 {
+		t.Errorf("expected 1 jobs in monitor, got %d", len(monitor.jobs))
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		job2, _  := monitor.GetJob(jobRequest2.LiveKitIdentity)
+		monitor.RemoveJob(job2.LiveKitIdentity, job2.JobId)
+		if monitor.tearingDown != false {
+			t.Error("Still waiting for release2()")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if monitor.upcomingJobs != 1 {
+			t.Errorf("expected 1 upcoming job, got %d", monitor.upcomingJobs)
+		}
+		time.Sleep(10 * time.Millisecond)
+		release2()
+	}()
+
+	wg.Wait()
+
+	if len(monitor.jobs) != 0 {
+		t.Errorf("expected 0 jobs in monitor, got %d", len(monitor.jobs))
+	}
+
+	// As teardown is in progress new jobs should be rejected
+	_, ok := monitor.StartJobHandover()
+	if ok {
+		t.Error("Expected teardown in progress.")
+	}
+
+	// Close the monitor and check that it was closed successfully
 	monitor.Close()
 
-	
-
-	/*
-	var matrixServerName string
-
-	// Mock Matrix server
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/_matrix/federation/v1/openid/userinfo" {
-			t.Errorf("unexpected URL path: got %v want %v", r.URL.Path, "/_matrix/federation/v1/openid/userinfo")
-		}
-
-		accessToken := r.URL.Query().Get("access_token")
-		if accessToken != "testAccessToken" {
-			t.Errorf("unexpected access_token: got %v want %v", accessToken, "testAccessToken")
-		}
-
-		userInfo := fclient.UserInfo{
-			Sub: "@user:" + matrixServerName,
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		err := json.NewEncoder(w).Encode(userInfo)
-		if err != nil {
-			t.Errorf("failed to encode user info: %v", err)
-		}
-	}))
-	defer testServer.Close()
-
-	u, err := url.Parse(testServer.URL)
-	if err != nil {
-		t.Fatalf("failed to parse test server URL: %v", err)
+	select {
+	case <-monitor.ctx.Done():
+		// Monitor context was cancelled as expected
+	default:
+		t.Error("expected monitor context to be cancelled")
 	}
-	matrixServerName = u.Host
+}
 
-	// Prepare request
-	testCase := map[string]any{
-		"room": "testRoom",
-		"openid_token": map[string]any{
-			"access_token":      "testAccessToken",
-			"token_type":        "Bearer",
-			"matrix_server_name": matrixServerName,
-			"expires_in":        3600,
+func TestRoomMonitor_RaceConditionStress(t *testing.T) {
+
+	// Mock the helperLiveKitParticipantLookup function to return a fixed result
+	original_LiveKitParticipantLookup := LiveKitParticipantLookup
+	LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { LiveKitParticipantLookup = original_LiveKitParticipantLookup })
+
+	// Create a new handler with the mock LiveKit server URL and secret
+	handler := NewHandler(
+		LiveKitAuth{
+			secret: "secret",
+			key:    "devkey",
+			lkUrl:  "ws://127.0.0.1:7880",
 		},
-		"device_id": "testDevice",
+		true,
+		[]string{"example.com"},
+	)
+
+	m := NewLiveKitRoomMonitor(
+		context.TODO(), 
+		handler.MonitorCommChan, 
+		&handler.liveKitAuth, 
+		LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848"),
+	)
+
+	var wg sync.WaitGroup
+
+	iterations := 1000
+	for i := range iterations {
+		lkId := LiveKitIdentity(strconv.Itoa(i))
+		jobRequest := &DelayedEventRequest{
+			DelayCsApiUrl:    "https://synapse.m.localhost",
+			DelayId:          "syd_astTzXBzAazONpxHCqzW",
+			DelayTimeout:     10 * time.Second,
+			LiveKitRoom:      m.RoomAlias,
+			LiveKitIdentity:  lkId,
+		}
+
+		release, okStart := m.StartJobHandover()
+		if okStart {
+			ok, _ := m.HandoverJob(jobRequest)
+
+			if ok {
+				wg.Add(1)
+				go func(){
+					defer wg.Done()
+					time.Sleep(10 * time.Millisecond)
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						if i%2 == 0 {
+							time.Sleep(10 * time.Millisecond)
+						}
+						release()
+					}()
+					j, o := m.GetJob(lkId)
+					if o {
+						m.RemoveJob(lkId, j.JobId)
+					} else { 
+						slog.Info("Removing job failed", "Job number", i)
+					}
+				}()
+			} else {
+				release()
+				slog.Info("Handing over Job failed!", "Job number", i)
+			}
+		}
 	}
 
-	reqBody, err := json.Marshal(testCase)
-	if err != nil {
-		t.Fatalf("failed to marshal test case: %v", err)
+	wg.Wait()
+	m.Close()
+	select {
+	case <-m.ctx.Done():
+		// Monitor context was cancelled as expected
+	default:
+		t.Error("expected monitor context to be cancelled")
+	}	
+}
+
+func TestRoomMonitor_RaceConditionStressWithJobChaos(t *testing.T) {
+
+	// Mock the helperLiveKitParticipantLookup function to return a fixed result
+	original_LiveKitParticipantLookup := LiveKitParticipantLookup
+	LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { LiveKitParticipantLookup = original_LiveKitParticipantLookup })
+
+	// Create a new handler with the mock LiveKit server URL and secret
+	handler := NewHandler(
+		LiveKitAuth{
+			secret: "secret",
+			key:    "devkey",
+			lkUrl:  "ws://127.0.0.1:7880",
+		},
+		true,
+		[]string{"example.com"},
+	)
+
+	m := NewLiveKitRoomMonitor(
+		context.TODO(), 
+		handler.MonitorCommChan, 
+		&handler.liveKitAuth, 
+		LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848"),
+	)
+
+	iterations := 1000
+	for i := range iterations {
+		lkId := LiveKitIdentity(strconv.Itoa(i%10))
+		jobRequest := &DelayedEventRequest{
+			DelayCsApiUrl:    "https://synapse.m.localhost",
+			DelayId:          "syd_astTzXBzAazONpxHCqzW",
+			DelayTimeout:     10 * time.Second,
+			LiveKitRoom:      m.RoomAlias,
+			LiveKitIdentity:  lkId,
+		}
+
+		release, okStart := m.StartJobHandover()
+		if okStart {
+			ok, _ := m.HandoverJob(jobRequest)
+
+			if ok {
+				go func(){
+					time.Sleep(10 * time.Millisecond)
+					go func() {
+						if i%2 == 0 {
+							time.Sleep(10 * time.Millisecond)
+						}
+						release()
+					}()
+					j, o := m.GetJob(lkId)
+					if o {
+						m.RemoveJob(lkId, j.JobId)
+					} else { 
+						slog.Info("Removing job failed", "Job number", i)
+					}
+				}()
+			} else {
+				release()
+				slog.Info("Handing over Job failed!", "Job number", i)
+			}
+		}
 	}
 
-	req, err := http.NewRequest("POST", "/sfu-jwt", bytes.NewBuffer(reqBody))
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
 
-	// Record response
-	rr := httptest.NewRecorder()
-	handlerFunc := http.HandlerFunc(handler.SFUJWTHandler)
-	handlerFunc.ServeHTTP(rr, req)
-
-	// Check response
-	if status := rr.Code; status != http.StatusOK {
-		t.Fatalf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-	}
-
-	var resp SFUJWTResponse
-	err = json.NewDecoder(rr.Body).Decode(&resp)
-	if err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if resp.URL != "wss://lk.local:8080/foo" {
-		t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
-	}
-
-	// parse JWT checking the shared secret
-	token, err := jwt.Parse(resp.Token, func(token *jwt.Token) (interface{}, error) {
-		return []byte("testSecret"), nil
-	})
-	claims, ok := token.Claims.(jwt.MapClaims)
-
-	if !ok || !token.Valid {
-		t.Fatalf("failed to parse claims from JWT: %v", err)
-	}
-
-	if claims["iss"] != "testKey" {
-		t.Errorf("unexpected iss: got %v want %v", claims["iss"], "testKey")
-	}
-
-	if claims["sub"] != "@user:"+matrixServerName {
-		t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName)
-	}
-
-	if claims["room"] != "testRoom" {
-		t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
-	}
-	*/
+	// m.Close() also involves JobRemove() as part of the teardown operation to remove all pending jobs
+	// This teardown operation is racing against the for loop above
+	m.Close()
+	select {
+	case <-m.ctx.Done():
+		// Monitor context was cancelled as expected
+	default:
+		t.Error("expected monitor context to be cancelled")
+	}	
 }

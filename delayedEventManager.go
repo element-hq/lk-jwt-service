@@ -262,6 +262,7 @@ func NewDelayedEventJob(parentCtx context.Context, jobRequest *DelayedEventReque
 		}
 	}()
 
+	// waitingDuration is bound to a max of one hour due to the sticky event timeout
 	var waitingDuration = min(time.Hour, job.DelayTimeout)
 
 	job.wg.Add(1)
@@ -807,7 +808,17 @@ func NewLiveKitRoomMonitor(parentCtx context.Context, handlerCommChan chan Handl
 			case <-monitor.ctx.Done():
 				// Teardown is happening here regardless of whether
 				// Close() was called or the parent ctx was cancelled.
+				monitor.Lock()
+				monitor.tearingDown = true
+				// cleanup pending jobs
+				for key, job := range monitor.jobs {
+					monitor.removeJobLocked(key, job.JobId)
+				}
+				monitor.Unlock()
+
 				monitor.wg.Wait()
+				close(monitor.JobCommChan)
+				close(monitor.SFUCommChan)
 				slog.Debug("RoomMonitor: Dispatching goroutine for handling Events from Jobs and SFU done.", "room", monitor.RoomAlias)
 				return
 			}
@@ -820,13 +831,45 @@ func NewLiveKitRoomMonitor(parentCtx context.Context, handlerCommChan chan Handl
 }
 
 func (m *LiveKitRoomMonitor) Close() error {
-	// The actual Teardown is happening in the event dispatcher goroutine
+	// The actual teardown is happening in the event dispatcher goroutine
 	// see NewLiveKitRoomMonitor() for details
 
 	m.cancel()   // Signals the run loop to tear down
 	m.wg.Wait()
 	slog.Debug("RoomMonitor -> closed", "room", m.RoomAlias, "MonitorId", m.MonitorId)
 	return nil
+}
+
+// This function MUST ONLY be called if m.Lock() has been acquired.
+// updateStateLocked performs all changes to internal state.
+// It also takes care to signal a teardown via NoJobsLeft event
+func (m *LiveKitRoomMonitor) updateStateLocked(updateState func()) {
+	
+	// Perform the actual change (e.g. adding, deleting a job, or modifying upcomingJobs)
+	updateState()
+
+	// Teardown check
+	if m.tearingDown {
+		return
+	}
+
+	if len(m.jobs) == 0 && m.upcomingJobs == 0 {
+		m.tearingDown = true
+		// Using a new goroutine for sending to prevent "circular wait" deadlocks
+    	// where the receiver is immediately running into m.Lock()
+		m.wg.Add(1)
+		go func() {
+			m.Lock()
+			defer m.Unlock()
+			defer m.wg.Done()
+			m.HandlerCommChan <- HandlerMessage{
+				RoomAlias: m.RoomAlias,
+				Event:     NoJobsLeft,
+				MonitorId: m.MonitorId,
+			}
+			slog.Debug("RoomMonitor: State transition to <tearingDown>. Emit event <HandlerMessage->NoJobsLeft>", "room", m.RoomAlias, "MonitorId", m.MonitorId)
+		}()
+	}
 }
 
 func (m *LiveKitRoomMonitor) GetJob(name LiveKitIdentity) (*DelayedEventJob, bool) {
@@ -836,18 +879,19 @@ func (m *LiveKitRoomMonitor) GetJob(name LiveKitIdentity) (*DelayedEventJob, boo
 	return job, ok
 }
 
-func (m *LiveKitRoomMonitor) AddJob(job *DelayedEventJob) bool {
-	m.Lock()
-	defer m.Unlock()
-
+// This function MUST ONLY be called if m.Lock() has been acquired.
+func (m *LiveKitRoomMonitor) addJobLocked(job *DelayedEventJob) bool {
 	if m.tearingDown {
 		slog.Warn("RoomMonitor: Attempt to add job to closed monitor", "room", m.RoomAlias,"MonitorId", m.MonitorId, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId)
 		return false
 	}
 
-	m.jobs[job.LiveKitIdentity] = job
+	m.updateStateLocked(func() {
+		m.jobs[job.LiveKitIdentity] = job
+	})
 	slog.Info("RoomMonitor: Added Job", "room", m.RoomAlias, "MonitorId", m.MonitorId, "lkId", job.LiveKitIdentity, "delayId", job.DelayId, "jobId", job.JobId)
 
+	// waitingDuration is bound to a max of one hour due to the sticky event timeout
 	var waitingDuration = min(time.Hour, job.DelayTimeout)
 
 	opParticipantLookup := func() (bool, error) {
@@ -883,10 +927,16 @@ func (m *LiveKitRoomMonitor) AddJob(job *DelayedEventJob) bool {
 func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity, jobId UniqueID) {
 	m.Lock()
 	defer m.Unlock()
+
+	m.removeJobLocked(name, jobId)
+}
+
+// This function MUST ONLY be called if m.Lock() has been acquired.
+func (m *LiveKitRoomMonitor) removeJobLocked(name LiveKitIdentity, jobId UniqueID) bool {
 	if job, ok := m.jobs[name]; ok {
 		if job.JobId != jobId {
 			slog.Error("RoomMonitor: Ignore attempt to remove job with mismatching JobId", "room", m.RoomAlias, "lkId", name, "jobId", job.JobId, "requestedJobId", jobId)
-			return
+			return false
 		}
 		// move teardown outside of the lock
 		m.wg.Add(1)
@@ -894,21 +944,15 @@ func (m *LiveKitRoomMonitor) RemoveJob(name LiveKitIdentity, jobId UniqueID) {
 			defer m.wg.Done()
 			job.Close()
 		}()
-		delete(m.jobs, name)
+		m.updateStateLocked(func(){
+			delete(m.jobs, name)
+		})
 		slog.Info("RoomMonitor: Removed delayed event job", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId, "leftNumJobs", len(m.jobs))
-	} else {
-		slog.Warn("RoomMonitor: Attempt to remove non existing job", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId)
+		return true
 	}
 
-	if len(m.jobs) == 0 && m.upcomingJobs == 0 {
-		m.tearingDown = true
-		m.HandlerCommChan <- HandlerMessage{
-			RoomAlias: m.RoomAlias,
-			Event:     NoJobsLeft,
-			MonitorId: m.MonitorId,
-		}
-		slog.Debug("RoomMonitor: Emit event <HandlerMessage->NoJobsLeft>", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId)
-	}
+	slog.Warn("RoomMonitor: Attempt to remove non existing job", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId, "leftNumJobs", len(m.jobs))
+	return false
 }
 
 func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
@@ -919,7 +963,9 @@ func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
 		return nil, false
 	}
 	
-	m.upcomingJobs++
+	m.updateStateLocked(func(){
+		m.upcomingJobs++
+	})
 
 	m.wg.Add(1)
 	release = func() bool {
@@ -934,7 +980,11 @@ func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
 			slog.Warn("RoomMonitor: Attempt to release upcoming job when none are registered", "room", m.RoomAlias, "MonitorId", m.MonitorId)
 			return false
 		}
-		m.upcomingJobs--
+
+		m.updateStateLocked(func(){
+			m.upcomingJobs--
+		})
+
 		return true
 	}
 
@@ -942,18 +992,28 @@ func (m *LiveKitRoomMonitor) StartJobHandover() (release func() bool, ok bool) {
 }
 
 func (m *LiveKitRoomMonitor) HandoverJob(jobRequest *DelayedEventRequest) (bool, UniqueID) {
+	m.Lock()
+	defer m.Unlock()
+
+	if m.tearingDown {
+		return false, UniqueID("")
+	}
+
 	job, err := NewDelayedEventJob(
 		m.ctx,
 		jobRequest,
 		m.JobCommChan,
 	)
+
 	slog.Debug("Handler: Created delayed event job", "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "DelayId", jobRequest.DelayId, "JobId", job.JobId)
 	if err != nil {
 		slog.Error("Error creating delayed event job",  "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "JobId", job.JobId, "err", err)
 		return false, UniqueID("")
 	}    
+
 	slog.Debug("RoomMonitor: Adding delayed event job", "room", m.RoomAlias, "lkId", job.LiveKitIdentity)
-	existingJob, ok := m.GetJob(job.LiveKitIdentity)
+
+	existingJob, ok := m.jobs[job.LiveKitIdentity]
 	if ok {
 		// TODO: Discuss again if replacing here is the best strategy
 		// - Pros: Ensures that only the latest job is active, preventing multiple jobs for the same participant
@@ -963,7 +1023,10 @@ func (m *LiveKitRoomMonitor) HandoverJob(jobRequest *DelayedEventRequest) (bool,
 		
 		// This should never happen as UniqueID is chronologically sorted (timestamp-based)
 		if job.JobId <= existingJob.JobId {
-			slog.Error("RoomMonitor: New JobId is not greater than existing JobId", "room", m.RoomAlias, "existingJobId", existingJob.JobId, "newJobId", job.JobId)
+			slog.Error(
+				"RoomMonitor: New JobId is not greater than existing JobId", 
+				"room", m.RoomAlias, "existingJobId", existingJob.JobId, "newJobId", job.JobId,
+			)
 			panic(0)
 		}
 		m.wg.Add(1)
@@ -979,5 +1042,6 @@ func (m *LiveKitRoomMonitor) HandoverJob(jobRequest *DelayedEventRequest) (bool,
 			existingJob.Close()
 		}()
 	}
-	return m.AddJob(job), job.JobId
+
+	return m.addJobLocked(job), job.JobId
 }
