@@ -20,7 +20,7 @@ jobs:
           branch: ${{ github.event.workflow_run.head_branch }}
 
   docker:
-    if: ${{ needs.prdetails.outputs.pr_data_json && contains(fromJSON(needs.prdetails.outputs.pr_data_json).labels.*.name, 'docker build') }}
+    # if: ${{ needs.prdetails.outputs.pr_data_json && contains(fromJSON(needs.prdetails.outputs.pr_data_json).labels.*.name, 'docker build') }}
     needs: prdetails
     permissions:
       contents: write
