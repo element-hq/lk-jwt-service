@@ -364,7 +364,7 @@ func (h *Handler) prepareMux() *http.ServeMux {
 func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Health check from %s", r.RemoteAddr)
 
-	if r.Method == "GET" {
+	if r.Method == "GET" || r.Method == "HEAD" {
 		w.WriteHeader(http.StatusOK)
 		return
 	} else {
