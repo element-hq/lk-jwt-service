@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -634,5 +635,19 @@ func main() {
 		fullAccessHomeservers: config.FullAccessHomeservers,
 	}
 
-	log.Fatal(http.ListenAndServe(config.LkJwtBind, handler.prepareMux()))
+	var ln net.Listener;
+
+	if strings.HasPrefix(config.LkJwtBind, "/") {
+		ln, err = net.Listen("unix", config.LkJwtBind)
+	} else if strings.HasPrefix(config.LkJwtBind, ":") {
+		ln, err = net.Listen("tcp", config.LkJwtBind)
+	} else {
+		log.Fatal()
+	}
+
+	if err != nil {
+		log.Fatal()
+	}
+
+	log.Fatal(http.Serve(ln, handler.prepareMux()))
 }
