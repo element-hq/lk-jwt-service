@@ -24,8 +24,6 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/auth"
-	"github.com/livekit/protocol/livekit"
-	lksdk "github.com/livekit/server-sdk-go/v2"
 
 	"github.com/matrix-org/gomatrix"
 	"github.com/matrix-org/gomatrixserverlib/fclient"
@@ -149,14 +147,14 @@ func writeMatrixError(w http.ResponseWriter, status int, errCode string, errMsg 
     }
 }
 
-func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
+func getJoinToken(apiKey, apiSecret, room, identity string, isFullAccessUser bool) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
 	canSubscribe := true
 	grant := &auth.VideoGrant{
 		RoomJoin:     true,
-		RoomCreate:   false,
+		RoomCreate:   isFullAccessUser,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
 		Room:         room,
@@ -240,23 +238,13 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
     slotId := "m.call#ROOM"
     lkRoomAliasHash := sha256.Sum256([]byte(req.Room + "|" + slotId))
     lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
-    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
+    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity, isFullAccessUser)
     if err != nil {
 		return nil, &MatrixErrorResponse{
 			Status: http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
 			Err: "Internal Server Error",
 		}
-    }
-
-    if isFullAccessUser {
-        if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
-			return nil, &MatrixErrorResponse{
-				Status: http.StatusInternalServerError,
-				ErrCode: "M_UNKNOWN",
-				Err: "Unable to create room on SFU",
-			}
-        }
     }
 
     return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
@@ -300,7 +288,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
     lkRoomAliasHash := sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID))
 	lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
 
-    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
+    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity, isFullAccessUser)
     if err != nil {
 		log.Printf("Error getting LiveKit token: %v", err)
 		return nil, &MatrixErrorResponse{
@@ -310,45 +298,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
     }
 
-    if isFullAccessUser {
-        if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
-			return nil, &MatrixErrorResponse{
-				Status: http.StatusInternalServerError,
-				ErrCode: "M_UNKNOWN",
-				Err: "Unable to create room on SFU",
-			}
-        }
-    }
-
     return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
-}
-
-var createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
-    roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
-    creationStart := time.Now().Unix()
-    lkRoom, err := roomClient.CreateRoom(
-        ctx,
-        &livekit.CreateRoomRequest{
-            Name:             room,
-            EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
-            DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
-            MaxParticipants:  0,      // 0 == no limitation
-        },
-    )
-
-    if err != nil {
-        return fmt.Errorf("unable to create room %s: %w", room, err)
-    }
-
-    // Log the room creation time and the user info
-    isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
-    log.Printf(
-        "%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
-        map[bool]string{true: "Created", false: "Using"}[isNewRoom],
-        lkRoom.Sid, room, matrixUser, lkIdentity,
-    )
-
-    return nil
 }
 
 func (h *Handler) prepareMux() *http.ServeMux {
