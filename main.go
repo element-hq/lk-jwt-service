@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +85,8 @@ type MatrixErrorResponse struct {
 type ValidatableSFURequest interface {
     Validate() error
 }
+
+var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 
 func (e *MatrixErrorResponse) Error() string { 
     return e.Err
@@ -236,7 +239,21 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
     // TODO: is DeviceID required? If so then we should have validated at the start
     lkIdentity := userInfo.Sub + ":" + req.DeviceID
-    token, err := getJoinToken(h.key, h.secret, req.Room, lkIdentity)
+    
+	// We can hard-code the slotId since for the m.call application only the m.call#ROOM slot is defined. 
+	// This ensures that the same LiveKit room alias being derived for the same Matrix room for both the 
+	// LegacySFURequest (/sfu/get endpoint) and the SFURequest (/get_token endpoint). 
+    // 
+	// Note a mismatch between the legacy livekit_alias (which is the Matrix roomId) field in the MatrixRTC 
+	// membership state event and the actual lkRoomAlias (as derived below and used on the SFU) which is 
+	// part of the LiveKit JWT Token does in general NOT confuse clients as the JWT token is passed as is
+	// to the livekit-client SDK.
+	// 
+    // This change ensures compatibility with clients using pseudonymous livekit_aliases.
+    slotId := "m.call#ROOM"
+    lkRoomAliasHash := sha256.Sum256([]byte(req.Room + "|" + slotId))
+    lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
+    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
     if err != nil {
 		return nil, &MatrixErrorResponse{
 			Status: http.StatusInternalServerError,
@@ -246,7 +263,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
     }
 
     if isFullAccessUser {
-        if err := createLiveKitRoom(r.Context(), h, req.Room, userInfo.Sub, lkIdentity); err != nil {
+        if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status: http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
@@ -289,8 +306,13 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
         map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
     )
 
-    lkIdentity := req.Member.ID
-	lkRoomAlias := fmt.Sprintf("%x", sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID)))
+	lkIdentityRaw := userInfo.Sub + "|" + req.Member.ClaimedDeviceID + "|" + req.Member.ID
+	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
+	lkIdentity := unpaddedBase64.EncodeToString(lkIdentityHash[:])
+
+    lkRoomAliasHash := sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID))
+	lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
+
     token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
     if err != nil {
 		log.Printf("Error getting LiveKit token: %v", err)

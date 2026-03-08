@@ -201,12 +201,15 @@ func TestHandlePost(t *testing.T) {
 			t.Fatalf("failed to parse claims from JWT: %v", err)
 		}
 
-		if claims["sub"] != "member_test_id" {
+		want_sub_hash := sha256.Sum256([]byte("@user:"+ matrixServerName + "|testDevice|member_test_id"))
+		want_sub := unpaddedBase64.EncodeToString(want_sub_hash[:])
+		if claims["sub"] != want_sub {
 			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "member_test_id")
 		}
 
 		// should have permission for the room
-		want_room := fmt.Sprintf("%x", sha256.Sum256([]byte("!testRoom:example.com" + "|" +  "m.call#ROOM")))
+		want_room_hash := sha256.Sum256([]byte("!testRoom:example.com" + "|" +  "m.call#ROOM"))
+		want_room := unpaddedBase64.EncodeToString(want_room_hash[:])
 		if claims["video"].(map[string]interface{})["room"] != want_room {
 			t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], want_room)
 		}
@@ -247,9 +250,10 @@ func TestLegacyHandlePost(t *testing.T) {
 	u, _ := url.Parse(testServer.URL)
 
 	matrixServerName = u.Host
+	matrixRoom := "testRoom"
 
 	testCase := map[string]interface{}{
-		"room": "testRoom",
+		"room": matrixRoom,
 		"openid_token": map[string]interface{}{
 			"access_token":       "testAccessToken",
 			"token_type":         "testTokenType",
@@ -310,9 +314,13 @@ func TestLegacyHandlePost(t *testing.T) {
 			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName+":testDevice")
 		}
 
+		slotId := "m.call#ROOM"
+		lkRoomAliasHash := sha256.Sum256([]byte(matrixRoom + "|" + slotId))
+		lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
+
 		// should have permission for the room
-		if claims["video"].(map[string]interface{})["room"] != "testRoom" {
-			t.Errorf("unexpected room: got %v want %v", claims["room"], "testRoom")
+		if claims["video"].(map[string]interface{})["room"] != lkRoomAlias {
+			t.Errorf("unexpected room: got %v want %v", claims["room"], lkRoomAlias)
 		}
 }
 

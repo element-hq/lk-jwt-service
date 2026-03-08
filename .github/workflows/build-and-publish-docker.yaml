@@ -1,7 +1,11 @@
 name: Build and publish Docker image
 
 on:
-  push:
+  workflow_call:
+    inputs:
+      docker_tags:
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -34,12 +38,7 @@ jobs:
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,format=short,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=raw,value=latest-ci_${{steps.current-time.outputs.unix_time}},enable={{is_default_branch}}
-            latest-ci
+          tags: ${{ inputs.docker_tags }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
@@ -52,7 +51,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }} # only push on main branch or release tag
+          push: true
           provenance: mode=max
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
