@@ -19,7 +19,13 @@
       "groupName": "GitHub Actions",
       "matchDepTypes": ["action"],
       "pinDigests": true
+    },
+    {
+      "groupName": "all non-major dependencies",
+      "groupSlug": "all-minor-patch",
+      "matchUpdateTypes": ["minor", "patch"]
     }
   ],
+  "semanticCommits": "disabled",
   "minimumReleaseAge": "5 days"  
 }
