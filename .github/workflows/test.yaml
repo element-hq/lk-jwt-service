@@ -19,3 +19,51 @@ jobs:
           go-version-file: go.mod
       - name: Test
         run: go test -timeout 30s
+
+  ess:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Get current branch name
+        id: current-branch
+        run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
+
+      - name: Check if branch exists in element-hq/ess-helm
+        id: check-branch
+        env:
+          BRANCH_NAME: ${{ steps.current-branch.outputs.branch }}
+        run: |
+          API_URL="https://api.github.com/repos/element-hq/ess-helm/branches/$BRANCH_NAME"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" $API_URL)
+          if [ "$RESPONSE" = "200" ]; then
+            echo "ref=$BRANCH_NAME" | tee -a $GITHUB_OUTPUT
+          else
+            echo "ref=main" | tee -a $GITHUB_OUTPUT
+          fi
+
+      - name: Get go version
+        run: echo "GO_VERSION=$(go mod edit -json | jq -r .Toolchain | sed "s,^go,,")" >> $GITHUB_ENV
+
+      - name: Install ESS test dependencies
+        uses: element-hq/setup-ess-cluster-action@release/v2
+        with:
+          ess-helm-ref: ${{ steps.check-branch.outputs.ref }}
+
+      - name: Build lk-jwt-service docker image to local registry
+        run: |
+          docker build -t localhost:5000/lk-jwt-service:ci --build-arg "GO_VERSION=${GO_VERSION}" -f ./Dockerfile .
+          docker push localhost:5000/lk-jwt-service:ci
+
+      - name: Build Additional values file
+        run: |
+          yq eval -n '.matrixRTC.image.registry = "localhost:5000" | .matrixRTC.image.repository = "lk-jwt-service" | .matrixRTC.image.tag = "ci"' > ci-values.yml
+
+      - name: Run ESS tests
+        run: pytest-ess --pull-chart --chart-version 26.3.0 --test-suite "matrix-rtc-synapse-wellknown" --additional-test-values-file ci-values.yml -- -vv
+
+      - uses: element-hq/upload-ess-logs-action@release/v2
+        if: ${{ failure() }}
