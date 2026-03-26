@@ -52,6 +52,7 @@ jobs:
         uses: element-hq/setup-ess-cluster-action@release/v2
         with:
           ess-helm-ref: ${{ steps.check-branch.outputs.ref }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build lk-jwt-service docker image to local registry
         run: |
