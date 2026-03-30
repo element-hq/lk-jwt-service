@@ -29,16 +29,19 @@ import (
 
 func TestHealthcheck(t *testing.T) {
 	handler := &Handler{}
-	req, err := http.NewRequest("GET", "/healthz", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	methods := []string{"GET", "HEAD"}
+	for _, method := range methods {
+		req, err := http.NewRequest(method, "/healthz", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	rr := httptest.NewRecorder()
-	handler.prepareMux().ServeHTTP(rr, req)
+		rr := httptest.NewRecorder()
+		handler.prepareMux().ServeHTTP(rr, req)
 
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+		if status := rr.Code; status != http.StatusOK {
+			t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+		}
 	}
 }
 
