@@ -234,7 +234,10 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 			case NoJobsLeft:
 				monitor, ok := handler.GetRoomMonitor(event.RoomAlias)
 				if ok {
-					monitor.Close()
+					err := monitor.Close()
+					if err != nil {
+						slog.Error("Handler: Error closing room monitor", "error", err, "room", event.RoomAlias, "MonitorId", monitor.MonitorId)
+					}
 					if monitor.MonitorId == event.MonitorId {
 						slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias, "MonitorId", monitor.MonitorId)
 						handler.RemoveRoomMonitor(event.RoomAlias)
@@ -431,7 +434,7 @@ func (h *Handler) acquireRoomMonitorForJob(lkRoom LiveKitRoomAlias) (monitor *Li
 	h.Lock()
 	defer h.Unlock()
 
-	var acquireSuccessfully bool = false
+	acquireSuccessfully := false
 
 	monitor, monitorExists := h.LiveKitRoomMonitors[lkRoom]
 
@@ -461,7 +464,10 @@ func (h *Handler) acquireRoomMonitorForJob(lkRoom LiveKitRoomAlias) (monitor *Li
 				defer h.wg.Done()
 				if monitor.tearingDown {
 					slog.Info("Handler: Closing replaced LiveKitRoomMonitor", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
-					monitor.Close()
+					err := monitor.Close()
+					if err != nil {
+						slog.Error("Handler: Error closing room monitor", "error", err, "room", lkRoom, "MonitorId", monitor.MonitorId)
+					}
 				} else {
 					slog.Error("Handler: Replaced LiveKitRoomMonitor is still active!", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
 				}
@@ -484,9 +490,7 @@ func (h* Handler) GetRoomMonitor(name LiveKitRoomAlias) (*LiveKitRoomMonitor, bo
 func (h* Handler) RemoveRoomMonitor(name LiveKitRoomAlias) {
 	h.Lock()
 	defer h.Unlock()
-    if _, ok := h.LiveKitRoomMonitors[name]; ok {
-        delete(h.LiveKitRoomMonitors, name)
-    }
+	delete(h.LiveKitRoomMonitors, name)
 }
 
 func (h *Handler) prepareMux() *http.ServeMux {

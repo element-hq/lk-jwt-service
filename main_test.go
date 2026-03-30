@@ -963,7 +963,10 @@ func TestProcessLegacySFURequest(t *testing.T) {
 		t.Errorf("expected 0 jobs in monitor, got %d", len(monitor.jobs))
 	}
 
-	monitor.Close()
+	err := monitor.Close()
+	if err != nil {
+		slog.Error("failed to close monitor", "err", err)
+	}
 }
 
  func TestLiveKitRoomMonitor_HandoverJobs(t *testing.T) {
@@ -1062,7 +1065,10 @@ func TestProcessLegacySFURequest(t *testing.T) {
 	}
 
 	// Close the monitor and check that it was closed successfully
-	monitor.Close()
+	err := monitor.Close()
+	if err != nil {
+		slog.Error("failed to close monitor", "err", err)
+	}
 
 	select {
 	case <-monitor.ctx.Done():
@@ -1144,7 +1150,11 @@ func TestRoomMonitor_RaceConditionStress(t *testing.T) {
 	}
 
 	wg.Wait()
-	m.Close()
+	err := m.Close()
+	if err != nil {
+		slog.Error("failed to close monitor", "err", err)
+	}
+
 	select {
 	case <-m.ctx.Done():
 		// Monitor context was cancelled as expected
@@ -1221,7 +1231,11 @@ func TestRoomMonitor_RaceConditionStressWithJobChaos(t *testing.T) {
 
 	// m.Close() also involves JobRemove() as part of the teardown operation to remove all pending jobs
 	// This teardown operation is racing against the for loop above
-	m.Close()
+	err := m.Close()
+	if err != nil {
+		slog.Error("failed to close monitor", "err", err)
+	}
+
 	select {
 	case <-m.ctx.Done():
 		// Monitor context was cancelled as expected

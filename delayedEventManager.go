@@ -942,16 +942,19 @@ func (m *LiveKitRoomMonitor) removeJobLocked(name LiveKitIdentity, jobId UniqueI
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			job.Close()
+			err := job.Close()
+			if err != nil {
+				slog.Error("RoomMonitor: Failed to close Job", "room", m.RoomAlias,  "MonitorId", m.MonitorId, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
+			}
 		}()
 		m.updateStateLocked(func(){
 			delete(m.jobs, name)
 		})
-		slog.Info("RoomMonitor: Removed delayed event job", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId, "leftNumJobs", len(m.jobs))
+		slog.Info("RoomMonitor: Removed delayed event job", "room", m.RoomAlias, "MonitorId", m.MonitorId, "lkId", name, "jobId", jobId, "leftNumJobs", len(m.jobs))
 		return true
 	}
 
-	slog.Warn("RoomMonitor: Attempt to remove non existing job", "room", m.RoomAlias, "lkId", name, "MonitorId", m.MonitorId, "jobId", jobId, "leftNumJobs", len(m.jobs))
+	slog.Warn("RoomMonitor: Attempt to remove non existing job", "room", m.RoomAlias, "MonitorId", m.MonitorId, "lkId", name,  "jobId", jobId, "leftNumJobs", len(m.jobs))
 	return false
 }
 
@@ -1039,7 +1042,15 @@ func (m *LiveKitRoomMonitor) HandoverJob(jobRequest *DelayedEventRequest) (bool,
 				"existingJobId", existingJob.JobId, "newJobId", job.JobId,
 			)
 			existingJob.setState(Replaced)
-			existingJob.Close()
+			err := existingJob.Close()
+			if err != nil {
+				slog.Error(
+					"RoomMonitor: Failed to close existing Job",
+					"room", m.RoomAlias, "lkId", existingJob.LiveKitIdentity, 
+					"delayId", existingJob.DelayId, "newDelayId", job.DelayId, 
+					"existingJobId", existingJob.JobId, "newJobId", job.JobId,
+				)
+			}
 		}()
 	}
 
