@@ -17,6 +17,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # needed for login into tailscale with GitHub OIDC Token
 
     steps:
       - name: Get current time
@@ -33,11 +34,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        if: github.event_name != 'pull_request'
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:github-actions
+
+      - name: Compute vault jwt role name
+        id: vault-jwt-role
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "role_name=github_service_management_$( echo "${{ github.repository }}" | sed -r 's|[/-]|_|g')" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Get team registry token
+        id: import-secrets
+        uses: hashicorp/vault-action@4c06c5ccf5c0761b6029f56cfb1dcf5565918a3b # v3
+        if: github.event_name != 'pull_request'
+        with:
+          url: https://vault.infra.ci.i.element.dev
+          role: ${{ steps.vault-jwt-role.outputs.role_name }}
+          path: service-management/github-actions
+          jwtGithubAudience: https://vault.infra.ci.i.element.dev
+          method: jwt
+          secrets: |
+            services/voip-repositories/secret/data/oci.element.io username | OCI_USERNAME ;
+            services/voip-repositories/secret/data/oci.element.io password | OCI_PASSWORD ;
+
+      - name: Login to oci.element.io Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: oci-push.vpn.infra.element.io
+          username: ${{ steps.import-secrets.outputs.OCI_USERNAME }}
+          password: ${{ steps.import-secrets.outputs.OCI_PASSWORD }}          
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+            oci-push.vpn.infra.element.io/lk-jwt-service
           tags: ${{ inputs.docker_tags }}
 
       - name: Set up Docker Buildx

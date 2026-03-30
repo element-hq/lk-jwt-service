@@ -25,7 +25,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
     uses: ./.github/workflows/build-and-publish-docker.yaml
+    secrets: inherit
     with:
       docker_tags: |
         type=sha,format=short,event=branch
