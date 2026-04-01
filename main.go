@@ -19,7 +19,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/MatusOllah/slogcolor"
@@ -214,29 +213,55 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 //
 // # Concurrency model
 //
-// HTTP handlers run in separate goroutines (one per request).  They call
-// addDelayedEventJob() and read/write LiveKitRoomMonitors via a mutex-
-// protected map.  The heavy work (job lifecycle, SFU event routing) is
-// entirely delegated to LiveKitRoomMonitor.Loop() and DelayedEventJob.Loop().
+// Handler.loop() is the single goroutine that owns the liveKitRoomMonitors
+// map — no mutex needed.  HTTP handler goroutines communicate with loop()
+// exclusively through channels:
 //
-// The Handler itself only needs a mutex to protect the monitors map.
+//   - addJobCh:      deliver a new DelayedEventRequest to loop(), which
+//                    creates/reuses a monitor and calls HandoverJob atomically.
+//   - sfuEventCh:    deliver an SFU webhook event to loop(), which routes it
+//                    to the correct monitor.
+//   - monitorCommChan: monitors send NoJobsLeft back to loop() for cleanup.
 //
-// # Shutdown
+// Because all map mutations happen in a single goroutine there are no data
+// races and no mutex is required.
 //
-// MonitorCommChan carries NoJobsLeft events from monitors back to the
-// Handler's event loop (started in NewHandler).  When the handler context is
-// cancelled (e.g. on server shutdown) the event loop exits cleanly.
+// # Atomicity of job handover
+//
+// The old two-step (acquireOrCreateMonitor + HandoverJob) had a race window:
+// a monitor could send NoJobsLeft and be removed between the two calls.
+// Now loop() performs both steps atomically: it looks up (or creates) the
+// monitor and calls HandoverJob in the same iteration, with no opportunity
+// for the monitor to be removed in between.
 type Handler struct {
-	mu                    sync.Mutex // protects liveKitRoomMonitors only
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	liveKitAuth           LiveKitAuth
 	fullAccessHomeservers []string
 	skipVerifyTLS         bool
-	liveKitRoomMonitors   map[LiveKitRoomAlias]*LiveKitRoomMonitor
-	monitorCommChan       chan HandlerMessage
-	// loopDone is closed when the internal event loop has exited.
-	loopDone chan struct{}
+	// loopDone is closed when loop() has exited.
+	loopDone         chan struct{}
+	monitorCommChan  chan HandlerMessage
+	addJobCh         chan addJobRequest
+	sfuEventCh       chan sfuEventRequest
+}
+
+// addJobRequest is sent by HTTP handlers to loop() to add a delayed-event job.
+type addJobRequest struct {
+	jobRequest *DelayedEventRequest
+	// result receives the outcome; buffered so loop() never blocks.
+	result chan addJobResult
+}
+
+type addJobResult struct {
+	jobId UniqueID
+	ok    bool
+}
+
+// sfuEventRequest is sent by handleSfuWebhook to loop() for routing.
+type sfuEventRequest struct {
+	roomAlias LiveKitRoomAlias
+	msg       SFUMessage
 }
 
 func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string) *Handler {
@@ -247,53 +272,101 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		liveKitAuth:           lkAuth,
 		skipVerifyTLS:         skipVerifyTLS,
 		fullAccessHomeservers: fullAccessHomeservers,
-		monitorCommChan:       make(chan HandlerMessage, 10),
-		liveKitRoomMonitors:   make(map[LiveKitRoomAlias]*LiveKitRoomMonitor),
 		loopDone:              make(chan struct{}),
+		monitorCommChan:       make(chan HandlerMessage, 10),
+		addJobCh:              make(chan addJobRequest),
+		sfuEventCh:            make(chan sfuEventRequest, 200),
 	}
 	go h.loop()
 	return h
 }
 
-// loop is the Handler's event-processing goroutine.
-// It is the only place that removes monitors from the map.
+// loop is the sole owner of liveKitRoomMonitors — no locking needed.
 func (h *Handler) loop() {
 	defer close(h.loopDone)
+
+	// The map lives entirely inside this goroutine.
+	monitors := make(map[LiveKitRoomAlias]*LiveKitRoomMonitor)
+
+	// acquireMonitor returns the live monitor for a room, creating one if
+	// needed.  Called only from within loop().
+	acquireMonitor := func(lkRoom LiveKitRoomAlias) *LiveKitRoomMonitor {
+		if m, ok := monitors[lkRoom]; ok {
+			select {
+			case <-m.ctx.Done():
+				// Monitor is shutting down — replace it.
+				slog.Info("Handler: replacing shutting-down monitor",
+					"room", lkRoom, "MonitorId", m.MonitorId)
+			default:
+				return m
+			}
+		}
+		m := NewLiveKitRoomMonitor(h.ctx, h.monitorCommChan, &h.liveKitAuth, lkRoom)
+		go m.Loop()
+		monitors[lkRoom] = m
+		slog.Debug("Handler: created LiveKitRoomMonitor",
+			"room", lkRoom, "MonitorId", m.MonitorId)
+		return m
+	}
+
 	for {
 		select {
 		case <-h.ctx.Done():
 			slog.Debug("Handler: loop exiting")
 			return
+
+		// ── job handover (atomic: lookup + HandoverJob in one step) ──────────
+		case req := <-h.addJobCh:
+			m := acquireMonitor(req.jobRequest.LiveKitRoom)
+			jobId, ok := m.HandoverJob(req.jobRequest)
+			if !ok {
+				slog.Error("Handler: HandoverJob failed",
+					"room", req.jobRequest.LiveKitRoom,
+					"lkId", req.jobRequest.LiveKitIdentity)
+			}
+			req.result <- addJobResult{jobId: jobId, ok: ok}
+
+		// ── SFU webhook routing ──────────────────────────────────────────────
+		case ev := <-h.sfuEventCh:
+			if m, ok := monitors[ev.roomAlias]; ok {
+				select {
+				case m.SFUCommChan <- ev.msg:
+				case <-m.ctx.Done():
+					// Monitor shutting down; event can be dropped safely.
+				}
+			}
+
+		// ── monitor lifecycle ────────────────────────────────────────────────
 		case event := <-h.monitorCommChan:
 			switch event.Event {
 			case NoJobsLeft:
-				h.mu.Lock()
-				monitor, ok := h.liveKitRoomMonitors[event.RoomAlias]
-				if ok && monitor.MonitorId == event.MonitorId {
-					slog.Info("Handler: removing LiveKitRoomMonitor",
-						"room", event.RoomAlias, "MonitorId", monitor.MonitorId)
-					delete(h.liveKitRoomMonitors, event.RoomAlias)
-					h.mu.Unlock()
-					// Close outside of the lock so Close() can take its time.
-					if err := monitor.Close(); err != nil {
-						slog.Error("Handler: error closing monitor",
-							"room", event.RoomAlias, "MonitorId", monitor.MonitorId, "err", err)
-					}
-				} else if ok {
-					slog.Error("Handler: MonitorId mismatch, not removing",
-						"room", event.RoomAlias,
-						"MonitorId", monitor.MonitorId,
-						"requestedMonitorId", event.MonitorId)
-					h.mu.Unlock()
-				} else {
-					h.mu.Unlock()
+				m, ok := monitors[event.RoomAlias]
+				if !ok {
+					break
 				}
+				if m.MonitorId != event.MonitorId {
+					slog.Error("Handler: MonitorId mismatch on NoJobsLeft — ignoring",
+						"room", event.RoomAlias,
+						"mapMonitorId", m.MonitorId,
+						"eventMonitorId", event.MonitorId)
+					break
+				}
+				slog.Info("Handler: removing LiveKitRoomMonitor",
+					"room", event.RoomAlias, "MonitorId", m.MonitorId)
+				delete(monitors, event.RoomAlias)
+				// Close in a goroutine so loop() stays responsive.
+				go func(mon *LiveKitRoomMonitor) {
+					if err := mon.Close(); err != nil {
+						slog.Error("Handler: error closing monitor",
+							"room", event.RoomAlias, "MonitorId", mon.MonitorId, "err", err)
+					}
+				}(m)
 			}
 		}
 	}
 }
 
-// Close shuts down the handler and waits for the internal loop to exit.
+// Close shuts down the handler and waits for loop() to exit.
 func (h *Handler) Close() {
 	h.cancel()
 	select {
@@ -303,50 +376,29 @@ func (h *Handler) Close() {
 	}
 }
 
+// addDelayedEventJob sends a job request to loop() and waits for the result.
+// loop() performs the monitor lookup and HandoverJob atomically.
 func (h *Handler) addDelayedEventJob(jobRequest *DelayedEventRequest) {
 	slog.Debug("Handler: adding delayed event job",
 		"room", jobRequest.LiveKitRoom,
 		"lkId", jobRequest.LiveKitIdentity,
 		"DelayId", jobRequest.DelayId)
 
-	monitor := h.acquireOrCreateMonitor(jobRequest.LiveKitRoom)
-
-	jobId, ok := monitor.HandoverJob(jobRequest)
-	if !ok {
-		slog.Error("Handler: failed to handover job",
+	result := make(chan addJobResult, 1)
+	select {
+	case h.addJobCh <- addJobRequest{jobRequest: jobRequest, result: result}:
+	case <-h.ctx.Done():
+		slog.Warn("Handler: addDelayedEventJob called after shutdown",
+			"room", jobRequest.LiveKitRoom)
+		return
+	}
+	res := <-result
+	if !res.ok {
+		slog.Error("Handler: job handover failed",
 			"room", jobRequest.LiveKitRoom,
 			"lkId", jobRequest.LiveKitIdentity,
-			"jobId", jobId)
+			"jobId", res.jobId)
 	}
-}
-
-// acquireOrCreateMonitor returns the existing LiveKitRoomMonitor for the
-// given room, or creates and starts a new one.
-//
-// The returned monitor is guaranteed to be running (Loop() has been started).
-func (h *Handler) acquireOrCreateMonitor(lkRoom LiveKitRoomAlias) *LiveKitRoomMonitor {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if monitor, ok := h.liveKitRoomMonitors[lkRoom]; ok {
-		// Check whether the monitor is still alive by seeing if its context
-		// is still active.
-		select {
-		case <-monitor.ctx.Done():
-			// Monitor is shutting down — fall through to create a replacement.
-			slog.Info("Handler: replacing shutting-down monitor",
-				"room", lkRoom, "MonitorId", monitor.MonitorId)
-		default:
-			return monitor
-		}
-	}
-
-	monitor := NewLiveKitRoomMonitor(h.ctx, h.monitorCommChan, &h.liveKitAuth, lkRoom)
-	go monitor.Loop()
-	h.liveKitRoomMonitors[lkRoom] = monitor
-	slog.Debug("Handler: created new LiveKitRoomMonitor",
-		"room", lkRoom, "MonitorId", monitor.MonitorId)
-	return monitor
 }
 
 func (h *Handler) isFullAccessUser(matrixServerName string) bool {
@@ -644,17 +696,12 @@ func (h *Handler) handleSfuWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.mu.Lock()
-	monitor, ok := h.liveKitRoomMonitors[LiveKitRoomAlias(event.Room.Name)]
-	h.mu.Unlock()
-
-	if !ok {
-		return
-	}
+	roomAlias := LiveKitRoomAlias(event.Room.Name)
+	var msg SFUMessage
 
 	switch event.Event {
 	case "participant_joined":
-		monitor.SFUCommChan <- SFUMessage{
+		msg = SFUMessage{
 			Type:            ParticipantConnected,
 			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
 		}
@@ -666,13 +713,22 @@ func (h *Handler) handleSfuWebhook(w http.ResponseWriter, r *http.Request) {
 		if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
 			msgType = ParticipantDisconnectedIntentionally
 		}
-		monitor.SFUCommChan <- SFUMessage{
+		msg = SFUMessage{
 			Type:            msgType,
 			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
 		}
 		slog.Debug("Handler: SFU participant left",
 			"lkId", event.Participant.Identity, "room", event.Room.Name,
 			"DisconnectReason", event.Participant.DisconnectReason)
+
+	default:
+		return
+	}
+
+	// Route via loop() so the map is accessed by a single goroutine only.
+	select {
+	case h.sfuEventCh <- sfuEventRequest{roomAlias: roomAlias, msg: msg}:
+	case <-h.ctx.Done():
 	}
 }
 
@@ -734,7 +790,7 @@ func parseConfig() (*Config, error) {
 	lkUrl := os.Getenv("LIVEKIT_URL")
 
 	if key == "" || secret == "" || lkUrl == "" {
-		return nil, fmt.Errorf("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
+		return nil, fmt.Errorf("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL must be set")
 	}
 
 	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
@@ -759,7 +815,7 @@ func parseConfig() (*Config, error) {
 		}
 		lkJwtBind = fmt.Sprintf(":%s", lkJwtPort)
 	} else if lkJwtPort != "" {
-		return nil, fmt.Errorf("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables MUST NOT be set together")
+		return nil, fmt.Errorf("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together")
 	}
 
 	return &Config{
