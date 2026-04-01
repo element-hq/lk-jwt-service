@@ -751,24 +751,6 @@ func (m *LiveKitRoomMonitor) Loop() {
 		lookupWg.Wait()
 	}
 
-	// maybeInitiateTeardown sends NoJobsLeft to the handler and stops the loop
-	// when there is nothing left to do.
-	maybeInitiateTeardown := func() {
-		if len(jobs) == 0 {
-			slog.Debug("RoomMonitor: no jobs left, notifying handler",
-				"room", m.RoomAlias, "MonitorId", m.MonitorId)
-			// Send synchronously — we're already in the loop goroutine and the
-			// handler's channel is unbuffered-tolerant (it runs its own loop).
-			m.handlerCommChan <- HandlerMessage{
-				RoomAlias: m.RoomAlias,
-				Event:     NoJobsLeft,
-				MonitorId: m.MonitorId,
-			}
-			// Cancel ourselves; next iteration hits ctx.Done.
-			m.cancel()
-		}
-	}
-
 	for {
 		select {
 		case <-m.ctx.Done():
@@ -835,7 +817,16 @@ func (m *LiveKitRoomMonitor) Loop() {
 					}
 				}(job)
 				delete(jobs, msg.LiveKitIdentity)
-				maybeInitiateTeardown()
+				if len(jobs) == 0 {
+					slog.Debug("RoomMonitor: no jobs left, notifying handler",
+						"room", m.RoomAlias, "MonitorId", m.MonitorId)
+					m.handlerCommChan <- HandlerMessage{
+						RoomAlias: m.RoomAlias,
+						Event:     NoJobsLeft,
+						MonitorId: m.MonitorId,
+					}
+					m.cancel()
+				}
 			default:
 				slog.Warn("RoomMonitor: unhandled MonitorMessage state",
 					"room", m.RoomAlias, "lkId", msg.LiveKitIdentity,
@@ -851,7 +842,16 @@ func (m *LiveKitRoomMonitor) Loop() {
 					"lkId", req.jobRequest.LiveKitIdentity,
 					"err", err)
 				req.result <- handoverResult{}
-				maybeInitiateTeardown()
+				if len(jobs) == 0 {
+					slog.Debug("RoomMonitor: no jobs left after failed job creation, notifying handler",
+						"room", m.RoomAlias, "MonitorId", m.MonitorId)
+					m.handlerCommChan <- HandlerMessage{
+						RoomAlias: m.RoomAlias,
+						Event:     NoJobsLeft,
+						MonitorId: m.MonitorId,
+					}
+					m.cancel()
+				}
 				continue
 			}
 
