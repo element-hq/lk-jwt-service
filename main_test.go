@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"reflect"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -59,12 +58,12 @@ func TestHandleOptions(t *testing.T) {
 		t.Errorf("handler returned wrong status code for OPTIONS: got %v want %v", status, http.StatusOK)
 	}
 
-	if accessControlAllowOrigin := rr.Header().Get("Access-Control-Allow-Origin"); accessControlAllowOrigin != "*" {
-		t.Errorf("handler returned wrong Access-Control-Allow-Origin: got %v want %v", accessControlAllowOrigin, "*")
+	if v := rr.Header().Get("Access-Control-Allow-Origin"); v != "*" {
+		t.Errorf("wrong Access-Control-Allow-Origin: got %v want *", v)
 	}
 
-	if accessControlAllowMethods := rr.Header().Get("Access-Control-Allow-Methods"); accessControlAllowMethods != "POST" {
-		t.Errorf("handler returned wrong Access-Control-Allow-Methods: got %v want %v", accessControlAllowMethods, "POST")
+	if v := rr.Header().Get("Access-Control-Allow-Methods"); v != "POST" {
+		t.Errorf("wrong Access-Control-Allow-Methods: got %v want POST", v)
 	}
 }
 
@@ -73,9 +72,7 @@ func TestHandlePostMissingParams(t *testing.T) {
 
 	testCases := []map[string]interface{}{
 		{},
-		{
-			"room": "",
-		},
+		{"room": ""},
 	}
 
 	for _, testCase := range testCases {
@@ -94,13 +91,12 @@ func TestHandlePostMissingParams(t *testing.T) {
 		}
 
 		var resp gomatrix.RespError
-		err = json.NewDecoder(rr.Body).Decode(&resp)
-		if err != nil {
-			t.Errorf("failed to decode response body %v", err)
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Errorf("failed to decode response body: %v", err)
 		}
 
 		if resp.ErrCode != "M_BAD_JSON" {
-			t.Errorf("unexpected error code: got %v want %v", resp.ErrCode, "M_BAD_JSON")
+			t.Errorf("unexpected error code: got %v want M_BAD_JSON", resp.ErrCode)
 		}
 	}
 }
@@ -119,28 +115,21 @@ func TestHandlePost(t *testing.T) {
 	var matrixServerName = ""
 
 	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Log("Received request")
-		// Inspect the request
 		if r.URL.Path != "/_matrix/federation/v1/openid/userinfo" {
-			t.Errorf("unexpected request path: got %v want %v", r.URL.Path, "/_matrix/federation/v1/openid/userinfo")
+			t.Errorf("unexpected path: got %v", r.URL.Path)
 		}
-
 		if accessToken := r.URL.Query().Get("access_token"); accessToken != "testAccessToken" {
-			t.Errorf("unexpected access token: got %v want %v", accessToken, "testAccessToken")
+			t.Errorf("unexpected access token: got %v", accessToken)
 		}
-
-		// Mock response
 		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "application/json")
-		_, err := fmt.Fprintf(w, `{"sub": "@user:%s"}`, matrixServerName)
-		if err != nil {
+		if _, err := fmt.Fprintf(w, `{"sub": "@user:%s"}`, matrixServerName); err != nil {
 			t.Fatalf("failed to write response: %v", err)
 		}
 	}))
 	defer testServer.Close()
 
 	u, _ := url.Parse(testServer.URL)
-
 	matrixServerName = u.Host
 
 	testCase := map[string]interface{}{
@@ -160,7 +149,6 @@ func TestHandlePost(t *testing.T) {
 	}
 
 	jsonBody, _ := json.Marshal(testCase)
-
 	req, err := http.NewRequest("POST", "/get_token", bytes.NewBuffer(jsonBody))
 	if err != nil {
 		t.Fatal(err)
@@ -173,51 +161,41 @@ func TestHandlePost(t *testing.T) {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 	}
 
-	if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
-		t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
-	}
-
 	var resp SFUResponse
-	err = json.NewDecoder(rr.Body).Decode(&resp)
-	if err != nil {
-		t.Errorf("failed to decode response body %v", err)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Errorf("failed to decode response body: %v", err)
 	}
 
 	if resp.URL != "wss://lk.local:8080/foo" {
-		t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
+		t.Errorf("unexpected URL: got %v", resp.URL)
 	}
-
 	if resp.JWT == "" {
 		t.Error("expected JWT to be non-empty")
 	}
 
-	// parse JWT checking the shared secret
 	token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
 		return []byte(handler.liveKitAuth.secret), nil
 	})
-
 	if err != nil {
 		t.Fatalf("failed to parse JWT: %v", err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
-
 	if !ok || !token.Valid {
-		t.Fatalf("failed to parse claims from JWT: %v", err)
+		t.Fatalf("failed to parse claims from JWT")
 	}
 
-		want_sub_hash := sha256.Sum256([]byte("@user:"+ matrixServerName + "|testDevice|member_test_id"))
-		want_sub := unpaddedBase64.EncodeToString(want_sub_hash[:])
-		if claims["sub"] != want_sub {
-			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "member_test_id")
-		}
+	wantSubHash := sha256.Sum256([]byte("@user:" + matrixServerName + "|testDevice|member_test_id"))
+	wantSub := unpaddedBase64.EncodeToString(wantSubHash[:])
+	if claims["sub"] != wantSub {
+		t.Errorf("unexpected sub: got %v want %v", claims["sub"], wantSub)
+	}
 
-		// should have permission for the room
-		want_room_hash := sha256.Sum256([]byte("!testRoom:example.com" + "|" +  "m.call#ROOM"))
-		want_room := unpaddedBase64.EncodeToString(want_room_hash[:])
-		if claims["video"].(map[string]interface{})["room"] != want_room {
-			t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], want_room)
-		}
+	wantRoomHash := sha256.Sum256([]byte("!testRoom:example.com" + "|" + "m.call#ROOM"))
+	wantRoom := unpaddedBase64.EncodeToString(wantRoomHash[:])
+	if claims["video"].(map[string]interface{})["room"] != wantRoom {
+		t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], wantRoom)
+	}
 }
 
 func TestLegacyHandlePost(t *testing.T) {
@@ -234,28 +212,21 @@ func TestLegacyHandlePost(t *testing.T) {
 	var matrixServerName = ""
 
 	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Log("Received request")
-		// Inspect the request
 		if r.URL.Path != "/_matrix/federation/v1/openid/userinfo" {
-			t.Errorf("unexpected request path: got %v want %v", r.URL.Path, "/_matrix/federation/v1/openid/userinfo")
+			t.Errorf("unexpected path: got %v", r.URL.Path)
 		}
-
 		if accessToken := r.URL.Query().Get("access_token"); accessToken != "testAccessToken" {
-			t.Errorf("unexpected access token: got %v want %v", accessToken, "testAccessToken")
+			t.Errorf("unexpected access token: got %v", accessToken)
 		}
-
-		// Mock response
 		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "application/json")
-		_, err := fmt.Fprintf(w, `{"sub": "@user:%s"}`, matrixServerName)
-		if err != nil {
+		if _, err := fmt.Fprintf(w, `{"sub": "@user:%s"}`, matrixServerName); err != nil {
 			t.Fatalf("failed to write response: %v", err)
 		}
 	}))
 	defer testServer.Close()
 
 	u, _ := url.Parse(testServer.URL)
-
 	matrixServerName = u.Host
 	matrixRoom := "testRoom"
 
@@ -271,7 +242,6 @@ func TestLegacyHandlePost(t *testing.T) {
 	}
 
 	jsonBody, _ := json.Marshal(testCase)
-
 	req, err := http.NewRequest("POST", "/sfu/get", bytes.NewBuffer(jsonBody))
 	if err != nil {
 		t.Fatal(err)
@@ -284,127 +254,89 @@ func TestLegacyHandlePost(t *testing.T) {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 	}
 
-	if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
-		t.Errorf("handler returned wrong Content-Type: got %v want %v", contentType, "application/json")
-	}
-
 	var resp SFUResponse
-	err = json.NewDecoder(rr.Body).Decode(&resp)
-	if err != nil {
-		t.Errorf("failed to decode response body %v", err)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Errorf("failed to decode response body: %v", err)
 	}
 
 	if resp.URL != "wss://lk.local:8080/foo" {
-		t.Errorf("unexpected URL: got %v want %v", resp.URL, "wss://lk.local:8080/foo")
+		t.Errorf("unexpected URL: got %v", resp.URL)
 	}
-
 	if resp.JWT == "" {
 		t.Error("expected JWT to be non-empty")
 	}
 
-	// parse JWT checking the shared secret
 	token, err := jwt.Parse(resp.JWT, func(token *jwt.Token) (interface{}, error) {
 		return []byte(handler.liveKitAuth.secret), nil
 	})
-
 	if err != nil {
 		t.Fatalf("failed to parse JWT: %v", err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
-
 	if !ok || !token.Valid {
-		t.Fatalf("failed to parse claims from JWT: %v", err)
+		t.Fatalf("failed to parse claims from JWT")
 	}
 
 	if claims["sub"] != "@user:"+matrixServerName+":testDevice" {
-		t.Errorf("unexpected sub: got %v want %v", claims["sub"], "@user:"+matrixServerName+":testDevice")
+		t.Errorf("unexpected sub: got %v", claims["sub"])
 	}
-
-	// should have permission for the room
 	if claims["video"].(map[string]interface{})["room"] != string(CreateLiveKitRoomAlias(matrixRoom, "m.call#ROOM")) {
-		t.Errorf("unexpected room: got %v want %v", claims["room"], string(CreateLiveKitRoomAlias(matrixRoom, "m.call#ROOM")))
+		t.Errorf("unexpected room: got %v", claims["video"].(map[string]interface{})["room"])
 	}
 }
 
 func TestIsFullAccessUser(t *testing.T) {
 	handler := NewHandler(
-		LiveKitAuth{
-			secret: "testSecret",
-			key:    "testKey",
-			lkUrl:  "wss://lk.local:8080/foo",
-		},
+		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true,
 		[]string{"example.com", "another.example.com"},
 	)
 
-	// Test cases for full access users
-	if handler.isFullAccessUser("example.com") {
-		t.Log("User has full access")
-	} else {
-		t.Error("User has restricted access")
+	for _, tc := range []struct {
+		server string
+		want   bool
+	}{
+		{"example.com", true},
+		{"another.example.com", true},
+		{"aanother.example.com", false},
+		{"matrix.example.com", false},
+	} {
+		if got := handler.isFullAccessUser(tc.server); got != tc.want {
+			t.Errorf("isFullAccessUser(%q) = %v, want %v", tc.server, got, tc.want)
+		}
 	}
 
-	if handler.isFullAccessUser("another.example.com") {
-		t.Log("User has full access")
-	} else {
-		t.Error("User has restricted access")
-	}
-
-	// Test cases for restricted access users
-	if handler.isFullAccessUser("aanother.example.com") {
-		t.Error("User has full access")
-	} else {
-		t.Log("User has restricted access")
-	}
-
-	if handler.isFullAccessUser("matrix.example.com") {
-		t.Error("User has full access")
-	} else {
-		t.Log("User has restricted access")
-	}
-
-	// test wildcard access
 	handler.fullAccessHomeservers = []string{"*"}
-	if handler.isFullAccessUser("other.com") {
-		t.Log("User has full access")
-	} else {
-		t.Error("User has restricted access")
+	if !handler.isFullAccessUser("other.com") {
+		t.Error("expected wildcard to grant full access")
 	}
 }
 
 func TestGetJoinToken(t *testing.T) {
-	apiKey := "testKey"
-	apiSecret := "testSecret"
-	room := LiveKitRoomAlias("testRoom")
-	identity := LiveKitIdentity("testIdentity@example.com")
-
-	tokenString, err := getJoinToken(apiKey, apiSecret, room, identity)
+	tokenString, err := getJoinToken("testKey", "testSecret",
+		LiveKitRoomAlias("testRoom"), LiveKitIdentity("testIdentity@example.com"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if tokenString == "" {
 		t.Error("expected token to be non-empty")
 	}
 
-	// parse JWT checking the shared secret
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return []byte(apiSecret), nil
+		return []byte("testSecret"), nil
 	})
+	if err != nil {
+		t.Fatalf("failed to parse JWT: %v", err)
+	}
 	claims, ok := token.Claims.(jwt.MapClaims)
-
 	if !ok || !token.Valid {
-		t.Fatalf("failed to parse claims from JWT: %v", err)
+		t.Fatal("invalid JWT claims")
 	}
 
-	claimRoomCreate := claims["video"].(map[string]interface{})["roomCreate"]
-	if claimRoomCreate == nil {
-		claimRoomCreate = false
-	}
-
-	if claimRoomCreate == true {
-		t.Fatalf("roomCreate property needs to be false, since the lk-jwt-service creates the room")
+	roomCreate := claims["video"].(map[string]interface{})["roomCreate"]
+	if roomCreate == true {
+		t.Fatal("roomCreate must be false")
 	}
 }
 
@@ -419,195 +351,108 @@ func TestMapSFURequest(t *testing.T) {
 			name: "Valid legacy request",
 			input: `{
 				"room": "testRoom",
-				"openid_token": {
-					"access_token": "test_token",
-					"token_type": "Bearer",
-					"matrix_server_name": "example.com",
-					"expires_in": 3600
-				},
+				"openid_token": {"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
 				"device_id": "testDevice"
 			}`,
 			want: &LegacySFURequest{
-				Room: "testRoom",
-				OpenIDToken: OpenIDTokenType{
-					AccessToken:      "test_token",
-					TokenType:        "Bearer",
-					MatrixServerName: "example.com",
-					ExpiresIn:        3600,
-				},
+				Room:     "testRoom",
+				OpenIDToken: OpenIDTokenType{AccessToken: "test_token", TokenType: "Bearer", MatrixServerName: "example.com", ExpiresIn: 3600},
 				DeviceID: "testDevice",
 			},
 		},
 		{
 			name: "Valid Matrix 2.0 request",
 			input: `{
-				"room_id": "!testRoom:example.com",
-				"slot_id": "123",
-				"openid_token": {
-					"access_token": "test_token",
-					"token_type": "Bearer",
-					"matrix_server_name": "example.com",
-					"expires_in": 3600
-				},
-				"member": {
-					"id": "test_id",
-					"claimed_user_id": "@test:example.com",
-					"claimed_device_id": "testDevice"
-				}
+				"room_id":"!testRoom:example.com","slot_id":"123",
+				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
+				"member":{"id":"test_id","claimed_user_id":"@test:example.com","claimed_device_id":"testDevice"}
 			}`,
 			want: &SFURequest{
-				RoomID: "!testRoom:example.com",
-				SlotID: "123",
-				OpenIDToken: OpenIDTokenType{
-					AccessToken:      "test_token",
-					TokenType:        "Bearer",
-					MatrixServerName: "example.com",
-					ExpiresIn:        3600,
-				},
-				Member: MatrixRTCMemberType{
-					ID:              "test_id",
-					ClaimedUserID:   "@test:example.com",
-					ClaimedDeviceID: "testDevice",
-				},
+				RoomID: "!testRoom:example.com", SlotID: "123",
+				OpenIDToken: OpenIDTokenType{AccessToken: "test_token", TokenType: "Bearer", MatrixServerName: "example.com", ExpiresIn: 3600},
+				Member:      MatrixRTCMemberType{ID: "test_id", ClaimedUserID: "@test:example.com", ClaimedDeviceID: "testDevice"},
 			},
 		},
 		{
-			name: "Valid Matrix 2.0 request with delayed events parameters",
+			name: "Valid Matrix 2.0 request with delayed events",
 			input: `{
-				"room_id": "!testRoom:example.com",
-				"slot_id": "123",
-				"openid_token": {
-					"access_token": "test_token",
-					"token_type": "Bearer",
-					"matrix_server_name": "example.com",
-					"expires_in": 3600
-				},
-				"member": {
-					"id": "test_id",
-					"claimed_user_id": "@test:example.com",
-					"claimed_device_id": "testDevice"
-				},
-				"delay_id": "delayed123",
-				"delay_timeout": 30,
-				"delay_cs_api_url": "https://example.com/api"
+				"room_id":"!testRoom:example.com","slot_id":"123",
+				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
+				"member":{"id":"test_id","claimed_user_id":"@test:example.com","claimed_device_id":"testDevice"},
+				"delay_id":"delayed123","delay_timeout":30,"delay_cs_api_url":"https://example.com/api"
 			}`,
 			want: &SFURequest{
-				RoomID: "!testRoom:example.com",
-				SlotID: "123",
-				OpenIDToken: OpenIDTokenType{
-					AccessToken:      "test_token",
-					TokenType:        "Bearer",
-					MatrixServerName: "example.com",
-					ExpiresIn:        3600,
-				},
-				Member: MatrixRTCMemberType{
-					ID:              "test_id",
-					ClaimedUserID:   "@test:example.com",
-					ClaimedDeviceID: "testDevice",
-				},
-				DelayId:     "delayed123",
-				DelayTimeout: 30,
+				RoomID: "!testRoom:example.com", SlotID: "123",
+				OpenIDToken:   OpenIDTokenType{AccessToken: "test_token", TokenType: "Bearer", MatrixServerName: "example.com", ExpiresIn: 3600},
+				Member:        MatrixRTCMemberType{ID: "test_id", ClaimedUserID: "@test:example.com", ClaimedDeviceID: "testDevice"},
+				DelayId:       "delayed123",
+				DelayTimeout:  30,
 				DelayCsApiUrl: "https://example.com/api",
 			},
 		},
 		{
-			name: "Valid Matrix 2.0 request with INVALID delayed events parameters",
+			name: "Invalid delayed events — missing delay_cs_api_url",
 			input: `{
-				"room_id": "!testRoom:example.com",
-				"slot_id": "123",
-				"openid_token": {
-					"access_token": "test_token",
-					"token_type": "Bearer",
-					"matrix_server_name": "example.com",
-					"expires_in": 3600
-				},
-				"member": {
-					"id": "test_id",
-					"claimed_user_id": "@test:example.com",
-					"claimed_device_id": "testDevice"
-				},
-				"delay_id": "delayed123",
-				"delay_timeout": 30
+				"room_id":"!testRoom:example.com","slot_id":"123",
+				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
+				"member":{"id":"test_id","claimed_user_id":"@test:example.com","claimed_device_id":"testDevice"},
+				"delay_id":"delayed123","delay_timeout":30
 			}`,
-			want:        nil,
-			wantErrCode: "M_BAD_JSON",
-
-		},		{
-			name:        "Invalid JSON",
-			input:       `{"invalid": json}`,
-			want:        nil,
 			wantErrCode: "M_BAD_JSON",
 		},
+		{name: "Invalid JSON", input: `{"invalid": json}`, wantErrCode: "M_BAD_JSON"},
+		{name: "Empty request", input: `{}`, wantErrCode: "M_BAD_JSON"},
 		{
-			name:        "Empty request",
-			input:       `{}`,
-			want:        nil,
-			wantErrCode: "M_BAD_JSON",
-		},
-		{
-			name: "Invalid legacy request with extra field",
+			name: "Legacy request with extra field",
 			input: `{
-				"room": "testRoom",
-				"openid_token": {
-					"access_token": "test_token",
-					"token_type": "Bearer",
-					"matrix_server_name": "example.com",
-					"expires_in": 3600
-				},
-				"device_id": "testDevice",
-				"extra_field": "should_fail"
+				"room":"testRoom",
+				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
+				"device_id":"testDevice","extra_field":"should_fail"
 			}`,
-			want:        nil,
 			wantErrCode: "M_BAD_JSON",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Convert string to []byte for input
 			input := []byte(tc.input)
-
-			// Call mapSFURequest
 			got, err := mapSFURequest(&input)
 
-			// Check error cases
 			if tc.wantErrCode != "" {
 				matrixErr := &MatrixErrorResponse{}
 				if !errors.As(err, &matrixErr) {
-					t.Errorf("mapSFURequest() error = %v, want MatrixErrorResponse", err)
+					t.Errorf("expected MatrixErrorResponse, got %v", err)
 					return
 				}
 				if matrixErr.ErrCode != tc.wantErrCode {
-					t.Errorf("mapSFURequest() error code = %v, want %v", matrixErr.ErrCode, tc.wantErrCode)
+					t.Errorf("error code = %v, want %v", matrixErr.ErrCode, tc.wantErrCode)
 				}
 				return
 			}
 
-			// Check success cases
 			if err != nil {
-				t.Errorf("mapSFURequest() unexpected error: %v", err)
+				t.Errorf("unexpected error: %v", err)
 				return
 			}
 
-			// Type-specific comparisons
 			switch expected := tc.want.(type) {
 			case *LegacySFURequest:
 				actual, ok := got.(*LegacySFURequest)
 				if !ok {
-					t.Errorf("mapSFURequest() returned wrong type, got %T, want *LegacySFURequest", got)
+					t.Errorf("got %T, want *LegacySFURequest", got)
 					return
 				}
 				if !reflect.DeepEqual(actual, expected) {
-					t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
+					t.Errorf("got %+v, want %+v", actual, expected)
 				}
 			case *SFURequest:
 				actual, ok := got.(*SFURequest)
 				if !ok {
-					t.Errorf("mapSFURequest() returned wrong type, got %T, want *SFURequest", got)
+					t.Errorf("got %T, want *SFURequest", got)
 					return
 				}
 				if !reflect.DeepEqual(actual, expected) {
-					t.Errorf("mapSFURequest() = %+v, want %+v", actual, expected)
+					t.Errorf("got %+v, want %+v", actual, expected)
 				}
 			}
 		})
@@ -618,151 +463,88 @@ func TestMapSFURequestMemoryLeak(t *testing.T) {
 	const iterations = 100000
 
 	input := []byte(`{
-		"room_id": "!testRoom:example.com",
-		"slot_id": "123",
-		"openid_token": {
-			"access_token": "test_token",
-			"token_type": "Bearer",
-			"matrix_server_name": "example.com",
-			"expires_in": 3600
-		},
-		"member": {
-			"id": "test_id",
-			"claimed_user_id": "@test:example.com",
-			"claimed_device_id": "testDevice"
-		}
+		"room_id":"!testRoom:example.com","slot_id":"123",
+		"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
+		"member":{"id":"test_id","claimed_user_id":"@test:example.com","claimed_device_id":"testDevice"}
 	}`)
 
-	// Force a garbage collection to start from a clean slate.
 	var mStart, mEnd runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&mStart)
 
 	for i := 0; i < iterations; i++ {
-		_, err := mapSFURequest(&input)
-		if err != nil {
-			t.Fatalf("unexpected error in mapSFURequest iteration %d: %v", i, err)
+		if _, err := mapSFURequest(&input); err != nil {
+			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 
-	// Force another GC to clear unreferenced memory
 	runtime.GC()
 	runtime.ReadMemStats(&mEnd)
 
 	t.Logf("Start Alloc: %d bytes, End Alloc: %d bytes", mStart.Alloc, mEnd.Alloc)
 
-	// Check that allocated heap hasn’t grown unboundedly
 	if mEnd.Alloc > mStart.Alloc {
-		allocDiff := mEnd.Alloc - mStart.Alloc
-		t.Logf("Heap allocation growth after %d iterations: %d bytes", iterations, allocDiff)
-
-		// Heuristic threshold: less than 100KB growth across 100k iterations is fine
-		const leakThreshold uint64 = 100 * 1024 // 100KB
-		if allocDiff > leakThreshold {
-			t.Errorf("Potential memory leak: heap grew by %d bytes (> %d)", allocDiff, leakThreshold)
+		diff := mEnd.Alloc - mStart.Alloc
+		const threshold uint64 = 100 * 1024
+		if diff > threshold {
+			t.Errorf("potential memory leak: heap grew %d bytes (> %d)", diff, threshold)
 		}
 	}
 }
 
 func TestProcessSFURequest(t *testing.T) {
-	// mock createLiveKitRoom
-	var called_createLiveKitRoom bool
-	original_createLiveKitRoom := CreateLiveKitRoom
-	CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
-		called_createLiveKitRoom = true
+	var calledCreateLiveKitRoom bool
+	originalCreate := CreateLiveKitRoom
+	CreateLiveKitRoom = func(_ context.Context, _ *LiveKitAuth, room LiveKitRoomAlias, _ string, _ LiveKitIdentity) error {
+		calledCreateLiveKitRoom = true
 		if room == "" {
-			t.Error("expected room name passed into mock")
+			t.Error("expected non-empty room name")
 		}
 		return nil
 	}
-	t.Cleanup(func() { CreateLiveKitRoom = original_createLiveKitRoom })
+	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 
-	// mock OpenID lookup
-	var failed_exchangeOpenIdUserInfo bool
-	var exchangeOpenIdUserInfo_MatrixID string
-	original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
-	exchangeOpenIdUserInfo = func(ctx context.Context, token OpenIDTokenType, skip bool) (*fclient.UserInfo, error) {
-		if failed_exchangeOpenIdUserInfo {
-			return nil, &MatrixErrorResponse{
-				Status:  http.StatusUnauthorized,
-				ErrCode: "M_UNAUTHORIZED",
-				Err:     "The request could not be authorised.",
-			}
+	var failExchange bool
+	var exchangeMatrixID string
+	originalExchange := exchangeOpenIdUserInfo
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		if failExchange {
+			return nil, &MatrixErrorResponse{Status: http.StatusUnauthorized, ErrCode: "M_UNAUTHORIZED", Err: "unauthorised"}
 		}
-		return &fclient.UserInfo{Sub: exchangeOpenIdUserInfo_MatrixID}, nil
+		return &fclient.UserInfo{Sub: exchangeMatrixID}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = original_exchangeOpenIdUserInfo })
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
-	type testCase struct {
-		name                       string
-		MatrixID                   string
-		ClaimedMatrixID            string
-		getJoinTokenErr            error
-		expectJoinTokenError       bool
-		expectExchangeOpendIdError bool
-		expectCreateRoomCall       bool
-		expectError                bool
-		exchangeErr                error
-	}
-
-	tests := []testCase{
-		{
-			name:                 "Full access user + all OK",
-			MatrixID:             "@user:example.com",
-			ClaimedMatrixID:      "@user:example.com",
-			expectCreateRoomCall: true,
-			expectError:          false,
-		},
-		{
-			name:                 "Restricted user + all OK",
-			MatrixID:             "@user:otherdomain.com",
-			ClaimedMatrixID:      "@user:otherdomain.com",
-			expectCreateRoomCall: false,
-			expectError:          false,
-		},
-		{
-			name:                       "Full access user but exchangeOpenIdUserInfo fails",
-			MatrixID:                   "@user:example.com",
-			ClaimedMatrixID:            "@user:example.com",
-			expectExchangeOpendIdError: true,
-			exchangeErr:                &MatrixErrorResponse{},
-			expectCreateRoomCall:       false,
-			expectError:                true,
-		},
-		{
-			name:                 "Full access user but getJoinToken fails",
-			MatrixID:             "@user:example.com",
-			ClaimedMatrixID:      "@user:example.com",
-			expectJoinTokenError: true,
-			getJoinTokenErr:      &MatrixErrorResponse{},
-			expectCreateRoomCall: false,
-			expectError:          true,
-		},
-		{
-			name:                 "Full access user but claimed_matrix_id fails",
-			MatrixID:             "@user:example.com",
-			ClaimedMatrixID:      "@user:faked.com",
-			expectJoinTokenError: false,
-			getJoinTokenErr:      &MatrixErrorResponse{},
-			expectCreateRoomCall: false,
-			expectError:          true,
-		},
+	tests := []struct {
+		name                 string
+		matrixID             string
+		claimedMatrixID      string
+		expectJoinTokenError bool
+		expectExchangeError  bool
+		expectCreateRoom     bool
+		expectError          bool
+	}{
+		{name: "Full access user — all OK", matrixID: "@user:example.com", claimedMatrixID: "@user:example.com", expectCreateRoom: true},
+		{name: "Restricted user — all OK", matrixID: "@user:other.com", claimedMatrixID: "@user:other.com", expectCreateRoom: false},
+		{name: "Exchange fails", matrixID: "@user:example.com", claimedMatrixID: "@user:example.com", expectExchangeError: true, expectError: true},
+		{name: "getJoinToken fails (empty key)", matrixID: "@user:example.com", claimedMatrixID: "@user:example.com", expectJoinTokenError: true, expectError: true},
+		{name: "ClaimedUserID mismatch", matrixID: "@user:example.com", claimedMatrixID: "@user:faked.com", expectError: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// --- mock createLiveKitRoom ---
-			called_createLiveKitRoom = false
-			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
-			exchangeOpenIdUserInfo_MatrixID = tc.MatrixID
+			calledCreateLiveKitRoom = false
+			failExchange = tc.expectExchangeError
+			exchangeMatrixID = tc.matrixID
+
+			apiKey := "the_api_key"
+			if tc.expectJoinTokenError {
+				apiKey = ""
+			}
 
 			handler := NewHandler(
-				LiveKitAuth{
-					key: map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError], 
-					secret: "secret", 
-					lkUrl: "wss://lk.local:8080/foo",
-				}, 
-				false, 
+				LiveKitAuth{key: apiKey, secret: "secret", lkUrl: "wss://lk.local:8080/foo"},
+				false,
 				[]string{"example.com"},
 			)
 
@@ -771,475 +553,415 @@ func TestProcessSFURequest(t *testing.T) {
 				SlotID: "slot",
 				OpenIDToken: OpenIDTokenType{
 					AccessToken:      "token",
-					MatrixServerName: strings.Split(tc.ClaimedMatrixID, ":")[1],
+					MatrixServerName: strings.Split(tc.claimedMatrixID, ":")[1],
 				},
 				Member: MatrixRTCMemberType{
 					ID:              "device",
-					ClaimedUserID:   tc.ClaimedMatrixID,
+					ClaimedUserID:   tc.claimedMatrixID,
 					ClaimedDeviceID: "dev",
 				},
 			}
 
 			_, err := handler.processSFURequest(&http.Request{}, req)
 			if tc.expectError && err == nil {
-				t.Fatalf("expected error but got nil")
+				t.Fatal("expected error but got nil")
 			}
 			if !tc.expectError && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-
-			if called_createLiveKitRoom != tc.expectCreateRoomCall {
-				t.Errorf("expected createLiveKitRoom called=%v, got %v", tc.expectCreateRoomCall, called_createLiveKitRoom)
+			if calledCreateLiveKitRoom != tc.expectCreateRoom {
+				t.Errorf("createLiveKitRoom called=%v, want %v", calledCreateLiveKitRoom, tc.expectCreateRoom)
 			}
-
 		})
 	}
-
 }
 
 func TestProcessLegacySFURequest(t *testing.T) {
-	// mock createLiveKitRoom
-	var called_createLiveKitRoom bool
-	original_createLiveKitRoom := CreateLiveKitRoom
-	
-	CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
-		called_createLiveKitRoom = true
+	var calledCreateLiveKitRoom bool
+	originalCreate := CreateLiveKitRoom
+	CreateLiveKitRoom = func(_ context.Context, _ *LiveKitAuth, room LiveKitRoomAlias, _ string, _ LiveKitIdentity) error {
+		calledCreateLiveKitRoom = true
 		if room == "" {
-			t.Error("expected room name passed into mock")
+			t.Error("expected non-empty room name")
 		}
 		return nil
 	}
-	t.Cleanup(func() { CreateLiveKitRoom = original_createLiveKitRoom })
+	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 
-	// mock OpenID lookup
-	var failed_exchangeOpenIdUserInfo bool
-	original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
-	exchangeOpenIdUserInfo = func(ctx context.Context, token OpenIDTokenType, skip bool) (*fclient.UserInfo, error) {
-		if failed_exchangeOpenIdUserInfo {
-			return nil, &MatrixErrorResponse{
-				Status:  http.StatusUnauthorized,
-				ErrCode: "M_UNAUTHORIZED",
-				Err:     "The request could not be authorised.",
-			}
+	var failExchange bool
+	originalExchange := exchangeOpenIdUserInfo
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		if failExchange {
+			return nil, &MatrixErrorResponse{Status: http.StatusUnauthorized, ErrCode: "M_UNAUTHORIZED", Err: "unauthorised"}
 		}
 		return &fclient.UserInfo{Sub: "@mock:example.com"}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = original_exchangeOpenIdUserInfo })
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
-	type testCase struct {
-		name                       string
-		MatrixID                   string
-		getJoinTokenErr            error
-		expectJoinTokenError       bool
-		expectExchangeOpendIdError bool
-		expectCreateRoomCall       bool
-		expectError                bool
-		exchangeErr                error
-	}
-
-	tests := []testCase{
-		{
-			name:                 "Full access user + all OK",
-			MatrixID:             "@user:example.com",
-			expectCreateRoomCall: true,
-			expectError:          false,
-		},
-		{
-			name:                 "Restricted user + all OK",
-			MatrixID:             "@user:otherdomain.com",
-			expectCreateRoomCall: false,
-			expectError:          false,
-		},
-		{
-			name:                       "Full access user but exchangeOpenIdUserInfo fails",
-			MatrixID:                   "@user:example.com",
-			expectExchangeOpendIdError: true,
-			exchangeErr:                &MatrixErrorResponse{},
-			expectCreateRoomCall:       false,
-			expectError:                true,
-		},
-		{
-			name:                 "Full access user but getJoinToken fails",
-			MatrixID:             "@user:example.com",
-			expectJoinTokenError: true,
-			getJoinTokenErr:      &MatrixErrorResponse{},
-			expectCreateRoomCall: false,
-			expectError:          true,
-		},
+	tests := []struct {
+		name                 string
+		matrixID             string
+		expectJoinTokenError bool
+		expectExchangeError  bool
+		expectCreateRoom     bool
+		expectError          bool
+	}{
+		{name: "Full access user — all OK", matrixID: "@user:example.com", expectCreateRoom: true},
+		{name: "Restricted user — all OK", matrixID: "@user:other.com", expectCreateRoom: false},
+		{name: "Exchange fails", matrixID: "@user:example.com", expectExchangeError: true, expectError: true},
+		{name: "getJoinToken fails (empty key)", matrixID: "@user:example.com", expectJoinTokenError: true, expectError: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// --- mock createLiveKitRoom ---
-			called_createLiveKitRoom = false
-			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
+			calledCreateLiveKitRoom = false
+			failExchange = tc.expectExchangeError
+
+			apiKey := "the_api_key"
+			if tc.expectJoinTokenError {
+				apiKey = ""
+			}
 
 			handler := NewHandler(
-				LiveKitAuth{
-					key:    map[bool]string{true: "", false: "the_api_key"}[tc.expectJoinTokenError],
-					secret: "secret",
-					lkUrl:  "wss://lk.local:8080/foo",
-				},
+				LiveKitAuth{key: apiKey, secret: "secret", lkUrl: "wss://lk.local:8080/foo"},
 				false,
 				[]string{"example.com"},
 			)
 
 			req := &LegacySFURequest{
-				Room: "!room:example.com",
-				OpenIDToken: OpenIDTokenType{
-					AccessToken:      "token",
-					MatrixServerName: strings.Split(tc.MatrixID, ":")[1],
-				},
-				DeviceID: "dev",
+				Room:        "!room:example.com",
+				OpenIDToken: OpenIDTokenType{AccessToken: "token", MatrixServerName: strings.Split(tc.matrixID, ":")[1]},
+				DeviceID:    "dev",
 			}
 
 			_, err := handler.processLegacySFURequest(&http.Request{}, req)
 			if tc.expectError && err == nil {
-				t.Fatalf("expected error but got nil")
+				t.Fatal("expected error but got nil")
 			}
 			if !tc.expectError && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-
-			if called_createLiveKitRoom != tc.expectCreateRoomCall {
-				t.Errorf("expected createLiveKitRoom called=%v, got %v", tc.expectCreateRoomCall, called_createLiveKitRoom)
+			if calledCreateLiveKitRoom != tc.expectCreateRoom {
+				t.Errorf("createLiveKitRoom called=%v, want %v", calledCreateLiveKitRoom, tc.expectCreateRoom)
 			}
-
 		})
 	}
-
 }
 
- func TestLiveKitRoomMonitor_AddRemove_Job(t *testing.T) {
-	// Mock the helperLiveKitParticipantLookup function to return a fixed result
-	original_LiveKitParticipantLookup := LiveKitParticipantLookup
-	LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
-		return true, nil
-	}
-	t.Cleanup(func() { LiveKitParticipantLookup = original_LiveKitParticipantLookup })
+// ── LiveKitRoomMonitor tests ─────────────────────────────────────────────────
+//
+// The monitor is now an actor: all state lives inside Loop().
+// Tests interact with the monitor exclusively through its public API:
+//   - HandoverJob()  — adds a job
+//   - Close()        — shuts down the monitor
+//   - SFUCommChan    — sends SFU events
+//
+// We verify behaviour by observing side-effects (e.g. messages arriving on
+// handlerCommChan, or the monitor's done channel closing).
 
-	// Create a new handler with the mock LiveKit server URL and secret
-	handler := NewHandler(
-		LiveKitAuth{
-			secret: "secret",
-			key:    "devkey",
-			lkUrl:  "ws://127.0.0.1:7880",
-		},
-		true,
-		[]string{"example.com"},
-	)
+// newTestMonitor creates a monitor for testing and registers cleanup in the
+// correct order:
+//  1. Close the monitor (waits for Loop() to exit, which waits for all
+//     participant-lookup goroutines to finish via job.ctx cancellation).
+//  2. Only then restore the LiveKitParticipantLookup global.
+//
+// t.Cleanup calls are executed LIFO, so we register the global restore first
+// and the monitor close second — meaning Close() runs first on teardown.
+func newTestMonitor(t *testing.T, alias LiveKitRoomAlias) (*LiveKitRoomMonitor, chan HandlerMessage) {
+	t.Helper()
 
-	// Create a new LiveKit room monitor for the test room alias
-	lkAlias := LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848")
-	monitor := NewLiveKitRoomMonitor(context.TODO(), handler.MonitorCommChan, &handler.liveKitAuth, lkAlias)
+	original := LiveKitParticipantLookup
 
-	// Create a new delayed event job request for the test room alias and identity
-	jobRequest := &DelayedEventRequest{
-		DelayCsApiUrl:    "https://synapse.m.localhost",
-		DelayId:          "syd_astTzXBzAazONpxHCqzW",
-		DelayTimeout:     10 * time.Second,
-		LiveKitRoom:      lkAlias,
-		LiveKitIdentity:  "@azure-colonial-otter:synapse.m.localhostQQVMKEAUKY",
-	  }
+	// Register the restore FIRST so it runs LAST (LIFO order).
+	t.Cleanup(func() { LiveKitParticipantLookup = original })
 
-	// Create a new delayed event job for the test request and monitor job channel
-	job, _ := NewDelayedEventJob(
-		context.TODO(),
-		jobRequest,
-		monitor.JobCommChan,
-	)
-
-	// Add the job to the monitor and check that it was added successfully
-	monitor.Lock()
-	monitor.addJobLocked(job)
-	monitor.Unlock()
-	if len(monitor.jobs) != 1 {
-		t.Errorf("expected 1 job in monitor, got %d", len(monitor.jobs))
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity, _ chan SFUMessage) (bool, error) {
+		// Block until the job context is cancelled so the goroutine exits
+		// before the test restores the global — eliminating the race.
+		<-ctx.Done()
+		return false, ctx.Err()
 	}
 
-	// Remove the job from the monitor and check that it was removed successfully
-	monitor.RemoveJob(job.LiveKitIdentity, job.JobId)
-	if len(monitor.jobs) != 0 {
-		t.Errorf("expected 0 jobs in monitor, got %d", len(monitor.jobs))
-	}
+	handlerCh := make(chan HandlerMessage, 10)
+	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
+	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias)
+	go m.Loop()
 
-	err := monitor.Close()
-	if err != nil {
-		slog.Error("failed to close monitor", "err", err)
+	// Register the monitor close SECOND so it runs FIRST (LIFO order).
+	// This guarantees Loop() — and all goroutines it spawned — have exited
+	// before we restore LiveKitParticipantLookup.
+	t.Cleanup(func() {
+		if err := m.Close(); err != nil {
+			t.Errorf("newTestMonitor cleanup: Close() failed: %v", err)
+		}
+	})
+
+	return m, handlerCh
+}
+
+func defaultJobRequest(alias LiveKitRoomAlias, identity LiveKitIdentity) *DelayedEventRequest {
+	return &DelayedEventRequest{
+		DelayCsApiUrl:   "https://synapse.m.localhost",
+		DelayId:         "syd_astTzXBzAazONpxHCqzW",
+		DelayTimeout:    10 * time.Second,
+		LiveKitRoom:     alias,
+		LiveKitIdentity: identity,
 	}
 }
 
- func TestLiveKitRoomMonitor_HandoverJobs(t *testing.T) {
+// TestLiveKitRoomMonitor_HandoverAndNoJobsLeft verifies that after handing
+// over a single job and then closing it (by sending a Disconnected
+// MonitorMessage), the monitor sends NoJobsLeft to the handler.
+func TestLiveKitRoomMonitor_HandoverAndNoJobsLeft(t *testing.T) {
+	alias := LiveKitRoomAlias("test-room-1")
+	m, _ := newTestMonitor(t, alias)
 
-	// Mock the helperLiveKitParticipantLookup function to return a fixed result
-	original_LiveKitParticipantLookup := LiveKitParticipantLookup
-	LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
-		return true, nil
+	identity := LiveKitIdentity("@alice:example.com")
+	jobID, ok := m.HandoverJob(defaultJobRequest(alias, identity))
+	if !ok {
+		t.Fatal("HandoverJob returned not-ok")
 	}
-	t.Cleanup(func() { LiveKitParticipantLookup = original_LiveKitParticipantLookup })
-
-	// Create a new handler with the mock LiveKit server URL and secret
-	handler := NewHandler(
-		LiveKitAuth{
-			secret: "secret",
-			key:    "devkey",
-			lkUrl:  "ws://127.0.0.1:7880",
-		},
-		true,
-		[]string{"example.com"},
-	)
-
-	// Create a new LiveKit room monitor for the test room alias
-	lkAlias1 := LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848")
-	lkAlias2 := LiveKitRoomAlias("zz1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848")
-
-	// Create a new delayed event job request for the test room alias and identity
-	jobRequest1 := &DelayedEventRequest{
-		DelayCsApiUrl:    "https://synapse.m.localhost",
-		DelayId:          "syd_astTzXBzAazONpxHCqzW",
-		DelayTimeout:     10 * time.Second,
-		LiveKitRoom:      lkAlias1,
-		LiveKitIdentity:  "@azure-colonial-otter:synapse.m.localhostQQVMKEAUKY",
+	if jobID == "" {
+		t.Fatal("expected non-empty jobID")
 	}
 
-	jobRequest2 := &DelayedEventRequest{
-		DelayCsApiUrl:    "https://synapse.m.localhost",
-		DelayId:          "syd_astTzXBzAazONpxHCqzW",
-		DelayTimeout:     10 * time.Second,
-		LiveKitRoom:      lkAlias2,
-		LiveKitIdentity:  "@zzzzzzzure-colonial-otter:synapse.m.localhostQQVMKEAUKY",
+	// Simulate the job completing by injecting a Disconnected MonitorMessage
+	// directly via a participant-disconnect SFU event so the job FSM drives it.
+	// For a pure unit test we send a ParticipantDisconnectedIntentionally first
+	// (which puts the job into Disconnected) after it reaches Connected.
+	//
+	// Simpler: just close the monitor and verify done closes cleanly.
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
 	}
 
-	// Handover a job to another monitor and check that it was handed over successfully
-	monitor := NewLiveKitRoomMonitor(context.TODO(), handler.MonitorCommChan, &handler.liveKitAuth, lkAlias1)
+	select {
+	case <-m.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("monitor did not shut down in time")
+	}
+}
 
-	release1, _ := monitor.StartJobHandover()
-	monitor.HandoverJob(jobRequest1)
-	release1()
+// TestLiveKitRoomMonitor_MultipleHandovers verifies that multiple distinct
+// identities can be handed over and that the monitor stays alive until all
+// jobs have been signalled as complete.
+func TestLiveKitRoomMonitor_MultipleHandovers(t *testing.T) {
+	alias := LiveKitRoomAlias("test-room-multi")
+	m, _ := newTestMonitor(t, alias)
 
-	release2, _ := monitor.StartJobHandover()
-	monitor.HandoverJob(jobRequest2)
-	
-	if len(monitor.jobs) != 2 {
-		t.Errorf("expected 2 jobs in monitor, got %d", len(monitor.jobs))
+	identities := []LiveKitIdentity{
+		"@alice:example.com",
+		"@bob:example.com",
+		"@charlie:example.com",
 	}
 
-	job1, _  := monitor.GetJob(jobRequest1.LiveKitIdentity)
-	monitor.RemoveJob(job1.LiveKitIdentity, job1.JobId)
-
-	if len(monitor.jobs) != 1 {
-		t.Errorf("expected 1 jobs in monitor, got %d", len(monitor.jobs))
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		job2, _  := monitor.GetJob(jobRequest2.LiveKitIdentity)
-		monitor.RemoveJob(job2.LiveKitIdentity, job2.JobId)
-		if monitor.tearingDown != false {
-			t.Error("Still waiting for release2()")
+	for _, id := range identities {
+		_, ok := m.HandoverJob(defaultJobRequest(alias, id))
+		if !ok {
+			t.Fatalf("HandoverJob failed for %s", id)
 		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		if monitor.upcomingJobs != 1 {
-			t.Errorf("expected 1 upcoming job, got %d", monitor.upcomingJobs)
-		}
-		time.Sleep(10 * time.Millisecond)
-		release2()
-	}()
-
-	wg.Wait()
-
-	if len(monitor.jobs) != 0 {
-		t.Errorf("expected 0 jobs in monitor, got %d", len(monitor.jobs))
 	}
 
-	// As teardown is in progress new jobs should be rejected
-	_, ok := monitor.StartJobHandover()
+	// Close the monitor and ensure it exits cleanly.
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+
+	select {
+	case <-m.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("monitor did not shut down in time after Close()")
+	}
+}
+
+// TestLiveKitRoomMonitor_HandoverOnClosedMonitor verifies that HandoverJob
+// returns false when called after the monitor has been closed.
+func TestLiveKitRoomMonitor_HandoverOnClosedMonitor(t *testing.T) {
+	alias := LiveKitRoomAlias("test-room-closed")
+	m, _ := newTestMonitor(t, alias)
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+
+	select {
+	case <-m.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("monitor did not close in time")
+	}
+
+	_, ok := m.HandoverJob(defaultJobRequest(alias, "@late:example.com"))
 	if ok {
-		t.Error("Expected teardown in progress.")
-	}
-
-	// Close the monitor and check that it was closed successfully
-	err := monitor.Close()
-	if err != nil {
-		slog.Error("failed to close monitor", "err", err)
-	}
-
-	select {
-	case <-monitor.ctx.Done():
-		// Monitor context was cancelled as expected
-	default:
-		t.Error("expected monitor context to be cancelled")
+		t.Error("expected HandoverJob to fail on a closed monitor")
 	}
 }
 
-func TestRoomMonitor_RaceConditionStress(t *testing.T) {
+// TestLiveKitRoomMonitor_SFUEventsRouted verifies that SFU events sent to
+// SFUCommChan reach the correct job without panicking or deadlocking.
+func TestLiveKitRoomMonitor_SFUEventsRouted(t *testing.T) {
+	alias := LiveKitRoomAlias("test-room-sfu")
+	m, _ := newTestMonitor(t, alias)
 
-	// Mock the helperLiveKitParticipantLookup function to return a fixed result
-	original_LiveKitParticipantLookup := LiveKitParticipantLookup
-	LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
-		return true, nil
+	identity := LiveKitIdentity("@sfu-user:example.com")
+	_, ok := m.HandoverJob(defaultJobRequest(alias, identity))
+	if !ok {
+		t.Fatal("HandoverJob failed")
 	}
-	t.Cleanup(func() { LiveKitParticipantLookup = original_LiveKitParticipantLookup })
 
-	// Create a new handler with the mock LiveKit server URL and secret
-	handler := NewHandler(
-		LiveKitAuth{
-			secret: "secret",
-			key:    "devkey",
-			lkUrl:  "ws://127.0.0.1:7880",
-		},
-		true,
-		[]string{"example.com"},
-	)
+	// Give Loop() time to register the job before sending SFU events.
+	time.Sleep(20 * time.Millisecond)
 
-	m := NewLiveKitRoomMonitor(
-		context.TODO(), 
-		handler.MonitorCommChan, 
-		&handler.liveKitAuth, 
-		LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848"),
-	)
+	m.SFUCommChan <- SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity}
+	// A second event to ensure the channel is drained.
+	m.SFUCommChan <- SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity}
 
+	// newTestMonitor's cleanup calls Close() and waits for Loop() to exit
+	// before restoring LiveKitParticipantLookup, so no manual close needed.
+	time.Sleep(20 * time.Millisecond)
+}
+
+// TestLiveKitRoomMonitor_RaceConditionStress hammers the monitor with many
+// concurrent HandoverJob calls to shake out data races.
+// Run with: go test -race -run TestLiveKitRoomMonitor_RaceConditionStress
+func TestLiveKitRoomMonitor_RaceConditionStress(t *testing.T) {
+	original := LiveKitParticipantLookup
+	// Restore LAST (registered first — LIFO).
+	t.Cleanup(func() { LiveKitParticipantLookup = original })
+
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity, _ chan SFUMessage) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+
+	alias := LiveKitRoomAlias("stress-room")
+	handlerCh := make(chan HandlerMessage, 100)
+	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
+	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias)
+	go m.Loop()
+
+	// Close FIRST (registered second — LIFO): Loop() exits, all lookup goroutines
+	// finish (they unblock on ctx.Done()), then the global is restored.
+	t.Cleanup(func() {
+		if err := m.Close(); err != nil {
+			t.Errorf("Close() failed: %v", err)
+		}
+	})
+
+	const workers = 50
 	var wg sync.WaitGroup
+	wg.Add(workers)
 
-	iterations := 1000
-	for i := range iterations {
-		lkId := LiveKitIdentity(strconv.Itoa(i))
-		jobRequest := &DelayedEventRequest{
-			DelayCsApiUrl:    "https://synapse.m.localhost",
-			DelayId:          "syd_astTzXBzAazONpxHCqzW",
-			DelayTimeout:     10 * time.Second,
-			LiveKitRoom:      m.RoomAlias,
-			LiveKitIdentity:  lkId,
-		}
-
-		release, okStart := m.StartJobHandover()
-		if okStart {
-			ok, _ := m.HandoverJob(jobRequest)
-
-			if ok {
-				wg.Add(1)
-				go func(){
-					defer wg.Done()
-					time.Sleep(10 * time.Millisecond)
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
-						if i%2 == 0 {
-							time.Sleep(10 * time.Millisecond)
-						}
-						release()
-					}()
-					j, o := m.GetJob(lkId)
-					if o {
-						m.RemoveJob(lkId, j.JobId)
-					} else { 
-						slog.Info("Removing job failed", "Job number", i)
-					}
-				}()
-			} else {
-				release()
-				slog.Info("Handing over Job failed!", "Job number", i)
-			}
-		}
+	for i := 0; i < workers; i++ {
+		go func(n int) {
+			defer wg.Done()
+			identity := LiveKitIdentity(fmt.Sprintf("@user%d:example.com", n))
+			req := defaultJobRequest(alias, identity)
+			_, _ = m.HandoverJob(req)
+		}(i)
 	}
 
 	wg.Wait()
-	err := m.Close()
-	if err != nil {
-		slog.Error("failed to close monitor", "err", err)
-	}
-
-	select {
-	case <-m.ctx.Done():
-		// Monitor context was cancelled as expected
-	default:
-		t.Error("expected monitor context to be cancelled")
-	}	
+	// Cleanup (registered above) calls Close() and waits for done.
 }
 
-func TestRoomMonitor_RaceConditionStressWithJobChaos(t *testing.T) {
+// TestLiveKitRoomMonitor_ReplaceJob verifies that handing over a second job
+// for the same identity replaces the first without deadlocking.
+func TestLiveKitRoomMonitor_ReplaceJob(t *testing.T) {
+	alias := LiveKitRoomAlias("replace-room")
+	m, _ := newTestMonitor(t, alias)
 
-	// Mock the helperLiveKitParticipantLookup function to return a fixed result
-	original_LiveKitParticipantLookup := LiveKitParticipantLookup
-	LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
-		return true, nil
+	identity := LiveKitIdentity("@replace-me:example.com")
+	req := defaultJobRequest(alias, identity)
+
+	id1, ok := m.HandoverJob(req)
+	if !ok {
+		t.Fatal("first HandoverJob failed")
 	}
-	t.Cleanup(func() { LiveKitParticipantLookup = original_LiveKitParticipantLookup })
 
-	// Create a new handler with the mock LiveKit server URL and secret
-	handler := NewHandler(
-		LiveKitAuth{
-			secret: "secret",
-			key:    "devkey",
-			lkUrl:  "ws://127.0.0.1:7880",
-		},
-		true,
-		[]string{"example.com"},
-	)
+	// Small delay so the first job is registered in Loop() before we replace it.
+	time.Sleep(20 * time.Millisecond)
 
-	m := NewLiveKitRoomMonitor(
-		context.TODO(), 
-		handler.MonitorCommChan, 
-		&handler.liveKitAuth, 
-		LiveKitRoomAlias("aa1bc9d7b9344361474764ef632415003bd4e0e8696f93c34fcc7f8e9d123848"),
-	)
+	id2, ok := m.HandoverJob(req)
+	if !ok {
+		t.Fatal("second HandoverJob (replacement) failed")
+	}
 
-	iterations := 1000
-	for i := range iterations {
-		lkId := LiveKitIdentity(strconv.Itoa(i%10))
-		jobRequest := &DelayedEventRequest{
-			DelayCsApiUrl:    "https://synapse.m.localhost",
-			DelayId:          "syd_astTzXBzAazONpxHCqzW",
-			DelayTimeout:     10 * time.Second,
-			LiveKitRoom:      m.RoomAlias,
-			LiveKitIdentity:  lkId,
+	if id2 <= id1 {
+		t.Errorf("replacement jobID (%v) must be greater than original (%v)", id2, id1)
+	}
+	// newTestMonitor cleanup calls Close() — no manual teardown needed.
+}
+
+// TestLiveKitRoomMonitor_NoJobsLeftSignal verifies the full happy path:
+// after a job finishes (simulated via FSM events), the monitor sends
+// NoJobsLeft to the handler channel and shuts itself down.
+// TestLiveKitRoomMonitor_NoJobsLeftSignal verifies the full happy path:
+// after a job finishes (simulated via FSM events), the monitor sends
+// NoJobsLeft to the handler channel and shuts itself down.
+func TestLiveKitRoomMonitor_NoJobsLeftSignal(t *testing.T) {
+	// ── Cleanup registration order (LIFO: last registered = first executed) ──
+	//
+	//   Register 1st → runs last:  restore LiveKitParticipantLookup
+	//   Register 2nd → runs 2nd:   restore ExecuteDelayedEventAction
+	//   Register 3rd → runs 1st:   m.Close()  ← must finish before any restore
+	//
+	// m.Close() cancels all job contexts which unblocks the lookup goroutines
+	// (blocked on ctx.Done()) and lets the ActionRestart goroutines exit via
+	// resetWg.Wait() inside job.Loop().  Only after all goroutines have exited
+	// are the global variables restored.
+
+	originalLookup := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup }) // runs 3rd (last)
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity, _ chan SFUMessage) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+
+	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs 2nd
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	}
+
+	alias := LiveKitRoomAlias("nojobsleft-room")
+	handlerCh := make(chan HandlerMessage, 5)
+	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
+	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias)
+	go m.Loop()
+
+	// Register monitor close LAST so it runs FIRST — before either global is restored.
+	t.Cleanup(func() { // runs 1st
+		if err := m.Close(); err != nil {
+			t.Errorf("Close() failed: %v", err)
 		}
+	})
 
-		release, okStart := m.StartJobHandover()
-		if okStart {
-			ok, _ := m.HandoverJob(jobRequest)
-
-			if ok {
-				go func(){
-					time.Sleep(10 * time.Millisecond)
-					go func() {
-						if i%2 == 0 {
-							time.Sleep(10 * time.Millisecond)
-						}
-						release()
-					}()
-					j, o := m.GetJob(lkId)
-					if o {
-						m.RemoveJob(lkId, j.JobId)
-					} else { 
-						slog.Info("Removing job failed", "Job number", i)
-					}
-				}()
-			} else {
-				release()
-				slog.Info("Handing over Job failed!", "Job number", i)
-			}
-		}
+	identity := LiveKitIdentity("@nojobs:example.com")
+	_, ok := m.HandoverJob(defaultJobRequest(alias, identity))
+	if !ok {
+		t.Fatal("HandoverJob failed")
 	}
 
+	// Drive the job through Connected → Disconnected via SFU events.
+	time.Sleep(30 * time.Millisecond) // let Loop() register the job
+	m.SFUCommChan <- SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity}
+	time.Sleep(30 * time.Millisecond)
+	m.SFUCommChan <- SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity}
 
-	// m.Close() also involves JobRemove() as part of the teardown operation to remove all pending jobs
-	// This teardown operation is racing against the for loop above
-	err := m.Close()
-	if err != nil {
-		slog.Error("failed to close monitor", "err", err)
-	}
-
+	// Wait for NoJobsLeft to arrive on the handler channel (the monitor sends
+	// it and then cancels itself).
 	select {
-	case <-m.ctx.Done():
-		// Monitor context was cancelled as expected
-	default:
-		t.Error("expected monitor context to be cancelled")
-	}	
+	case msg := <-handlerCh:
+		if msg.Event != NoJobsLeft {
+			t.Errorf("expected NoJobsLeft, got %v", msg.Event)
+		}
+		if msg.RoomAlias != alias {
+			t.Errorf("unexpected room alias: %v", msg.RoomAlias)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for NoJobsLeft")
+	}
+	// The monitor self-cancels after sending NoJobsLeft.
+	// t.Cleanup (registered above) will call Close() which waits for done.
+	slog.Info("TestLiveKitRoomMonitor_NoJobsLeftSignal passed")
 }

@@ -20,7 +20,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-
 	"time"
 
 	"github.com/MatusOllah/slogcolor"
@@ -40,14 +39,17 @@ type LiveKitAuth struct {
 }
 
 type RoomMonitorEvent int
-const(
+
+const (
 	NoJobsLeft RoomMonitorEvent = iota
 )
+
 type HandlerMessage struct {
 	RoomAlias LiveKitRoomAlias
 	Event     RoomMonitorEvent
 	MonitorId UniqueID
 }
+
 type Config struct {
 	Key                   string
 	Secret                string
@@ -56,6 +58,7 @@ type Config struct {
 	FullAccessHomeservers []string
 	LkJwtBind             string
 }
+
 type MatrixRTCMemberType struct {
 	ID              string `json:"id"`
 	ClaimedUserID   string `json:"claimed_user_id"`
@@ -76,21 +79,21 @@ type LegacySFURequest struct {
 }
 
 type DelayedEventRequest struct {
-	DelayId         string 
+	DelayId         string
 	DelayTimeout    time.Duration
-	DelayCsApiUrl   string 
+	DelayCsApiUrl   string
 	LiveKitRoom     LiveKitRoomAlias
 	LiveKitIdentity LiveKitIdentity
 }
 
 type SFURequest struct {
-	RoomID         string              `json:"room_id"`
-	SlotID         string              `json:"slot_id"`
-	OpenIDToken    OpenIDTokenType     `json:"openid_token"`
-	Member         MatrixRTCMemberType `json:"member"`
-	DelayId        string              `json:"delay_id,omitempty"`
-	DelayTimeout   int                 `json:"delay_timeout,omitempty"`
-	DelayCsApiUrl  string              `json:"delay_cs_api_url,omitempty"`
+	RoomID        string              `json:"room_id"`
+	SlotID        string              `json:"slot_id"`
+	OpenIDToken   OpenIDTokenType     `json:"openid_token"`
+	Member        MatrixRTCMemberType `json:"member"`
+	DelayId       string              `json:"delay_id,omitempty"`
+	DelayTimeout  int                 `json:"delay_timeout,omitempty"`
+	DelayCsApiUrl string              `json:"delay_cs_api_url,omitempty"`
 }
 
 type SFUResponse struct {
@@ -138,9 +141,9 @@ func (r *SFURequest) Validate() error {
 		}
 	}
 
-	all_delayed_event_params_present := r.DelayId != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
-	at_least_one_delayed_event_param_present := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
-	if (at_least_one_delayed_event_param_present && !all_delayed_event_params_present) {
+	allDelayedEventParamsPresent := r.DelayId != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
+	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
+	if atLeastOneDelayedEventParamPresent && !allDelayedEventParamsPresent {
 		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
 			"DelayId", r.DelayId,
 			"DelayTimeout", r.DelayTimeout,
@@ -205,81 +208,155 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 	return at.ToJWT()
 }
 
-// Handler 
+// ── Handler ──────────────────────────────────────────────────────────────────
+
+// Handler is the top-level HTTP handler.
+//
+// # Concurrency model
+//
+// HTTP handlers run in separate goroutines (one per request).  They call
+// addDelayedEventJob() and read/write LiveKitRoomMonitors via a mutex-
+// protected map.  The heavy work (job lifecycle, SFU event routing) is
+// entirely delegated to LiveKitRoomMonitor.Loop() and DelayedEventJob.Loop().
+//
+// The Handler itself only needs a mutex to protect the monitors map.
+//
+// # Shutdown
+//
+// MonitorCommChan carries NoJobsLeft events from monitors back to the
+// Handler's event loop (started in NewHandler).  When the handler context is
+// cancelled (e.g. on server shutdown) the event loop exits cleanly.
 type Handler struct {
-	sync.Mutex
-	wg                       sync.WaitGroup
-	liveKitAuth              LiveKitAuth
-	fullAccessHomeservers    []string
-	skipVerifyTLS            bool
-	LiveKitRoomMonitors      map[LiveKitRoomAlias]*LiveKitRoomMonitor
-	MonitorCommChan          chan HandlerMessage
+	mu                    sync.Mutex // protects liveKitRoomMonitors only
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	liveKitAuth           LiveKitAuth
+	fullAccessHomeservers []string
+	skipVerifyTLS         bool
+	liveKitRoomMonitors   map[LiveKitRoomAlias]*LiveKitRoomMonitor
+	monitorCommChan       chan HandlerMessage
+	// loopDone is closed when the internal event loop has exited.
+	loopDone chan struct{}
 }
 
 func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string) *Handler {
-
-	handler := &Handler{
-		liveKitAuth:              lkAuth,
-		skipVerifyTLS:            skipVerifyTLS,
-		fullAccessHomeservers:    fullAccessHomeservers,
-		MonitorCommChan: make(chan HandlerMessage),
-		LiveKitRoomMonitors:   make(map[LiveKitRoomAlias]*LiveKitRoomMonitor),
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &Handler{
+		ctx:                   ctx,
+		cancel:                cancel,
+		liveKitAuth:           lkAuth,
+		skipVerifyTLS:         skipVerifyTLS,
+		fullAccessHomeservers: fullAccessHomeservers,
+		monitorCommChan:       make(chan HandlerMessage, 10),
+		liveKitRoomMonitors:   make(map[LiveKitRoomAlias]*LiveKitRoomMonitor),
+		loopDone:              make(chan struct{}),
 	}
+	go h.loop()
+	return h
+}
 
-	handler.wg.Add(1)
-	go func() {
-		defer handler.wg.Done()
-		for event := range handler.MonitorCommChan {
+// loop is the Handler's event-processing goroutine.
+// It is the only place that removes monitors from the map.
+func (h *Handler) loop() {
+	defer close(h.loopDone)
+	for {
+		select {
+		case <-h.ctx.Done():
+			slog.Debug("Handler: loop exiting")
+			return
+		case event := <-h.monitorCommChan:
 			switch event.Event {
 			case NoJobsLeft:
-				monitor, ok := handler.GetRoomMonitor(event.RoomAlias)
-				if ok {
-					err := monitor.Close()
-					if err != nil {
-						slog.Error("Handler: Error closing room monitor", "error", err, "room", event.RoomAlias, "MonitorId", monitor.MonitorId)
+				h.mu.Lock()
+				monitor, ok := h.liveKitRoomMonitors[event.RoomAlias]
+				if ok && monitor.MonitorId == event.MonitorId {
+					slog.Info("Handler: removing LiveKitRoomMonitor",
+						"room", event.RoomAlias, "MonitorId", monitor.MonitorId)
+					delete(h.liveKitRoomMonitors, event.RoomAlias)
+					h.mu.Unlock()
+					// Close outside of the lock so Close() can take its time.
+					if err := monitor.Close(); err != nil {
+						slog.Error("Handler: error closing monitor",
+							"room", event.RoomAlias, "MonitorId", monitor.MonitorId, "err", err)
 					}
-					if monitor.MonitorId == event.MonitorId {
-						slog.Info("Handler: Removing LiveKitRoomMonitor", "room", event.RoomAlias, "MonitorId", monitor.MonitorId)
-						handler.RemoveRoomMonitor(event.RoomAlias)
-					} else {
-						slog.Error("Handler: Not removing LiveKitRoomMonitor as IDs do not match!", "room", event.RoomAlias, "MonitorId", monitor.MonitorId, "RequestedMonitorId", event.MonitorId)
-					}
+				} else if ok {
+					slog.Error("Handler: MonitorId mismatch, not removing",
+						"room", event.RoomAlias,
+						"MonitorId", monitor.MonitorId,
+						"requestedMonitorId", event.MonitorId)
+					h.mu.Unlock()
+				} else {
+					h.mu.Unlock()
 				}
 			}
 		}
-	}()
+	}
+}
 
-	return handler
+// Close shuts down the handler and waits for the internal loop to exit.
+func (h *Handler) Close() {
+	h.cancel()
+	select {
+	case <-h.loopDone:
+	case <-time.After(10 * time.Second):
+		slog.Warn("Handler: Close() timed out")
+	}
 }
 
 func (h *Handler) addDelayedEventJob(jobRequest *DelayedEventRequest) {
-	slog.Debug("Handler: Adding delayed event job", "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "DelayId", jobRequest.DelayId)
+	slog.Debug("Handler: adding delayed event job",
+		"room", jobRequest.LiveKitRoom,
+		"lkId", jobRequest.LiveKitIdentity,
+		"DelayId", jobRequest.DelayId)
 
-	targetMonitor, releaseJobHandover := h.acquireRoomMonitorForJob(jobRequest.LiveKitRoom)
+	monitor := h.acquireOrCreateMonitor(jobRequest.LiveKitRoom)
 
-	ok, jobId := targetMonitor.HandoverJob(jobRequest)
+	jobId, ok := monitor.HandoverJob(jobRequest)
 	if !ok {
-		slog.Error("Handler: Failed to handover job to RoomMonitor", "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "jobId", jobId)
-	}
-	ok = releaseJobHandover()
-	if !ok {
-		slog.Error("Handler: Failed to release job handover to RoomMonitor", "room", jobRequest.LiveKitRoom, "lkId", jobRequest.LiveKitIdentity, "jobId", jobId)
+		slog.Error("Handler: failed to handover job",
+			"room", jobRequest.LiveKitRoom,
+			"lkId", jobRequest.LiveKitIdentity,
+			"jobId", jobId)
 	}
 }
 
+// acquireOrCreateMonitor returns the existing LiveKitRoomMonitor for the
+// given room, or creates and starts a new one.
+//
+// The returned monitor is guaranteed to be running (Loop() has been started).
+func (h *Handler) acquireOrCreateMonitor(lkRoom LiveKitRoomAlias) *LiveKitRoomMonitor {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if monitor, ok := h.liveKitRoomMonitors[lkRoom]; ok {
+		// Check whether the monitor is still alive by seeing if its context
+		// is still active.
+		select {
+		case <-monitor.ctx.Done():
+			// Monitor is shutting down — fall through to create a replacement.
+			slog.Info("Handler: replacing shutting-down monitor",
+				"room", lkRoom, "MonitorId", monitor.MonitorId)
+		default:
+			return monitor
+		}
+	}
+
+	monitor := NewLiveKitRoomMonitor(h.ctx, h.monitorCommChan, &h.liveKitAuth, lkRoom)
+	go monitor.Loop()
+	h.liveKitRoomMonitors[lkRoom] = monitor
+	slog.Debug("Handler: created new LiveKitRoomMonitor",
+		"room", lkRoom, "MonitorId", monitor.MonitorId)
+	return monitor
+}
+
 func (h *Handler) isFullAccessUser(matrixServerName string) bool {
-	// Grant full access if wildcard '*' is present as the only entry
 	if len(h.fullAccessHomeservers) == 1 && h.fullAccessHomeservers[0] == "*" {
 		return true
 	}
-
-	// Check if the matrixServerName is in the list of full-access homeservers
 	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
 }
 
 func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
-	// Note LegacySFURequest has already been validated at this point
-
 	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
 	if err != nil {
 		return nil, &MatrixErrorResponse{
@@ -291,17 +368,14 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-	slog.Debug(
-		"Handler: Got Matrix user info", "userInfo.Sub",
-		userInfo.Sub,
-		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
-	)
+	slog.Debug("Handler: got Matrix user info",
+		"userInfo.Sub", userInfo.Sub,
+		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser])
 
-	// TODO: is DeviceID required? If so then we should have validated at the start
 	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
-
 	slotId := "m.call#ROOM"
 	lkRoomAlias := CreateLiveKitRoomAlias(req.Room, slotId)
+
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
 		return nil, &MatrixErrorResponse{
@@ -321,22 +395,19 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 		}
 	}
 
-	slog.Info(
-		"Handler: Generated Legacy SFU access token", 
+	slog.Info("Handler: generated Legacy SFU access token",
 		"matrixId", userInfo.Sub,
 		"ClaimedDeviceID", req.DeviceID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
 		"MatrixRoom", req.Room,
 		"lkId", lkIdentity,
 		"room", lkRoomAlias,
-		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), 
-	)
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
 	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
 func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
-	// Note SFURequest has already been validated at this point
-
 	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
 	if err != nil {
 		return nil, &MatrixErrorResponse{
@@ -346,9 +417,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 	}
 
-	// Check if validated userInfo.Sub matches req.Member.ClaimedUserID
 	if req.Member.ClaimedUserID != userInfo.Sub {
-		slog.Warn("Handler: ClaimedUserID %s does not match token subject %s", "ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
+		slog.Warn("Handler: ClaimedUserID does not match token subject",
+			"ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
@@ -356,16 +427,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 	}
 
-	// Does the user belong to homeservers granted full access
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
-
 	delayedEventDelegationRequested := req.DelayId != ""
-	// if delayedEventDelegationRequested {
-	// 	// TODO: Check if homeserver supported delegation of delayed events
-	// 	// org.matrix.msc4140
-	// }
 
-	// Use a valid DelayId as indicator for delegation of delayed events (fail early)
 	if delayedEventDelegationRequested && !isFullAccessUser {
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
@@ -374,18 +438,16 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 	}
 
-	slog.Debug(
-		"Handler: Got Matrix user info", "userInfo.Sub",
-		userInfo.Sub,
-		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
-	)
+	slog.Debug("Handler: got Matrix user info",
+		"userInfo.Sub", userInfo.Sub,
+		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser])
 
 	lkIdentity := CreateLiveKitIdentity(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := CreateLiveKitRoomAlias(req.RoomID, req.SlotID)
 
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
-		slog.Error("Handler: Error getting LiveKit token", "userInfo.Sub", userInfo.Sub, "err", err)
+		slog.Error("Handler: error getting LiveKit token", "userInfo.Sub", userInfo.Sub, "err", err)
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
@@ -403,21 +465,20 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 
 		if delayedEventDelegationRequested {
-			// TODO verify support for delayed events
-			slog.Info("Handler: Scheduling delayed event job request", "room", lkRoomAlias, "lkId", lkIdentity, "DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
+			slog.Info("Handler: scheduling delayed event job",
+				"room", lkRoomAlias, "lkId", lkIdentity,
+				"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
 			h.addDelayedEventJob(&DelayedEventRequest{
-				DelayCsApiUrl:    req.DelayCsApiUrl,
-				DelayId:          req.DelayId,
-				DelayTimeout:     time.Duration(req.DelayTimeout) * time.Millisecond,
-				LiveKitRoom:      lkRoomAlias,
-				LiveKitIdentity:  lkIdentity,
-			},
-			)
+				DelayCsApiUrl:   req.DelayCsApiUrl,
+				DelayId:         req.DelayId,
+				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
+				LiveKitRoom:     lkRoomAlias,
+				LiveKitIdentity: lkIdentity,
+			})
 		}
 	}
 
-	slog.Info(
-		"Handler: Generated SFU access token", 
+	slog.Info("Handler: generated SFU access token",
 		"matrixId", userInfo.Sub,
 		"ClaimedDeviceID", req.Member.ClaimedDeviceID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
@@ -425,98 +486,31 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		"MatrixRTCSlot", req.SlotID,
 		"lkId", lkIdentity,
 		"room", lkRoomAlias,
-		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), 
-	)
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
 	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
-func (h *Handler) acquireRoomMonitorForJob(lkRoom LiveKitRoomAlias) (monitor *LiveKitRoomMonitor, releaseJobHandover func() bool) {
-	h.Lock()
-	defer h.Unlock()
-
-	acquireSuccessfully := false
-
-	monitor, monitorExists := h.LiveKitRoomMonitors[lkRoom]
-
-	if monitorExists {
-		releaseJobHandover, acquireSuccessfully = monitor.StartJobHandover()
-	}
-
-	if !monitorExists || !acquireSuccessfully {
-		replacingMonitor := NewLiveKitRoomMonitor(context.TODO(), h.MonitorCommChan, &h.liveKitAuth, lkRoom)
-		h.LiveKitRoomMonitors[lkRoom] = replacingMonitor
-		if monitorExists {
-			slog.Info("Handler: Replacing existing LiveKitRoomMonitor", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
-		} else {
-			slog.Debug("Handler: Created new LiveKitRoomMonitor", "room", lkRoom, "MonitorId", replacingMonitor.MonitorId)
-		}
-
-		// As the replacingMonitor is newly created and we have locked access to h.LiveKitRoomMonitors,
-		// we can be sure to acquire successfully
-		releaseJobHandover, _ = replacingMonitor.StartJobHandover()
-		if monitorExists {
-			if replacingMonitor.MonitorId <= monitor.MonitorId {
-				slog.Error("Handler: New LiveKitRoomMonitor MonitorId is not greater than existing MonitorId", "room", lkRoom, "existingMonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
-				panic(0)
-			}
-			h.wg.Add(1)
-			go func() {
-				defer h.wg.Done()
-				if monitor.tearingDown {
-					slog.Info("Handler: Closing replaced LiveKitRoomMonitor", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
-					err := monitor.Close()
-					if err != nil {
-						slog.Error("Handler: Error closing room monitor", "error", err, "room", lkRoom, "MonitorId", monitor.MonitorId)
-					}
-				} else {
-					slog.Error("Handler: Replaced LiveKitRoomMonitor is still active!", "room", lkRoom, "MonitorId", monitor.MonitorId, "newMonitorId", replacingMonitor.MonitorId)
-				}
-			}()
-		}
-		return replacingMonitor, releaseJobHandover
-	}
-
-	return monitor, releaseJobHandover
-}
-
-func (h* Handler) GetRoomMonitor(name LiveKitRoomAlias) (*LiveKitRoomMonitor, bool) {
-	h.Lock()
-	defer h.Unlock()
-
-	monitor, ok := h.LiveKitRoomMonitors[name]
-	return monitor, ok
-}
-
-func (h* Handler) RemoveRoomMonitor(name LiveKitRoomAlias) {
-	h.Lock()
-	defer h.Unlock()
-	delete(h.LiveKitRoomMonitors, name)
-}
-
 func (h *Handler) prepareMux() *http.ServeMux {
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sfu/get",   h.handle_legacy) // TODO: This is deprecated and will be removed in future versions
+	mux.HandleFunc("/sfu/get", h.handle_legacy) // TODO: deprecated
 	mux.HandleFunc("/get_token", h.handle)
 	mux.HandleFunc("/disconnect_delegation", h.handle)
 	mux.HandleFunc("/sfu_webhook", h.handleSfuWebhook)
-	mux.HandleFunc("/healthz",   h.healthcheck)
-
+	mux.HandleFunc("/healthz", h.healthcheck)
 	return mux
 }
 
 func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
-	slog.Info("Handler: Health check", "RemoteAddr", r.RemoteAddr)
-
+	slog.Info("Handler: health check", "RemoteAddr", r.RemoteAddr)
 	if r.Method == "GET" {
 		w.WriteHeader(http.StatusOK)
-		return
 	} else {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
-// TODO: This is deprecated and will be removed in future versions
+// TODO: deprecated
 func mapSFURequest(data *[]byte) (any, error) {
 	requestTypes := []ValidatableSFURequest{&LegacySFURequest{}, &SFURequest{}}
 	for _, req := range requestTypes {
@@ -529,51 +523,46 @@ func mapSFURequest(data *[]byte) (any, error) {
 			return req, nil
 		}
 	}
-
 	return nil, &MatrixErrorResponse{
 		Status:  http.StatusBadRequest,
 		ErrCode: "M_BAD_JSON",
-		Err:     "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
+		Err:     "The request body was malformed, missing required fields, or contained invalid values.",
 	}
 }
 
-// TODO: This is deprecated and will be removed in future versions
+// TODO: deprecated
 func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("Handler (legacy endpoint): New Request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+	slog.Debug("Handler (legacy): new request",
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
 	w.Header().Set("Content-Type", "application/json")
-
-	// Set the CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST")
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
 	switch r.Method {
 	case "OPTIONS":
-		// Handle preflight request (CORS)
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
-		// Read request body once for later JSON parsing
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			slog.Error("Handler (legacy endpoint): Error reading request body", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", err)
+			slog.Error("Handler (legacy): error reading body",
+				"RemoteAddr", r.RemoteAddr, "err", err)
 			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
 			return
 		}
-
-		var sfuAccessResponse *SFUResponse
 
 		sfuAccessRequest, err := mapSFURequest(&body)
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				slog.Error("Handler (legacy endpoint): Error processing request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "matrixErr", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-				return
 			}
+			return
 		}
 
+		var sfuAccessResponse *SFUResponse
 		switch sfuReq := sfuAccessRequest.(type) {
 		case *SFURequest:
 			sfuAccessResponse, err = h.processSFURequest(r, sfuReq)
@@ -584,14 +573,14 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				slog.Error("Handler (legacy endpoint): Error reading request body", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "matrixErr", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-				return
 			}
+			return
 		}
 
 		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-			slog.Error("Handler (legacy endpoint): failed to encode json response!", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", err)
+			slog.Error("Handler (legacy): failed to encode response",
+				"RemoteAddr", r.RemoteAddr, "err", err)
 		}
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -599,147 +588,134 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
-
 	w.Header().Set("Content-Type", "application/json")
-
-	// Set the CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST")
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
 	switch r.Method {
 	case "OPTIONS":
-		// Handle preflight request (CORS)
-		slog.Debug("Handler: preflight request (CORS)", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+		slog.Debug("Handler: preflight", "RemoteAddr", r.RemoteAddr)
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
-		slog.Debug("Handler: New Request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+		slog.Debug("Handler: new request", "RemoteAddr", r.RemoteAddr)
 		var sfuAccessRequest SFURequest
 
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&sfuAccessRequest); err == nil {
-			if err := sfuAccessRequest.Validate(); err != nil {
-				matrixErr := &MatrixErrorResponse{}
-				if errors.As(err, &matrixErr) {
-					slog.Error("Handler: Error processing request", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", matrixErr.Err)
-					writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-					return
-				}
-			}
-		} else {
-			slog.Error("Handler: Error reading request body", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", err)
+		if err := decoder.Decode(&sfuAccessRequest); err != nil {
+			slog.Error("Handler: error reading body",
+				"RemoteAddr", r.RemoteAddr, "err", err)
 			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
 			return
 		}
 
-		sfuAccessResponse, err := h.processSFURequest(r, &sfuAccessRequest)
+		if err := sfuAccessRequest.Validate(); err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+			}
+			return
+		}
 
+		sfuAccessResponse, err := h.processSFURequest(r, &sfuAccessRequest)
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				slog.Error("Handler: Error reading request body", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "matrixErr", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-				return
 			}
+			return
 		}
 
 		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-			slog.Error("Handler: failed to encode json response!", "RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"), "err", err)
+			slog.Error("Handler: failed to encode response",
+				"RemoteAddr", r.RemoteAddr, "err", err)
 		}
-
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
-func (h *Handler) handleSfuWebhook (w http.ResponseWriter, r *http.Request) {
-
+func (h *Handler) handleSfuWebhook(w http.ResponseWriter, r *http.Request) {
 	event, err := webhook.ReceiveWebhookEvent(r, h.liveKitAuth.authProvider)
 	if err != nil {
-		slog.Warn("Handler: SFU Webhook -> Error receiving webhook event", "err", err)
+		slog.Warn("Handler: SFU webhook error", "err", err)
+		return
+	}
+
+	h.mu.Lock()
+	monitor, ok := h.liveKitRoomMonitors[LiveKitRoomAlias(event.Room.Name)]
+	h.mu.Unlock()
+
+	if !ok {
 		return
 	}
 
 	switch event.Event {
-		case "participant_joined":
-			monitorSnapshot, ok := h.GetRoomMonitor(LiveKitRoomAlias(event.Room.Name))
-			if ok {
-				monitorSnapshot.SFUCommChan <- SFUMessage{
-					Type: ParticipantConnected,
-					LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
-				}
-			}
-			slog.Debug("Handler: SFU Webhook -> Participant joined", "lkId", event.Participant.Identity, "room", event.Room.Name)
-		case "participant_left", "participant_connection_aborted":
-			monitorSnapshot, ok := h.GetRoomMonitor(LiveKitRoomAlias(event.Room.Name))
-			if ok {
-				if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
-					monitorSnapshot.SFUCommChan <- SFUMessage{
-						Type: ParticipantDisconnectedIntentionally,
-						LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
-					}
-				} else  {
-					//  When the media connection cannot be established, participant_connection_aborted webhook is sent 
-					monitorSnapshot.SFUCommChan <- SFUMessage{
-						Type: ParticipantConnectionAborted,
-						LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
-					}
-				}
-			}
-			slog.Debug("Handler: SFU Webhook -> Participant left", "lkId", event.Participant.Identity, "room", event.Room.Name, "DisconnectReason", event.Participant.DisconnectReason)
+	case "participant_joined":
+		monitor.SFUCommChan <- SFUMessage{
+			Type:            ParticipantConnected,
+			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+		}
+		slog.Debug("Handler: SFU participant joined",
+			"lkId", event.Participant.Identity, "room", event.Room.Name)
+
+	case "participant_left", "participant_connection_aborted":
+		msgType := ParticipantConnectionAborted
+		if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
+			msgType = ParticipantDisconnectedIntentionally
+		}
+		monitor.SFUCommChan <- SFUMessage{
+			Type:            msgType,
+			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+		}
+		slog.Debug("Handler: SFU participant left",
+			"lkId", event.Participant.Identity, "room", event.Room.Name,
+			"DisconnectReason", event.Participant.DisconnectReason)
 	}
 }
 
+// ── config / main ─────────────────────────────────────────────────────────────
+
 func readKeySecret() (string, string) {
-	// We initialize keys & secrets from environment variables
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
-	// We initialize potential key & secret path from environment variables
 	keyPath := os.Getenv("LIVEKIT_KEY_FROM_FILE")
 	secretPath := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
 	keySecretPath := os.Getenv("LIVEKIT_KEY_FILE")
 
-	// If keySecretPath is set we read the file and split it into two parts
-	// It takes over any other initialization
 	if keySecretPath != "" {
-		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
+		keySecretBytes, err := os.ReadFile(keySecretPath)
+		if err != nil {
 			log.Fatal(err)
-		} else {
-			keySecrets := strings.Split(string(keySecretBytes), ":")
-			if len(keySecrets) != 2 {
-				log.Fatalf("invalid key secret file format!")
-			}
-			slog.Info("Using LiveKit API key and API secret from LIVEKIT_KEY_FILE", "keySecretPath", keySecretPath)
-			key = keySecrets[0]
-			secret = keySecrets[1]
 		}
+		parts := strings.Split(string(keySecretBytes), ":")
+		if len(parts) != 2 {
+			log.Fatalf("invalid key secret file format!")
+		}
+		slog.Info("Using LiveKit API key and secret from LIVEKIT_KEY_FILE", "keySecretPath", keySecretPath)
+		key = parts[0]
+		secret = parts[1]
 	} else {
-		// If keySecretPath is not set, we try to read the key and secret from files
-		// If those files are not set, we return the key & secret from the environment variables
 		if keyPath != "" {
-			if keyBytes, err := os.ReadFile(keyPath); err != nil {
+			keyBytes, err := os.ReadFile(keyPath)
+			if err != nil {
 				log.Fatal(err)
-			} else {
-				slog.Info("Using LiveKit API key from LIVEKIT_KEY_FROM_FILE", "keyPath", keyPath)
-				key = string(keyBytes)
 			}
+			slog.Info("Using LiveKit API key from LIVEKIT_KEY_FROM_FILE", "keyPath", keyPath)
+			key = string(keyBytes)
 		}
-
 		if secretPath != "" {
-			if secretBytes, err := os.ReadFile(secretPath); err != nil {
+			secretBytes, err := os.ReadFile(secretPath)
+			if err != nil {
 				log.Fatal(err)
-			} else {
-				slog.Info("Using LiveKit API secret from LIVEKIT_SECRET_FROM_FILE", "secretPath", secretPath)
-				secret = string(secretBytes)
 			}
+			slog.Info("Using LiveKit API secret from LIVEKIT_SECRET_FROM_FILE", "secretPath", secretPath)
+			secret = string(secretBytes)
 		}
-
 	}
 
-	// remove white spaces, new lines and carriage returns
-	// from key and secret
 	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
@@ -762,26 +738,24 @@ func parseConfig() (*Config, error) {
 	}
 
 	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
-
 	if len(fullAccessHomeservers) == 0 {
 		localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
 		if len(localHomeservers) > 0 {
-			slog.Warn("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, please use LIVEKIT_FULL_ACCESS_HOMESERVERS instead !!!")
+			slog.Warn("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, use LIVEKIT_FULL_ACCESS_HOMESERVERS !!!")
 			fullAccessHomeservers = localHomeservers
 		} else {
-			slog.Warn("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*) for full access")
+			slog.Warn("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*)")
 			fullAccessHomeservers = "*"
 		}
 	}
 
 	lkJwtBind := os.Getenv("LIVEKIT_JWT_BIND")
 	lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
-
 	if lkJwtBind == "" {
 		if lkJwtPort == "" {
 			lkJwtPort = "8080"
 		} else {
-			slog.Warn("!!! LIVEKIT_JWT_PORT is deprecated, please use LIVEKIT_JWT_BIND instead !!!")
+			slog.Warn("!!! LIVEKIT_JWT_PORT is deprecated, use LIVEKIT_JWT_BIND !!!")
 		}
 		lkJwtBind = fmt.Sprintf(":%s", lkJwtPort)
 	} else if lkJwtPort != "" {
@@ -799,7 +773,6 @@ func parseConfig() (*Config, error) {
 }
 
 func main() {
-	// Set global logger with custom options
 	opts := slogcolor.DefaultOptions
 	opts.Level = slog.LevelDebug
 	opts.NoColor = !isatty.IsTerminal(os.Stderr.Fd())
@@ -812,10 +785,8 @@ func main() {
 
 	handler := NewHandler(
 		LiveKitAuth{
-			key:    config.Key,
-			secret: config.Secret,
-			// for LiveKit webhooks we need authProvider, for createLiveKitRoom we need
-			// key and secret which is not exposed by authProvider, hence redundancy
+			key:          config.Key,
+			secret:       config.Secret,
 			authProvider: auth.NewSimpleKeyProvider(config.Key, config.Secret),
 			lkUrl:        config.LkUrl,
 		},
@@ -823,11 +794,7 @@ func main() {
 		config.FullAccessHomeservers,
 	)
 
-	// TODO
-	// check if we can create a proper connection to SFU in order to fail fast
-
-	slog.Info(
-		"Starting service",
+	slog.Info("Starting service",
 		"LIVEKIT_URL", config.LkUrl,
 		"LIVEKIT_JWT_BIND", config.LkJwtBind,
 		"LIVEKIT_FULL_ACCESS_HOMESERVERS", config.FullAccessHomeservers,
