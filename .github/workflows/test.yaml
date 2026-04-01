@@ -49,7 +49,7 @@ jobs:
         run: echo "GO_VERSION=$(go mod edit -json | jq -r .Toolchain | sed "s,^go,,")" >> $GITHUB_ENV
 
       - name: Install ESS test dependencies
-        uses: element-hq/setup-ess-cluster-action@release/v2
+        uses: element-hq/setup-ess-cluster-action@aac02ff668d9384dacb2f5c34e25392a8e38a5e2 # release/v2
         with:
           ess-helm-ref: ${{ steps.check-branch.outputs.ref }}
 
