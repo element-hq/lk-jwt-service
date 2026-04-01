@@ -81,20 +81,14 @@ func CreateLiveKitRoomAlias(matrixRoom string, matrixRtcSlot string) LiveKitRoom
 }
 
 func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) LiveKitIdentity {
-	// // FIX: use JSON serialisation instead of "|" delimiter (#r2758771596).
-	// // The "|" delimiter is unsafe because all three fields are attacker-controlled
-	// // and permit arbitrary bytes, allowing collisions (e.g. "a|b" + "c" == "a" + "b|c").
-	// // JSON array serialisation is unambiguous and collision-free.
-	// lkIdentityRawBytes, err := json.Marshal([]string{matrixID, deviceId, memberID})
-	// if err != nil {
-	// 	// json.Marshal on []string never fails in practice.
-	// 	panic(fmt.Sprintf("CreateLiveKitIdentity: unexpected marshal error: %v", err))
-	// }
-	// lkIdentityHash := sha256.Sum256(lkIdentityRawBytes)
-	// return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
+	// Create a deterministic LiveKit identity based on user ID and device ID
+	// to ensure uniqueness and avoid collisions.
+	// TODO(#r2758771596): "|" is not a safe delimiter since all fields are
+	// attacker-controlled. Replace with JSON array serialisation once client
+	// libraries have been updated to match.
 	lkIdentityRaw := matrixID + "|" + deviceId + "|" + memberID
 	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
-	return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))	
+	return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
 }
 
 var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
@@ -135,7 +129,7 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 // LiveKitParticipantLookup checks whether a participant is currently present in
 // a LiveKit room.
 //
-// FIX: returns (SFUMessage, bool, error) instead of writing directly to a
+// FIX: returns (SFUMessage, error) instead of writing directly to a
 // channel (#r2758789719). Writing to a channel inside this function forces the
 // caller to guarantee the channel is open, sufficiently buffered, and not
 // concurrently closed — coupling that is hard to reason about. Returning the
