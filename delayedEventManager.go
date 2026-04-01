@@ -719,11 +719,6 @@ func (m *LiveKitRoomMonitor) Loop() {
 
 	// All mutable state lives here — no mutex needed.
 	jobs := make(map[LiveKitIdentity]*DelayedEventJob)
-	// upcomingJobs counts handover requests that are in flight (i.e. the
-	// caller has called HandoverJob but the job goroutine has not yet been
-	// registered in jobs).  We track this so we don't tear down while a
-	// handover is still in progress.
-	upcomingJobs := 0
 	jobCommCh := make(chan MonitorMessage, 20)
 
 	// lookupWg tracks all participant-lookup goroutines.  We must wait for
@@ -759,7 +754,7 @@ func (m *LiveKitRoomMonitor) Loop() {
 	// maybeInitiateTeardown sends NoJobsLeft to the handler and stops the loop
 	// when there is nothing left to do.
 	maybeInitiateTeardown := func() {
-		if len(jobs) == 0 && upcomingJobs == 0 {
+		if len(jobs) == 0 {
 			slog.Debug("RoomMonitor: no jobs left, notifying handler",
 				"room", m.RoomAlias, "MonitorId", m.MonitorId)
 			// Send synchronously — we're already in the loop goroutine and the
@@ -849,9 +844,6 @@ func (m *LiveKitRoomMonitor) Loop() {
 
 		// ── New job handover ──────────────────────────────────────────────
 		case req := <-m.handoverCh:
-			// Count this request as in-flight so maybeInitiateTeardown() does
-			// not fire before we have registered the job in the jobs map.
-			upcomingJobs++
 			job, err := NewDelayedEventJob(m.ctx, req.jobRequest, jobCommCh)
 			if err != nil {
 				slog.Error("RoomMonitor: failed to create job",
@@ -859,7 +851,6 @@ func (m *LiveKitRoomMonitor) Loop() {
 					"lkId", req.jobRequest.LiveKitIdentity,
 					"err", err)
 				req.result <- handoverResult{}
-				upcomingJobs--
 				maybeInitiateTeardown()
 				continue
 			}
@@ -924,7 +915,6 @@ func (m *LiveKitRoomMonitor) Loop() {
 				}
 			}(job)
 
-			upcomingJobs--
 			req.result <- handoverResult{jobId: job.JobId, ok: true}
 			slog.Info("RoomMonitor: job added",
 				"room", m.RoomAlias, "lkId", job.LiveKitIdentity,
