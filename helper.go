@@ -1,3 +1,9 @@
+// Copyright 2025 Element Creations Ltd.
+// Copyright 2025 New Vector Ltd.
+//
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
+// Please see LICENSE files in the repository root for full details.
+
 package main
 
 import (
@@ -38,8 +44,8 @@ func NewUniqueID() UniqueID {
 		panic(err)
 	}
 
-	// Because Base32Hex uses an alphabet that is naturally ordered in the 
-	// ASCII/Unicode table (0-9 then A-V), the string comparison results will match 
+	// Because Base32Hex uses an alphabet that is naturally ordered in the
+	// ASCII/Unicode table (0-9 then A-V), the string comparison results will match
 	// the chronological order of your original timestamp.
 	return UniqueID(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }
@@ -59,7 +65,8 @@ var exchangeOpenIdUserInfo = func(
 	)
 	if err != nil {
 		slog.Error("OpenIDUserInfo: Failed to look up user info", "err", err)
-		return nil, errors.New("failed to look up user info")
+		// FIX: wrap the error to preserve context (#r2758756339)
+		return nil, fmt.Errorf("failed to look up user info: %w", err)
 	}
 	return &userinfo, nil
 }
@@ -74,23 +81,37 @@ func CreateLiveKitRoomAlias(matrixRoom string, matrixRtcSlot string) LiveKitRoom
 }
 
 func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) LiveKitIdentity {
-	// Create a deterministic LiveKit identity based on user ID and device ID
-	// to ensure uniqueness and avoid collisions.
+	// // FIX: use JSON serialisation instead of "|" delimiter (#r2758771596).
+	// // The "|" delimiter is unsafe because all three fields are attacker-controlled
+	// // and permit arbitrary bytes, allowing collisions (e.g. "a|b" + "c" == "a" + "b|c").
+	// // JSON array serialisation is unambiguous and collision-free.
+	// lkIdentityRawBytes, err := json.Marshal([]string{matrixID, deviceId, memberID})
+	// if err != nil {
+	// 	// json.Marshal on []string never fails in practice.
+	// 	panic(fmt.Sprintf("CreateLiveKitIdentity: unexpected marshal error: %v", err))
+	// }
+	// lkIdentityHash := sha256.Sum256(lkIdentityRawBytes)
+	// return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
 	lkIdentityRaw := matrixID + "|" + deviceId + "|" + memberID
 	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
-	return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
+	return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))	
 }
 
 var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
 	roomClient := lksdk.NewRoomServiceClient(liveKitAuth.lkUrl, liveKitAuth.key, liveKitAuth.secret)
 	creationStart := time.Now().Unix()
+
+	// FIX: use named constants with explicit units (#r2758774565).
+	const emptyTimeoutSecs     = 5 * 60 // 5 minutes: keep room open if no one joins
+	const departureTimeoutSecs = 20     // 20 seconds: keep room after everyone leaves
+
 	lkRoom, err := roomClient.CreateRoom(
 		ctx,
 		&livekit.CreateRoomRequest{
 			Name:             string(room),
-			EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
-			DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
-			MaxParticipants:  0,      // 0 == no limitation
+			EmptyTimeout:     emptyTimeoutSecs,
+			DepartureTimeout: departureTimeoutSecs,
+			MaxParticipants:  0, // 0 == no limitation
 		},
 	)
 
@@ -98,7 +119,6 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 		return fmt.Errorf("unable to create room %s: %w", room, err)
 	}
 
-	// Log the room creation time and the user info
 	isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
 	slog.Info(
 		fmt.Sprintf("CreateLiveKitRoom: %s Room", map[bool]string{true: "Created", false: "Using"}[isNewRoom]),
@@ -112,10 +132,26 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 	return nil
 }
 
-var LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkRoomAlias LiveKitRoomAlias, lkId LiveKitIdentity, ch chan SFUMessage) (bool, error) {
+// LiveKitParticipantLookup checks whether a participant is currently present in
+// a LiveKit room.
+//
+// FIX: returns (SFUMessage, bool, error) instead of writing directly to a
+// channel (#r2758789719). Writing to a channel inside this function forces the
+// caller to guarantee the channel is open, sufficiently buffered, and not
+// concurrently closed — coupling that is hard to reason about. Returning the
+// value keeps channel ownership with the caller.
+//
+// The outer backoff loop in LiveKitRoomMonitor.Loop() sends the returned
+// SFUMessage on SFUCommChan after a successful lookup.
+var LiveKitParticipantLookup = func(
+	ctx context.Context,
+	lkAuth LiveKitAuth,
+	lkRoomAlias LiveKitRoomAlias,
+	lkId LiveKitIdentity,
+) (SFUMessage, error) {
 	roomClient := lksdk.NewRoomServiceClient(
 		lkAuth.lkUrl,
-		lkAuth.key, 
+		lkAuth.key,
 		lkAuth.secret,
 	)
 
@@ -123,23 +159,20 @@ var LiveKitParticipantLookup = func(ctx context.Context, lkAuth LiveKitAuth, lkR
 		Room:     string(lkRoomAlias),
 		Identity: string(lkId),
 	})
-
-	if err == nil {
-		ch <- SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: lkId}
+	if err != nil {
+		return SFUMessage{}, err
 	}
-
-	return (err==nil), err
+	return SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: lkId}, nil
 }
 
 var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action DelayEventAction) (*http.Response, error) {
-
 	url := fmt.Sprintf("%s%s/%s/%s", baseUrl, DelayedEventsEndpoint, delayID, action)
 	var jsonStr = []byte(`{}`)
 
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonStr))	
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonStr))
 
-	if err != nil{
+	if err != nil {
 		slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", url, "err", err)
 		return resp, err
 	}
@@ -151,41 +184,27 @@ var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action Dela
 
 	slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", url, "StatusCode", resp.StatusCode, "err", err)
 
-	// As noted here
 	// https://github.com/matrix-org/matrix-spec-proposals/blob/toger5/expiring-events-keep-alive/proposals/4140-delayed-events-futures.md#managing-delayed-events
-	// http.StatusNotFound (404) indicates that the delayed event is already sent or does not exist.
+	// 404 means the delayed event is already sent or does not exist.
 	if action == ActionSend && resp.StatusCode == http.StatusNotFound {
 		return resp, nil
 	}
 
-	// TODO: Should we ignore non-retriable errors here?
-	//   - Reason: The purpose of the exponential backoff is to retry in case the server is temporarily unavailable.
-	//
-	// Return a Permanent error to stop retrying.
-	// For this HTTP example, client errors are non-retriable.
-	/*if resp.StatusCode == 400 {
-		return "", backoff.Permanent(errors.New("bad request"))
-	}*/
-
-	// If we are being rate limited, return a RetryAfter to specify how long to wait.
-	// This will also reset the backoff policy.
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := resp.Header.Get("Retry-After")
 
-		// 1st attempt: Parse as an integer (seconds)
 		if seconds, err := strconv.Atoi(retryAfter); err == nil {
 			return nil, backoff.RetryAfter(seconds)
 		}
 
-		// 2nd attempt: Parse as HTTP date (e.g. Wed, 21 Oct 2015 07:28:00 GMT)
 		if date, err := http.ParseTime(retryAfter); err == nil {
 			duration := time.Until(date)
 			if duration > 0 {
 				return nil, backoff.RetryAfter(int(duration.Seconds()))
 			}
-			return nil, backoff.RetryAfter(0) // Date is in the past
-		}		
+			return nil, backoff.RetryAfter(0)
+		}
 	}
-	
+
 	return resp, err
 }

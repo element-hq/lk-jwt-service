@@ -884,36 +884,46 @@ func (m *LiveKitRoomMonitor) Loop() {
 			jobs[job.LiveKitIdentity] = job
 			go job.Loop()
 
-			// Start participant lookup with exponential backoff in a separate
-			// goroutine.  It sends its result as a SFUMessage so it goes
-			// through the normal event path.
-			// lookupWg tracks this goroutine so teardown() can wait for it to
-			// exit before Loop() returns — preventing races on the global
-			// LiveKitParticipantLookup variable in tests.
-			waitingDuration := min(time.Hour, job.DelayTimeout)
-			lookupWg.Add(1)
-			go func(j *DelayedEventJob) {
-				defer lookupWg.Done()
-				expBackOff := backoff.NewExponentialBackOff()
-				expBackOff.InitialInterval = 1000 * time.Millisecond
-				expBackOff.Multiplier = 1.5
-				expBackOff.RandomizationFactor = 0.5
-				expBackOff.MaxInterval = 60 * time.Second
+				// Start participant lookup with exponential backoff in a separate
+				// goroutine.  On success the SFUMessage is forwarded on SFUCommChan,
+				// keeping channel ownership in Loop() (#r2758789719).
+				// lookupWg tracks this goroutine so teardown() can wait for it to
+				// exit before Loop() returns — preventing races on the global
+				// LiveKitParticipantLookup variable in tests.
+				waitingDuration := min(time.Hour, job.DelayTimeout)
+				lookupWg.Add(1)
+				go func(j *DelayedEventJob) {
+					defer lookupWg.Done()
+					expBackOff := backoff.NewExponentialBackOff()
+					expBackOff.InitialInterval = 1000 * time.Millisecond
+					expBackOff.Multiplier = 1.5
+					expBackOff.RandomizationFactor = 0.5
+					expBackOff.MaxInterval = 60 * time.Second
 
-				_, err := backoff.Retry(
-					j.ctx,
-					func() (bool, error) {
-						return LiveKitParticipantLookup(j.ctx, *m.lkAuth, j.LiveKitRoom, j.LiveKitIdentity, m.SFUCommChan)
-					},
-					backoff.WithBackOff(expBackOff),
-					backoff.WithMaxElapsedTime(waitingDuration),
-				)
-				if err != nil {
-					slog.Warn("RoomMonitor: participant lookup failed",
-						"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
-						"jobId", j.JobId, "err", err)
-				}
-			}(job)
+					msg, err := backoff.Retry(
+						j.ctx,
+						func() (SFUMessage, error) {
+							msg, err := LiveKitParticipantLookup(j.ctx, *m.lkAuth, j.LiveKitRoom, j.LiveKitIdentity)
+							if err != nil {
+								return SFUMessage{}, err
+							}
+							return msg, nil
+						},
+						backoff.WithBackOff(expBackOff),
+						backoff.WithMaxElapsedTime(waitingDuration),
+					)
+					if err != nil {
+						slog.Warn("RoomMonitor: participant lookup failed",
+							"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
+							"jobId", j.JobId, "err", err)
+						return
+					}
+					// Forward result via SFUCommChan — channel owned by Loop().
+					select {
+					case m.SFUCommChan <- msg:
+					case <-j.ctx.Done():
+					}
+				}(job)
 
 			req.result <- handoverResult{jobId: job.JobId, ok: true}
 			slog.Info("RoomMonitor: job added",

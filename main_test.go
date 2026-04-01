@@ -675,11 +675,11 @@ func newTestMonitor(t *testing.T, alias LiveKitRoomAlias) (*LiveKitRoomMonitor, 
 	// Register the restore FIRST so it runs LAST (LIFO order).
 	t.Cleanup(func() { LiveKitParticipantLookup = original })
 
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity, _ chan SFUMessage) (bool, error) {
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
 		// Block until the job context is cancelled so the goroutine exits
 		// before the test restores the global — eliminating the race.
 		<-ctx.Done()
-		return false, ctx.Err()
+		return SFUMessage{}, ctx.Err()
 	}
 
 	handlerCh := make(chan HandlerMessage, 10)
@@ -828,9 +828,9 @@ func TestLiveKitRoomMonitor_RaceConditionStress(t *testing.T) {
 	// Restore LAST (registered first — LIFO).
 	t.Cleanup(func() { LiveKitParticipantLookup = original })
 
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity, _ chan SFUMessage) (bool, error) {
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
 		<-ctx.Done()
-		return false, ctx.Err()
+		return SFUMessage{}, ctx.Err()
 	}
 
 	alias := LiveKitRoomAlias("stress-room")
@@ -912,9 +912,9 @@ func TestLiveKitRoomMonitor_NoJobsLeftSignal(t *testing.T) {
 
 	originalLookup := LiveKitParticipantLookup
 	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup }) // runs 3rd (last)
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity, _ chan SFUMessage) (bool, error) {
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
 		<-ctx.Done()
-		return false, ctx.Err()
+		return SFUMessage{}, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
