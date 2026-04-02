@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -160,14 +161,20 @@ var LiveKitParticipantLookup = func(
 }
 
 var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action DelayEventAction) (*http.Response, error) {
-	url := fmt.Sprintf("%s%s/%s/%s", baseUrl, DelayedEventsEndpoint, delayID, action)
+	// Use url.JoinPath so delayID is path-escaped, preventing path traversal
+	// attacks (e.g. delayID = "../admin") since it is attacker-controlled.
+	// action is a typed constant (ActionRestart/ActionSend) and safe by construction.
+	endpoint, err := url.JoinPath(baseUrl, DelayedEventsEndpoint, delayID, string(action))
+	if err != nil {
+		return nil, fmt.Errorf("ExecuteDelayedEventAction: invalid URL: %w", err)
+	}
 	var jsonStr = []byte(`{}`)
 
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonStr))
+	resp, err := client.Post(endpoint, "application/json", bytes.NewBuffer(jsonStr))
 
 	if err != nil {
-		slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", url, "err", err)
+		slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", endpoint, "err", err)
 		return resp, err
 	}
 	defer func() {
@@ -176,7 +183,7 @@ var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action Dela
 		}
 	}()
 
-	slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", url, "StatusCode", resp.StatusCode, "err", err)
+	slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", endpoint, "StatusCode", resp.StatusCode, "err", err)
 
 	// https://github.com/matrix-org/matrix-spec-proposals/blob/toger5/expiring-events-keep-alive/proposals/4140-delayed-events-futures.md#managing-delayed-events
 	// 404 means the delayed event is already sent or does not exist.
