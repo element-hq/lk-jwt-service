@@ -179,7 +179,7 @@ func TestParseConfig(t *testing.T) {
 			env: map[string]string{
 				"LIVEKIT_KEY": "test_key",
 			},
-			wantErrMsg: "LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set",
+			wantErrMsg: "LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL must be set",
 		},
 		{
 			name: "Conflicting bind configuration",
@@ -190,7 +190,7 @@ func TestParseConfig(t *testing.T) {
 				"LIVEKIT_JWT_BIND": ":9090",
 				"LIVEKIT_JWT_PORT": "8080",
 			},
-			wantErrMsg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables MUST NOT be set together",
+			wantErrMsg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together",
 		},
 	}
 
