@@ -28,7 +28,6 @@ const (
 	ActionSend    DelayEventAction = "send"
 )
 
-// go:generate stringer -type=DelayEventState
 type DelayEventState int
 
 const (
@@ -56,7 +55,6 @@ func (s DelayEventState) String() string {
 	}
 }
 
-// go:generate stringer -type=DelayedEventSignal
 type DelayedEventSignal int
 
 const (
