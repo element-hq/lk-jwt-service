@@ -689,6 +689,38 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sfuEventFromWebhook translates a validated LiveKit webhook event into an
+// (roomAlias, SFUMessage) pair.  Returns ok=false for event types that do
+// not require routing (e.g. room events, unknown types).
+func sfuEventFromWebhook(event *livekit.WebhookEvent) (LiveKitRoomAlias, SFUMessage, bool) {
+	roomAlias := LiveKitRoomAlias(event.Room.Name)
+	switch event.Event {
+	case "participant_joined":
+		slog.Debug("Handler: SFU participant joined",
+			"lkId", event.Participant.Identity, "room", event.Room.Name)
+		return roomAlias, SFUMessage{
+			Type:            ParticipantConnected,
+			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+		}, true
+
+	case "participant_left", "participant_connection_aborted":
+		msgType := ParticipantConnectionAborted
+		if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
+			msgType = ParticipantDisconnectedIntentionally
+		}
+		slog.Debug("Handler: SFU participant left",
+			"lkId", event.Participant.Identity, "room", event.Room.Name,
+			"DisconnectReason", event.Participant.DisconnectReason)
+		return roomAlias, SFUMessage{
+			Type:            msgType,
+			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+		}, true
+
+	default:
+		return "", SFUMessage{}, false
+	}
+}
+
 func (h *Handler) handleSfuWebhook(w http.ResponseWriter, r *http.Request) {
 	event, err := webhook.ReceiveWebhookEvent(r, h.liveKitAuth.authProvider)
 	if err != nil {
@@ -696,32 +728,8 @@ func (h *Handler) handleSfuWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roomAlias := LiveKitRoomAlias(event.Room.Name)
-	var msg SFUMessage
-
-	switch event.Event {
-	case "participant_joined":
-		msg = SFUMessage{
-			Type:            ParticipantConnected,
-			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
-		}
-		slog.Debug("Handler: SFU participant joined",
-			"lkId", event.Participant.Identity, "room", event.Room.Name)
-
-	case "participant_left", "participant_connection_aborted":
-		msgType := ParticipantConnectionAborted
-		if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
-			msgType = ParticipantDisconnectedIntentionally
-		}
-		msg = SFUMessage{
-			Type:            msgType,
-			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
-		}
-		slog.Debug("Handler: SFU participant left",
-			"lkId", event.Participant.Identity, "room", event.Room.Name,
-			"DisconnectReason", event.Participant.DisconnectReason)
-
-	default:
+	roomAlias, msg, ok := sfuEventFromWebhook(event)
+	if !ok {
 		return
 	}
 
