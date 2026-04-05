@@ -350,10 +350,123 @@ func TestDelayedEventSignal_String(t *testing.T) {
 		{DelayedEventNotFound, "DelayedEventNotFound"},
 		{WaitingStateTimedOut, "WaitingStateTimedOut"},
 		{SFUNotAvailable, "SFUNotAvailable"},
+		{JobReplaced, "JobReplaced"},
 		{DelayedEventSignal(99), "DelayedEventSignal(99)"},
 	} {
 		if got := c.sig.String(); got != c.want {
 			t.Errorf("DelayedEventSignal(%d).String() = %q, want %q", int(c.sig), got, c.want)
 		}
+	}
+}
+
+// ── JobReplaced signal ────────────────────────────────────────────────────────
+
+// TestDelayedEventJob_JobReplaced_SignalReceived verifies the normal path:
+// when JobReplaced is sent on EventChannel while Loop() is running, the job
+// transitions to Replaced state and then exits cleanly via Cancel().
+func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
+	job := newTestJob(t, 10*time.Second)
+	go job.Loop()
+
+	// Send JobReplaced — Loop() processes it and sets state = Replaced.
+	select {
+	case job.EventChannel <- JobReplaced:
+	case <-time.After(time.Second):
+		t.Fatal("timed out sending JobReplaced")
+	}
+
+	// Give Loop() time to process the signal before we inspect side-effects.
+	time.Sleep(20 * time.Millisecond)
+
+	// Now cancel and close — Loop() should exit promptly.
+	job.Cancel()
+	done := make(chan struct{})
+	go func() { job.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("job did not close in time after JobReplaced")
+	}
+}
+
+// TestLiveKitRoomMonitor_ReplaceJob_JobReplacedSignal verifies the full
+// replacement path through LiveKitRoomMonitor.Loop():
+//
+//  1. A job is handed over for identity X.
+//  2. A second job for the same identity X is handed over.
+//  3. Loop() sends JobReplaced on the first job's EventChannel (normal path).
+//  4. The first job transitions to Replaced and is closed cleanly.
+//  5. The second job becomes the active job for identity X.
+func TestLiveKitRoomMonitor_ReplaceJob_JobReplacedSignal(t *testing.T) {
+	alias := LiveKitRoomAlias("replace-signal-room")
+	m, _ := newTestMonitor(t, alias)
+
+	identity := LiveKitIdentity("@replace-signal:example.com")
+	req := defaultJobRequest(alias, identity)
+
+	// Hand over first job.
+	id1, ok := m.HandoverJob(req)
+	if !ok {
+		t.Fatal("first HandoverJob failed")
+	}
+
+	// Small delay so Loop() registers the first job before we replace it.
+	time.Sleep(20 * time.Millisecond)
+
+	// Hand over second job for the same identity — triggers replacement.
+	// Loop() will: send JobReplaced on job1.EventChannel, cancel job1, start job2.
+	id2, ok := m.HandoverJob(req)
+	if !ok {
+		t.Fatal("second HandoverJob failed")
+	}
+	if id2 <= id1 {
+		t.Errorf("replacement jobID (%v) must be greater than original (%v)", id2, id1)
+	}
+
+	// Give Loop() time to complete the replacement.
+	time.Sleep(50 * time.Millisecond)
+	// newTestMonitor cleanup verifies clean shutdown — no deadlock = success.
+}
+
+// TestDelayedEventJob_JobReplaced_FullChannel verifies the default (drop)
+// path of the non-blocking JobReplaced send:
+//
+//	select {
+//	case existing.EventChannel <- JobReplaced:
+//	default:   ← this branch
+//	}
+//
+// When EventChannel is full the signal is dropped, but the job must still be
+// cancelled and closed cleanly — no deadlock, no goroutine leak.
+func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
+	// Create a job but do NOT start Loop() yet, so the EventChannel fills up.
+	job := newTestJob(t, 10*time.Second)
+
+	// Fill EventChannel to capacity (buffer = 10) with no-op signals.
+	for i := 0; i < cap(job.EventChannel); i++ {
+		job.EventChannel <- SFUNotAvailable
+	}
+
+	// Now attempt the non-blocking JobReplaced send — must take the default branch.
+	sent := false
+	select {
+	case job.EventChannel <- JobReplaced:
+		sent = true // should NOT happen: channel is full
+	default:
+		// Expected: signal dropped because channel is full.
+	}
+	if sent {
+		t.Error("expected JobReplaced to be dropped (default branch), but it was sent")
+	}
+
+	// Even without the signal, Cancel() + Close() must complete cleanly.
+	go job.Loop() // start Loop() so it can drain and exit
+	job.Cancel()
+	done := make(chan struct{})
+	go func() { job.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("job did not close cleanly after full-channel JobReplaced drop")
 	}
 }

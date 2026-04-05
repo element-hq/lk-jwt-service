@@ -67,6 +67,7 @@ const (
 	DelayedEventNotFound
 	WaitingStateTimedOut
 	SFUNotAvailable
+	JobReplaced
 )
 
 func (s DelayedEventSignal) String() string {
@@ -89,6 +90,8 @@ func (s DelayedEventSignal) String() string {
 		return "WaitingStateTimedOut"
 	case SFUNotAvailable:
 		return "SFUNotAvailable"
+	case JobReplaced:
+		return "JobReplaced"
 	default:
 		return fmt.Sprintf("DelayedEventSignal(%d)", int(s))
 	}
@@ -309,6 +312,11 @@ func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) (stateChanged 
 		return job.handleEventWaitingStateTimedOut()
 	case SFUNotAvailable:
 		// noop
+	case JobReplaced:
+		job.state = Replaced
+		slog.Info("Job: → Replaced (JobReplaced)",
+			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
+		return false // no state-entry action for Replaced
 	default:
 		slog.Error("Job: FSM unknown event",
 			"event", event, "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
@@ -865,7 +873,13 @@ func (m *LiveKitRoomMonitor) Loop() {
 				slog.Warn("RoomMonitor: replacing existing job",
 					"room", m.RoomAlias, "lkId", existing.LiveKitIdentity,
 					"existingJobId", existing.JobId, "newJobId", job.JobId)
-				existing.setState(Replaced)
+				// Signal the job to mark itself Replaced via its own Loop(),
+				// then cancel so it exits promptly.  Non-blocking: if EventChannel
+				// is full the job will still be cancelled and close cleanly.
+				select {
+				case existing.EventChannel <- JobReplaced:
+				default:
+				}
 				// Cancel immediately so any goroutines sending on jobCommCh exit,
 				// then close in background tracked by lookupWg so teardown() waits.
 				existing.Cancel()
@@ -961,16 +975,3 @@ func (m *LiveKitRoomMonitor) HandoverJob(jobRequest *DelayedEventRequest) (Uniqu
 	return res.jobId, res.ok
 }
 
-// setState is called from outside Loop() only in the "replacement" path where
-// we want to mark the old job before closing it.  Because this runs in a
-// goroutine spawned by Loop() (which already moved the job out of the jobs
-// map), it's safe — no other goroutine will touch the job's state anymore.
-func (job *DelayedEventJob) setState(state DelayEventState) {
-	// This is the one case where we write state outside of Loop().
-	// It is safe because it is called only after the job has been removed from
-	// the jobs map and Loop() will never see it again.
-	job.state = state
-	slog.Debug("Job: state forced",
-		"newState", state, "room", job.LiveKitRoom,
-		"lkId", job.LiveKitIdentity, "jobId", job.JobId)
-}
