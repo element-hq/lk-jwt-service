@@ -100,6 +100,57 @@ type SFUResponse struct {
 	JWT string `json:"jwt"`
 }
 
+// MembershipLeaveDelegationRequest is the body of POST /membership_leave_delegation.
+// It is used when the client is already connected to the SFU and wants to
+// hand over the delayed disconnect event after the fact — i.e. no JWT is
+// needed and the LiveKit room already exists.
+//
+// All three delayed-event fields are mandatory (unlike SFURequest where they
+// are optional).  The participant is assumed to be already present on the SFU,
+// so the monitor will use the participant-lookup backoff to confirm presence
+// rather than waiting for the webhook (which has already fired).
+type MembershipLeaveDelegationRequest struct {
+	RoomID        string              `json:"room_id"`
+	SlotID        string              `json:"slot_id"`
+	OpenIDToken   OpenIDTokenType     `json:"openid_token"`
+	Member        MatrixRTCMemberType `json:"member"`
+	DelayId       string              `json:"delay_id"`
+	DelayTimeout  int                 `json:"delay_timeout"`
+	DelayCsApiUrl string              `json:"delay_cs_api_url"`
+}
+
+func (r *MembershipLeaveDelegationRequest) Validate() error {
+	if r.RoomID == "" || r.SlotID == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `room_id` or `slot_id`",
+		}
+	}
+	if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body `member` is missing `id`, `claimed_user_id` or `claimed_device_id`",
+		}
+	}
+	if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body `openid_token` is missing `access_token` or `matrix_server_name`",
+		}
+	}
+	if r.DelayId == "" || r.DelayTimeout <= 0 || r.DelayCsApiUrl == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `delay_id`, `delay_timeout` or `delay_cs_api_url`",
+		}
+	}
+	return nil
+}
+
 type MatrixErrorResponse struct {
 	Status  int
 	ErrCode string
@@ -543,11 +594,116 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
+// processMembershipLeaveDelegation handles the /membership_leave_delegation endpoint.
+//
+// Unlike processSFURequest it:
+//   - Does NOT issue a JWT (the client is already connected to the SFU).
+//   - Does NOT call CreateLiveKitRoom (the room already exists).
+//   - Requires all three delayed-event parameters (they are mandatory here).
+//
+// The participant is assumed to be already present on the SFU.  The
+// LiveKitRoomMonitor will use its participant-lookup backoff to confirm
+// presence, which covers the case where the SFU webhook has already fired
+// before this request arrived.
+func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *MembershipLeaveDelegationRequest) error {
+	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	if err != nil {
+		return &MatrixErrorResponse{
+			Status:  http.StatusUnauthorized,
+			ErrCode: "M_UNAUTHORIZED",
+			Err:     "The request could not be authorised.",
+		}
+	}
+
+	if req.Member.ClaimedUserID != userInfo.Sub {
+		slog.Warn("Handler: membership_leave_delegation: ClaimedUserID does not match token subject",
+			"ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
+		return &MatrixErrorResponse{
+			Status:  http.StatusUnauthorized,
+			ErrCode: "M_UNAUTHORIZED",
+			Err:     "The request could not be authorised.",
+		}
+	}
+
+	// Delayed event delegation is restricted to full-access homeservers.
+	if !h.isFullAccessUser(req.OpenIDToken.MatrixServerName) {
+		return &MatrixErrorResponse{
+			Status:  http.StatusForbidden,
+			ErrCode: "M_FORBIDDEN",
+			Err:     "Delegation of delayed events is only supported for full access users",
+		}
+	}
+
+	lkIdentity := CreateLiveKitIdentity(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
+	lkRoomAlias := CreateLiveKitRoomAlias(req.RoomID, req.SlotID)
+
+	slog.Info("Handler: scheduling delayed event job (membership_leave_delegation)",
+		"room", lkRoomAlias, "lkId", lkIdentity,
+		"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl,
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
+	h.addDelayedEventJob(&DelayedEventRequest{
+		DelayCsApiUrl:   req.DelayCsApiUrl,
+		DelayId:         req.DelayId,
+		DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
+		LiveKitRoom:     lkRoomAlias,
+		LiveKitIdentity: lkIdentity,
+	})
+
+	return nil
+}
+
+func (h *Handler) handleMembershipLeaveDelegation(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
+
+	switch r.Method {
+	case "OPTIONS":
+		w.WriteHeader(http.StatusOK)
+		return
+	case "POST":
+		slog.Debug("Handler: membership_leave_delegation request",
+			"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
+		var req MembershipLeaveDelegationRequest
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			slog.Error("Handler: membership_leave_delegation: error reading body",
+				"RemoteAddr", r.RemoteAddr, "err", err)
+			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
+			return
+		}
+
+		if err := req.Validate(); err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+			}
+			return
+		}
+
+		if err := h.processMembershipLeaveDelegation(r, &req); err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+			}
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func (h *Handler) prepareMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sfu/get", h.handle_legacy) // TODO: deprecated
 	mux.HandleFunc("/get_token", h.handle)
-	mux.HandleFunc("/disconnect_delegation", h.handle)
+	mux.HandleFunc("/membership_leave_delegation", h.handleMembershipLeaveDelegation)
 	mux.HandleFunc("/sfu_webhook", h.handleSfuWebhook)
 	mux.HandleFunc("/healthz", h.healthcheck)
 	return mux
