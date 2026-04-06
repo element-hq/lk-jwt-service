@@ -1152,3 +1152,201 @@ func TestSfuEventFromWebhook_UnknownEvent(t *testing.T) {
 		})
 	}
 }
+
+// ── Handler.loop() monitor lifecycle ─────────────────────────────────────────
+
+// TestHandler_loop_AllMonitorsClosedOnShutdown verifies that handler.Close()
+// waits for ALL monitors to fully shut down — including their background
+// goroutines — before returning, regardless of whether monitors were removed
+// via the NoJobsLeft path or the ctx.Done() teardown path.
+//
+// This is the key invariant that prevents races on global function variables
+// (e.g. LiveKitParticipantLookup) between monitor goroutines and test cleanup.
+func TestHandler_loop_AllMonitorsClosedOnShutdown(t *testing.T) {
+	// Track which monitors have fully exited via their Loop() goroutine.
+	var mu sync.Mutex
+	var exited []string
+
+	original := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = original })
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, room LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
+		// Block until context is cancelled so we can observe that the goroutine
+		// is still running while handler.Close() must wait for it.
+		<-ctx.Done()
+		mu.Lock()
+		exited = append(exited, string(room))
+		mu.Unlock()
+		return SFUMessage{}, ctx.Err()
+	}
+
+	handler := NewHandler(
+		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
+		false, []string{"example.com"},
+	)
+
+	// Start three jobs in three different rooms → three monitors.
+	rooms := []LiveKitRoomAlias{"room-alpha", "room-beta", "room-gamma"}
+	for _, room := range rooms {
+		handler.addDelayedEventJob(&DelayedEventRequest{
+			DelayCsApiUrl:   "https://matrix.example.com",
+			DelayId:         "delay-id",
+			DelayTimeout:    10 * time.Second,
+			LiveKitRoom:     room,
+			LiveKitIdentity: LiveKitIdentity("@user:example.com"),
+		})
+	}
+
+	// Give loop() time to register all three monitors.
+	time.Sleep(50 * time.Millisecond)
+
+	// Close the handler — must block until all three monitors (and their
+	// lookup goroutines) have fully exited.
+	handler.Close()
+
+	// After Close() returns the lookup goroutines must all have exited
+	// (they append to exited before returning).
+	mu.Lock()
+	defer mu.Unlock()
+	if len(exited) != len(rooms) {
+		t.Errorf("expected %d monitors to have exited, got %d: %v",
+			len(rooms), len(exited), exited)
+	}
+}
+
+// TestHandler_loop_NoJobsLeft_MonitorFullyClosedBeforeHandlerClose verifies
+// the NoJobsLeft path: after a job finishes and the monitor sends NoJobsLeft,
+// the monitor is removed from the map AND its close goroutine completes before
+// handler.Close() returns.
+func TestHandler_loop_NoJobsLeft_MonitorFullyClosedBeforeHandlerClose(t *testing.T) {
+	originalLookup := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
+		<-ctx.Done()
+		return SFUMessage{}, ctx.Err()
+	}
+
+	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	}
+
+	handler := NewHandler(
+		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
+		false, []string{"example.com"},
+	)
+
+	room := LiveKitRoomAlias("nojobsleft-shutdown-room")
+	identity := LiveKitIdentity("@user:example.com")
+
+	handler.addDelayedEventJob(&DelayedEventRequest{
+		DelayCsApiUrl:   "https://matrix.example.com",
+		DelayId:         "delay-id",
+		DelayTimeout:    10 * time.Second,
+		LiveKitRoom:     room,
+		LiveKitIdentity: identity,
+	})
+
+	// Drive the job to Disconnected → monitor sends NoJobsLeft → monitor removed
+	// from map and close goroutine started.
+	time.Sleep(30 * time.Millisecond)
+	handler.sfuEventCh <- sfuEventRequest{
+		roomAlias: room,
+		msg:       SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity},
+	}
+	time.Sleep(30 * time.Millisecond)
+	handler.sfuEventCh <- sfuEventRequest{
+		roomAlias: room,
+		msg:       SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity},
+	}
+
+	// Wait for NoJobsLeft to be processed (monitor removed from map).
+	time.Sleep(200 * time.Millisecond)
+
+	// handler.Close() must complete cleanly — monitorWg.Wait() ensures the
+	// NoJobsLeft close goroutine has also finished.
+	done := make(chan struct{})
+	go func() { handler.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler.Close() blocked after NoJobsLeft — monitorWg not properly tracked")
+	}
+}
+
+// TestHandler_loop_MonitorIdMismatch_NoDeadlock verifies the MonitorId-mismatch
+// break path in the NoJobsLeft handler:
+//
+// 1. Job A is handed over for room X → Monitor M1 is created.
+// 2. M1's context is cancelled externally (simulated by handing over a second
+//    job for the same identity, which causes M1 to be replaced by M2).
+// 3. M1 sends NoJobsLeft — but by now M2 is in monitors[X], so MonitorId
+//    mismatches and loop() takes the break path without calling M1.Close().
+// 4. handler.Close() must still complete cleanly — monitorWg.Wait() must not
+//    block, proving that M1's Loop() already called monitorWg.Done() before
+//    sending NoJobsLeft, and M2 is properly closed via the ctx.Done() path.
+func TestHandler_loop_MonitorIdMismatch_NoDeadlock(t *testing.T) {
+	originalLookup := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
+		<-ctx.Done()
+		return SFUMessage{}, ctx.Err()
+	}
+
+	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	}
+
+	handler := NewHandler(
+		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
+		false, []string{"example.com"},
+	)
+
+	room := LiveKitRoomAlias("mismatch-room")
+	identity1 := LiveKitIdentity("@user1:example.com")
+	identity2 := LiveKitIdentity("@user2:example.com")
+
+	// Hand over job for identity1 → Monitor M1 created.
+	handler.addDelayedEventJob(&DelayedEventRequest{
+		DelayCsApiUrl: "https://matrix.example.com", DelayId: "delay-1",
+		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity1,
+	})
+	time.Sleep(30 * time.Millisecond)
+
+	// Drive identity1 to Disconnected via SFU events.
+	// M1 will send NoJobsLeft and cancel itself.
+	handler.sfuEventCh <- sfuEventRequest{
+		roomAlias: room,
+		msg:       SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity1},
+	}
+	time.Sleep(20 * time.Millisecond)
+	handler.sfuEventCh <- sfuEventRequest{
+		roomAlias: room,
+		msg:       SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity1},
+	}
+
+	// Before loop() processes the NoJobsLeft from M1, hand over a new job for
+	// the same room → acquireMonitor detects M1.ctx.Done() and creates M2.
+	time.Sleep(20 * time.Millisecond)
+	handler.addDelayedEventJob(&DelayedEventRequest{
+		DelayCsApiUrl: "https://matrix.example.com", DelayId: "delay-2",
+		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity2,
+	})
+
+	// Give loop() time to process all events including the potentially
+	// mismatched NoJobsLeft from M1.
+	time.Sleep(200 * time.Millisecond)
+
+	// handler.Close() must complete without deadlock:
+	// - M1.Loop() already called monitorWg.Done() → no blockage there.
+	// - M2 is still in monitors map → ctx.Done() path closes it and waits.
+	done := make(chan struct{})
+	go func() { handler.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler.Close() deadlocked after MonitorId mismatch on NoJobsLeft")
+	}
+}

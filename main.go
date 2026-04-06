@@ -18,8 +18,8 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MatusOllah/slogcolor"
