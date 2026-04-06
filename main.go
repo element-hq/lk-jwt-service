@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sync"
 	"strings"
 	"time"
 
@@ -339,6 +340,13 @@ func (h *Handler) loop() {
 	// The map lives entirely inside this goroutine.
 	monitors := make(map[LiveKitRoomAlias]*LiveKitRoomMonitor)
 
+	// monitorWg tracks all monitors started by loop() so that when loop()
+	// exits it can wait for every monitor (and its lookup goroutines) to
+	// finish before returning.  This ensures that background goroutines no
+	// longer read global variables (e.g. LiveKitParticipantLookup) by the
+	// time tests restore them.
+	var monitorWg sync.WaitGroup
+
 	// acquireMonitor returns the live monitor for a room, creating one if
 	// needed.  Called only from within loop().
 	acquireMonitor := func(lkRoom LiveKitRoomAlias) *LiveKitRoomMonitor {
@@ -353,7 +361,11 @@ func (h *Handler) loop() {
 			}
 		}
 		m := NewLiveKitRoomMonitor(h.ctx, h.monitorCommChan, &h.liveKitAuth, lkRoom)
-		go m.Loop()
+		monitorWg.Add(1)
+		go func() {
+			defer monitorWg.Done()
+			m.Loop()
+		}()
 		monitors[lkRoom] = m
 		slog.Debug("Handler: created LiveKitRoomMonitor",
 			"room", lkRoom, "MonitorId", m.MonitorId)
@@ -364,6 +376,18 @@ func (h *Handler) loop() {
 		select {
 		case <-h.ctx.Done():
 			slog.Debug("Handler: loop exiting")
+			// Close all remaining monitors and wait for them — and their
+			// lookup goroutines — to finish before loop() returns.  This
+			// prevents background goroutines from reading global function
+			// variables (e.g. LiveKitParticipantLookup) after tests have
+			// restored them.
+			for _, m := range monitors {
+				if err := m.Close(); err != nil {
+					slog.Error("Handler: error closing monitor on shutdown",
+						"room", m.RoomAlias, "MonitorId", m.MonitorId, "err", err)
+				}
+			}
+			monitorWg.Wait()
 			return
 
 		// ── job handover (atomic: lookup + HandoverJob in one step) ──────────
