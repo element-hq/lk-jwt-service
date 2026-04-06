@@ -140,10 +140,10 @@ func TestHandleMembershipLeaveDelegation_MissingFields(t *testing.T) {
 
 func TestHandleMembershipLeaveDelegation_UnauthorizedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@real:example.com"}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	handler := newMembershipLeaveDelegationHandler(t)
 	body := marshalMembershipLeaveDelegationRequest(t, func(r *MembershipLeaveDelegationRequest) {
@@ -159,10 +159,10 @@ func TestHandleMembershipLeaveDelegation_UnauthorizedUser(t *testing.T) {
 
 func TestHandleMembershipLeaveDelegation_RestrictedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@user:restricted.com"}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	// Handler configured with only "example.com" as full-access.
 	handler := newMembershipLeaveDelegationHandler(t)
@@ -180,10 +180,10 @@ func TestHandleMembershipLeaveDelegation_RestrictedUser(t *testing.T) {
 
 func TestHandleMembershipLeaveDelegation_ExchangeError(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return nil, &MatrixErrorResponse{Status: http.StatusUnauthorized, ErrCode: "M_UNAUTHORIZED", Err: "no"}
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	handler := newMembershipLeaveDelegationHandler(t)
 	body := marshalMembershipLeaveDelegationRequest(t, nil)
@@ -196,20 +196,21 @@ func TestHandleMembershipLeaveDelegation_ExchangeError(t *testing.T) {
 }
 
 func TestHandleMembershipLeaveDelegation_Success(t *testing.T) {
+	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	originalLookup := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
 	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
 		<-ctx.Done()
 		return SFUMessage{}, ctx.Err()
 	}
-	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
 
-	handler := newMembershipLeaveDelegationHandler(t)
+	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
 	body := marshalMembershipLeaveDelegationRequest(t, nil)
 	req := httptest.NewRequest("POST", "/membership_leave_delegation", body)
 	rr := httptest.NewRecorder()
@@ -227,20 +228,21 @@ func TestHandleMembershipLeaveDelegation_Success(t *testing.T) {
 // TestHandleMembershipLeaveDelegation_NoJWT verifies that the endpoint does NOT
 // return a JWT — differentiating it from /get_token.
 func TestHandleMembershipLeaveDelegation_NoJWT(t *testing.T) {
+	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	originalLookup := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
 	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
 		<-ctx.Done()
 		return SFUMessage{}, ctx.Err()
 	}
-	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
 
-	handler := newMembershipLeaveDelegationHandler(t)
+	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
 	body := marshalMembershipLeaveDelegationRequest(t, nil)
 	req := httptest.NewRequest("POST", "/membership_leave_delegation", body)
 	rr := httptest.NewRecorder()
@@ -268,28 +270,29 @@ func TestHandleMembershipLeaveDelegation_NoJWT(t *testing.T) {
 // to processMembershipLeaveDelegation hands a job over to the monitor without
 // creating a LiveKit room or token.
 func TestProcessMembershipLeaveDelegation_CreatesJob(t *testing.T) {
-	createRoomCalled := false
+	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
 	originalCreate := CreateLiveKitRoom
+	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
+	createRoomCalled := false
 	CreateLiveKitRoom = func(_ context.Context, _ *LiveKitAuth, _ LiveKitRoomAlias, _ string, _ LiveKitIdentity) error {
 		createRoomCalled = true
 		return nil
 	}
-	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	originalLookup := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
 	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
 		<-ctx.Done()
 		return SFUMessage{}, ctx.Err()
 	}
-	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
 
-	handler := newMembershipLeaveDelegationHandler(t)
+	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
 	req := validMembershipLeaveDelegationRequest()
 	if err := handler.processMembershipLeaveDelegation(&http.Request{}, &req); err != nil {
 		t.Fatalf("unexpected error: %v", err)

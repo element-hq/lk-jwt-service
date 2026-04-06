@@ -349,10 +349,10 @@ func TestGetJoinToken(t *testing.T) {
 // TestHandle_UnauthorizedUser verifies that a mismatched claimed_user_id → 401.
 func TestHandle_UnauthorizedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@real:example.com"}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
@@ -550,6 +550,7 @@ func TestMapSFURequestMemoryLeak(t *testing.T) {
 func TestProcessSFURequest(t *testing.T) {
 	var calledCreateLiveKitRoom bool
 	originalCreate := CreateLiveKitRoom
+	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 	CreateLiveKitRoom = func(_ context.Context, _ *LiveKitAuth, room LiveKitRoomAlias, _ string, _ LiveKitIdentity) error {
 		calledCreateLiveKitRoom = true
 		if room == "" {
@@ -557,18 +558,17 @@ func TestProcessSFURequest(t *testing.T) {
 		}
 		return nil
 	}
-	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 
 	var failExchange bool
 	var exchangeMatrixID string
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		if failExchange {
 			return nil, &MatrixErrorResponse{Status: http.StatusUnauthorized, ErrCode: "M_UNAUTHORIZED", Err: "unauthorised"}
 		}
 		return &fclient.UserInfo{Sub: exchangeMatrixID}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	for _, tc := range []struct {
 		name                 string
@@ -620,6 +620,7 @@ func TestProcessSFURequest(t *testing.T) {
 func TestProcessLegacySFURequest(t *testing.T) {
 	var calledCreateLiveKitRoom bool
 	originalCreate := CreateLiveKitRoom
+	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 	CreateLiveKitRoom = func(_ context.Context, _ *LiveKitAuth, room LiveKitRoomAlias, _ string, _ LiveKitIdentity) error {
 		calledCreateLiveKitRoom = true
 		if room == "" {
@@ -627,17 +628,16 @@ func TestProcessLegacySFURequest(t *testing.T) {
 		}
 		return nil
 	}
-	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 
 	var failExchange bool
 	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		if failExchange {
 			return nil, &MatrixErrorResponse{Status: http.StatusUnauthorized, ErrCode: "M_UNAUTHORIZED", Err: "unauthorised"}
 		}
 		return &fclient.UserInfo{Sub: "@mock:example.com"}, nil
 	}
-	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 
 	for _, tc := range []struct {
 		name                 string
@@ -912,24 +912,27 @@ func TestHandler_Close(t *testing.T) {
 // TestHandler_AddDelayedEventJob exercises addDelayedEventJob through the
 // full loop() path.
 func TestHandler_AddDelayedEventJob(t *testing.T) {
+	// LIFO cleanup order: register global restores FIRST (run last),
+	// handler.Close LAST (runs first) — ensures all goroutines exit before
+	// the globals are restored.
 	original := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = original }) // runs last
 	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
 		<-ctx.Done()
 		return SFUMessage{}, ctx.Err()
 	}
-	t.Cleanup(func() { LiveKitParticipantLookup = original })
 
 	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
 	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 	}
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
 
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 	)
-	t.Cleanup(handler.Close)
+	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
 	handler.addDelayedEventJob(&DelayedEventRequest{
 		DelayCsApiUrl:   "https://matrix.example.com",
@@ -943,24 +946,27 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 // TestHandler_Loop_NoJobsLeft verifies that loop() removes a monitor after it
 // sends NoJobsLeft, exercising the full Connected → Disconnected → cleanup path.
 func TestHandler_Loop_NoJobsLeft(t *testing.T) {
+	// LIFO cleanup order: register global restores FIRST (run last),
+	// handler.Close LAST (runs first) — ensures all goroutines exit before
+	// the globals are restored.
 	original := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = original }) // runs last
 	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
 		<-ctx.Done()
 		return SFUMessage{}, ctx.Err()
 	}
-	t.Cleanup(func() { LiveKitParticipantLookup = original })
 
 	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
 	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 	}
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
 
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 	)
-	t.Cleanup(handler.Close)
+	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
 	room := LiveKitRoomAlias("loop-test-room")
 	identity := LiveKitIdentity("@loopuser:example.com")
