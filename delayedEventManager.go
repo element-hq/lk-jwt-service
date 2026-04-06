@@ -727,11 +727,11 @@ func (m *LiveKitRoomMonitor) Loop() {
 	jobs := make(map[LiveKitIdentity]*DelayedEventJob)
 	jobCommCh := make(chan MonitorMessage, 20)
 
-	// lookupWg tracks all participant-lookup goroutines.  We must wait for
-	// them before Loop() returns so that any goroutine still holding a
-	// reference to the LiveKitParticipantLookup function variable has exited
-	// before test cleanup (or production teardown) replaces/restores it.
-	var lookupWg sync.WaitGroup
+	// backgroundWg tracks all goroutines spawned by Loop() that must finish
+	// before Loop() returns: participant-lookup goroutines (which hold a
+	// reference to LiveKitParticipantLookup) and job-close goroutines (which
+	// drain jobCommCh while a job shuts down).
+	var backgroundWg sync.WaitGroup
 
 	// teardown cancels all running jobs, drains pending messages, then
 	// waits for all background goroutines (lookups, Close calls) to exit.
@@ -754,7 +754,7 @@ func (m *LiveKitRoomMonitor) Loop() {
 			}
 		}
 		// Block until every lookup goroutine and async Close goroutine exits.
-		lookupWg.Wait()
+		backgroundWg.Wait()
 	}
 
 	for {
@@ -814,9 +814,9 @@ func (m *LiveKitRoomMonitor) Loop() {
 				job.Cancel()
 				// Wait for full cleanup in a separate goroutine so Loop() keeps
 				// draining all channels (including jobCommCh) while we wait.
-				lookupWg.Add(1)
+				backgroundWg.Add(1)
 				go func(j *DelayedEventJob) {
-					defer lookupWg.Done()
+					defer backgroundWg.Done()
 					if err := j.Close(); err != nil {
 						slog.Error("RoomMonitor: error closing job",
 							"room", m.RoomAlias, "lkId", j.LiveKitIdentity)
@@ -881,11 +881,11 @@ func (m *LiveKitRoomMonitor) Loop() {
 				default:
 				}
 				// Cancel immediately so any goroutines sending on jobCommCh exit,
-				// then close in background tracked by lookupWg so teardown() waits.
+				// then close in background tracked by backgroundWg so teardown() waits.
 				existing.Cancel()
-				lookupWg.Add(1)
+				backgroundWg.Add(1)
 				go func(j *DelayedEventJob) {
-					defer lookupWg.Done()
+					defer backgroundWg.Done()
 					if err := j.Close(); err != nil {
 						slog.Error("RoomMonitor: error closing replaced job",
 							"room", m.RoomAlias, "lkId", j.LiveKitIdentity, "jobId", j.JobId)
@@ -899,13 +899,13 @@ func (m *LiveKitRoomMonitor) Loop() {
 				// Start participant lookup with exponential backoff in a separate
 				// goroutine.  On success the SFUMessage is forwarded on SFUCommChan,
 				// keeping channel ownership in Loop() (#r2758789719).
-				// lookupWg tracks this goroutine so teardown() can wait for it to
-				// exit before Loop() returns — preventing races on the global
+				// backgroundWg tracks this goroutine so teardown() can wait for it
+				// to exit before Loop() returns — preventing races on the global
 				// LiveKitParticipantLookup variable in tests.
 				waitingDuration := min(time.Hour, job.DelayTimeout)
-				lookupWg.Add(1)
+				backgroundWg.Add(1)
 				go func(j *DelayedEventJob) {
-					defer lookupWg.Done()
+					defer backgroundWg.Done()
 					expBackOff := backoff.NewExponentialBackOff()
 					expBackOff.InitialInterval = 1000 * time.Millisecond
 					expBackOff.Multiplier = 1.5
