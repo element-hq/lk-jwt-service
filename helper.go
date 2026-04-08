@@ -66,7 +66,6 @@ var exchangeOpenIdUserInfo = func(
 	)
 	if err != nil {
 		slog.Error("OpenIDUserInfo: Failed to look up user info", "err", err)
-		// FIX: wrap the error to preserve context (#r2758756339)
 		return nil, fmt.Errorf("failed to look up user info: %w", err)
 	}
 	return &userinfo, nil
@@ -84,7 +83,7 @@ func CreateLiveKitRoomAlias(matrixRoom string, matrixRtcSlot string) LiveKitRoom
 func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) LiveKitIdentity {
 	// Create a deterministic LiveKit identity based on user ID and device ID
 	// to ensure uniqueness and avoid collisions.
-	// TODO(#r2758771596): "|" is not a safe delimiter since all fields are
+	// TODO: "|" is not a safe delimiter since all fields are
 	// attacker-controlled. Replace with JSON array serialisation once client
 	// libraries have been updated to match.
 	lkIdentityRaw := matrixID + "|" + deviceId + "|" + memberID
@@ -96,7 +95,6 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 	roomClient := lksdk.NewRoomServiceClient(liveKitAuth.lkUrl, liveKitAuth.key, liveKitAuth.secret)
 	creationStart := time.Now().Unix()
 
-	// FIX: use named constants with explicit units (#r2758774565).
 	const emptyTimeoutSecs     = 5 * 60 // 5 minutes: keep room open if no one joins
 	const departureTimeoutSecs = 20     // 20 seconds: keep room after everyone leaves
 
@@ -130,13 +128,7 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 // LiveKitParticipantLookup checks whether a participant is currently present in
 // a LiveKit room.
 //
-// FIX: returns (SFUMessage, error) instead of writing directly to a
-// channel (#r2758789719). Writing to a channel inside this function forces the
-// caller to guarantee the channel is open, sufficiently buffered, and not
-// concurrently closed — coupling that is hard to reason about. Returning the
-// value keeps channel ownership with the caller.
-//
-// The outer backoff loop in LiveKitRoomMonitor.Loop() sends the returned
+// The caller (outer backoff loop in LiveKitRoomMonitor.Loop()) sends the returned
 // SFUMessage on SFUCommChan after a successful lookup.
 var LiveKitParticipantLookup = func(
 	ctx context.Context,

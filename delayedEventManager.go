@@ -928,7 +928,7 @@ func (m *LiveKitRoomMonitor) Loop() {
 
 				// Start participant lookup with exponential backoff in a separate
 				// goroutine.  On success the SFUMessage is forwarded on SFUCommChan,
-				// keeping channel ownership in Loop() (#r2758789719).
+				// keeping channel ownership in Loop().
 				// backgroundWg tracks this goroutine so teardown() can wait for it
 				// to exit before Loop() returns — preventing races on the global
 				// LiveKitParticipantLookup variable in tests.

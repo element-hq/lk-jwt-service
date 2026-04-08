@@ -286,9 +286,7 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 //
 // # Atomicity of job handover
 //
-// The old two-step (acquireOrCreateMonitor + HandoverJob) had a race window:
-// a monitor could send NoJobsLeft and be removed between the two calls.
-// Now loop() performs both steps atomically: it looks up (or creates) the
+// loop() performs both steps atomically: it looks up (or creates) the
 // monitor and calls HandoverJob in the same iteration, with no opportunity
 // for the monitor to be removed in between.
 type Handler struct {
