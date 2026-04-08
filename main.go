@@ -88,7 +88,6 @@ type ValidatableSFURequest interface {
     Validate() error
 }
 
-var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 
 func (e *MatrixErrorResponse) Error() string { 
     return e.Err
@@ -171,29 +170,11 @@ func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 	return at.ToJWT()
 }
 
-var exchangeOpenIdUserInfo = func(
-	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
-) (*fclient.UserInfo, error) {
-	if token.AccessToken == "" || token.MatrixServerName == "" {
-		return nil, errors.New("missing parameters in openid token")
 	}
 
-	if skipVerifyTLS {
-		log.Printf("!!! WARNING !!! Skipping TLS verification for matrix client connection to %s", token.MatrixServerName)
-		// Disable TLS verification on the default HTTP Transport for the well-known lookup
-		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
-	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
 
-	// validate the openid token by getting the user's ID
-	userinfo, err := client.LookupUserInfo(
-		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
-	)
-	if err != nil {
-		log.Printf("Failed to look up user info: %v", err)
-		return nil, errors.New("failed to look up user info")
 	}
-	return &userinfo, nil
 }
 
 func (h *Handler) isFullAccessUser(matrixServerName string) bool {
@@ -325,32 +306,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
     return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
 }
 
-var createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
-    roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
-    creationStart := time.Now().Unix()
-    lkRoom, err := roomClient.CreateRoom(
-        ctx,
-        &livekit.CreateRoomRequest{
-            Name:             room,
-            EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
-            DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
-            MaxParticipants:  0,      // 0 == no limitation
-        },
-    )
 
-    if err != nil {
-        return fmt.Errorf("unable to create room %s: %w", room, err)
-    }
 
-    // Log the room creation time and the user info
-    isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
-    log.Printf(
-        "%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
-        map[bool]string{true: "Created", false: "Using"}[isNewRoom],
-        lkRoom.Sid, room, matrixUser, lkIdentity,
-    )
 
-    return nil
 }
 
 func (h *Handler) prepareMux() *http.ServeMux {
