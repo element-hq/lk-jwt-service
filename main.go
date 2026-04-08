@@ -1042,8 +1042,25 @@ func parseConfig() (*Config, error) {
 
 func main() {
 	opts := slogcolor.DefaultOptions
-	opts.Level = slog.LevelDebug
 	opts.NoColor = !isatty.IsTerminal(os.Stderr.Fd())
+
+	logLevelString := os.Getenv("LIVEKIT_LOG_LEVEL")
+	switch strings.ToLower(logLevelString) {
+	case "debug":
+		opts.Level = slog.LevelDebug
+	case "info":
+	case "warn", "warning":
+		opts.Level = slog.LevelWarn
+	case "error":
+		opts.Level = slog.LevelError
+	case "":
+		opts.Level = slog.LevelInfo
+		slog.Info("log level defaulting to info")
+	default:
+		opts.Level = slog.LevelInfo
+		slog.Warn("Invalid log level in LIVEKIT_LOG_LEVEL, defaulting to info",
+			"invalidValue", logLevelString)
+	}
 	slog.SetDefault(slog.New(slogcolor.NewHandler(os.Stderr, opts)))
 
 	config, err := parseConfig()
