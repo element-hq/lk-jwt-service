@@ -12,10 +12,67 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install Go
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
       - name: Test
         run: go test -timeout 30s
+
+  ess:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Get current branch name
+        id: current-branch
+        run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
+
+      - name: Check if branch exists in element-hq/ess-helm
+        id: check-branch
+        env:
+          BRANCH_NAME: ${{ steps.current-branch.outputs.branch }}
+        run: |
+          API_URL="https://api.github.com/repos/element-hq/ess-helm/branches/$BRANCH_NAME"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" $API_URL)
+          if [ "$RESPONSE" = "200" ]; then
+            echo "ref=$BRANCH_NAME" | tee -a $GITHUB_OUTPUT
+          else
+            echo "ref=main" | tee -a $GITHUB_OUTPUT
+          fi
+
+      - name: Get go version
+        run: echo "GO_VERSION=$(go mod edit -json | jq -r .Toolchain | sed "s,^go,,")" >> $GITHUB_ENV
+
+      - name: Install ESS test dependencies
+        uses: element-hq/setup-ess-cluster-action@aac02ff668d9384dacb2f5c34e25392a8e38a5e2 # release/v2
+        with:
+          ess-helm-ref: ${{ steps.check-branch.outputs.ref }}
+
+      - name: Build lk-jwt-service docker image to local registry
+        run: |
+          docker build -t localhost:5000/lk-jwt-service:ci --build-arg "GO_VERSION=${GO_VERSION}" -f ./Dockerfile .
+          docker push localhost:5000/lk-jwt-service:ci
+
+      - name: Build Additional values file
+        run: |
+          yq eval -n '.matrixRTC.image.registry = "localhost:5000" | .matrixRTC.image.repository = "lk-jwt-service" | .matrixRTC.image.tag = "ci"' > ci-values.yml
+
+      - name: Run ESS tests
+        run: pytest-ess --test-suite "matrix-rtc-synapse-wellknown" --additional-test-values-file ci-values.yml -- -vv
+
+      - name: Collect ESS logs
+        if: ${{ failure() }}
+        run: collect-ess-logs
+
+      - name: Upload logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+        with:
+          name: ess-helm-logs
+          path: ess-helm-logs
+          retention-days: 1

@@ -18,9 +18,9 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"sync"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MatusOllah/slogcolor"
@@ -749,7 +749,8 @@ func (h *Handler) prepareMux() *http.ServeMux {
 
 func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Handler: health check", "RemoteAddr", r.RemoteAddr)
-	if r.Method == "GET" {
+
+	if r.Method == "GET" || r.Method == "HEAD" {
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusMethodNotAllowed)
