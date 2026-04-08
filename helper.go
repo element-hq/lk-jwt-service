@@ -160,11 +160,11 @@ var LiveKitParticipantLookup = func(
 	return SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: lkId}, nil
 }
 
-var ExecuteDelayedEventAction = func(baseUrl string, delayID string, action DelayEventAction) (*http.Response, error) {
+var ExecuteDelayedEventAction = func(CsApiUrl string, delayID string, action DelayEventAction) (*http.Response, error) {
 	// Use url.JoinPath so delayID is path-escaped, preventing path traversal
 	// attacks (e.g. delayID = "../admin") since it is attacker-controlled.
 	// action is a typed constant (ActionRestart/ActionSend) and safe by construction.
-	endpoint, err := url.JoinPath(baseUrl, DelayedEventsEndpoint, delayID, string(action))
+	endpoint, err := url.JoinPath(CsApiUrl, DelayedEventsEndpoint, delayID, string(action))
 	if err != nil {
 		return nil, fmt.Errorf("ExecuteDelayedEventAction: invalid URL: %w", err)
 	}
