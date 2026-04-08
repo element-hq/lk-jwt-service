@@ -224,18 +224,22 @@ func TestDelayedEventJob_ParticipantDisconnected(t *testing.T) {
 }
 
 // TestDelayedEventJob_DelayedEventTimedOut verifies Connected → Disconnected
-// via DelayedEventTimedOut (cancelling before ActionSend can block).
+// via DelayedEventTimedOut
 func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
 	mockExecOK(t)
-	job, _ := newJobWithMonitorCh(10 * time.Second)
+	job := newTestJob(t, 10 * time.Millisecond)
 	go job.Loop()
 
 	job.EventChannel <- ParticipantConnected
 	time.Sleep(20 * time.Millisecond)
+	job.EventChannel <- DelayedEventTimedOut
 	job.Cancel() // unblocks any in-progress HTTP calls
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	if job.state != DelayEventState(Disconnected) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Disconnected), job.state)
 	}
 }
 
@@ -243,7 +247,7 @@ func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
 // via an explicit DelayedEventNotFound signal.
 func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 	mockExecOK(t)
-	job, _ := newJobWithMonitorCh(10 * time.Second)
+	job  := newTestJob(t, 10 * time.Second)
 	go job.Loop()
 
 	job.EventChannel <- ParticipantConnected
@@ -254,6 +258,9 @@ func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	if job.state != DelayEventState(Disconnected) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Disconnected), job.state)
 	}
 }
 
@@ -280,6 +287,9 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	if job.state != DelayEventState(Connected) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Connected), job.state)
 	}
 }
 
@@ -372,6 +382,7 @@ func TestDelayEventState_String(t *testing.T) {
 	}
 }
 
+
 func TestDelayedEventSignal_String(t *testing.T) {
 	for _, c := range []struct {
 		sig  DelayedEventSignal
@@ -412,21 +423,26 @@ func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
 		t.Fatal("timed out sending JobReplaced")
 	}
 
-	// Give Loop() time to process the signal before we inspect side-effects.
+	// Small delay so Loop() can process the signal before we check the state.
 	time.Sleep(20 * time.Millisecond)
 
 	// Now cancel and close — Loop() should exit promptly.
 	job.Cancel()
 	done := make(chan struct{})
-	go func() { close(done) }()
+	go func() { 
+		err := job.Close()
+		if err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("job did not close in time after JobReplaced")
 	}
-	err := job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
+	if job.state != DelayEventState(Replaced) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Replaced), job.state)
 	}
 }
 
@@ -440,7 +456,7 @@ func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
 //  5. The second job becomes the active job for identity X.
 func TestLiveKitRoomMonitor_ReplaceJob_JobReplacedSignal(t *testing.T) {
 	alias := LiveKitRoomAlias("replace-signal-room")
-	m, _ := newTestMonitor(t, alias)
+	m , _ := newTestMonitor(t, alias)
 
 	identity := LiveKitIdentity("@replace-signal:example.com")
 	req := defaultJobRequest(alias, identity)
@@ -504,15 +520,21 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 	go job.Loop() // start Loop() so it can drain and exit
 	job.Cancel()
 	done := make(chan struct{})
-	go func() { close(done) }()
+	go func() {
+		if err := job.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("job did not close cleanly after full-channel JobReplaced drop")
 	}
-	err := job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
+	// We are still in state WaitingForInitialConnect because the JobReplaced signal was dropped, 
+	// but that's fine — the key is that we didn't deadlock and Loop() exited cleanly.
+	if job.state != DelayEventState(WaitingForInitialConnect) {
+		t.Errorf("expected state %v, got %v", DelayEventState(WaitingForInitialConnect), job.state)
 	}
 }
 
@@ -557,14 +579,6 @@ func TestDelayedEventJob_SFUParticipantGone_WrongState(t *testing.T) {
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
-	}
-}
-
-// TestDelayedEventSignal_SFUParticipantGone_String verifies String() for the
-// new signal value.
-func TestDelayedEventSignal_SFUParticipantGone_String(t *testing.T) {
-	if got := SFUParticipantGone.String(); got != "SFUParticipantGone" {
-		t.Errorf("SFUParticipantGone.String() = %q, want %q", got, "SFUParticipantGone")
 	}
 }
 
