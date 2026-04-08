@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -123,6 +124,9 @@ func TestDelayedEventJob_ParticipantConnected(t *testing.T) {
 	mockExecOK(t)
 	job := newTestJob(t, 10*time.Second)
 	driveJobEvents(t, job, ParticipantConnected)
+	if job.state != DelayEventState(Connected) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Connected), job.state)
+	}
 	job.Cancel()
 	job.Close()
 }
@@ -133,6 +137,9 @@ func TestDelayedEventJob_ParticipantLookupSuccessful(t *testing.T) {
 	mockExecOK(t)
 	job := newTestJob(t, 10*time.Second)
 	driveJobEvents(t, job, ParticipantLookupSuccessful)
+	if job.state != DelayEventState(Connected) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Connected), job.state)
+	}
 	if err := job.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -351,6 +358,7 @@ func TestDelayedEventSignal_String(t *testing.T) {
 		{WaitingStateTimedOut, "WaitingStateTimedOut"},
 		{SFUNotAvailable, "SFUNotAvailable"},
 		{JobReplaced, "JobReplaced"},
+		{SFUParticipantGone, "SFUParticipantGone"},
 		{DelayedEventSignal(99), "DelayedEventSignal(99)"},
 	} {
 		if got := c.sig.String(); got != c.want {
@@ -468,5 +476,170 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("job did not close cleanly after full-channel JobReplaced drop")
+	}
+}
+
+// ── Sanity check (SFUParticipantGone) ────────────────────────────────────────
+
+// TestDelayedEventJob_SFUParticipantGone_Connected verifies that
+// SFUParticipantGone in the Connected state triggers → Disconnected.
+func TestDelayedEventJob_SFUParticipantGone_Connected(t *testing.T) {
+	mockExecOK(t)
+	job, monitorCh := newJobWithMonitorCh(10 * time.Second)
+	go job.Loop()
+
+	job.EventChannel <- ParticipantConnected
+	time.Sleep(20 * time.Millisecond)
+	job.EventChannel <- SFUParticipantGone
+
+	select {
+	case msg := <-monitorCh:
+		if msg.State != Disconnected {
+			t.Errorf("expected Disconnected after SFUParticipantGone, got %v", msg.State)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for Disconnected after SFUParticipantGone")
+	}
+	job.Close()
+}
+
+// TestDelayedEventJob_SFUParticipantGone_WrongState verifies that
+// SFUParticipantGone in WaitingForInitialConnect is a no-op (guard condition).
+func TestDelayedEventJob_SFUParticipantGone_WrongState(t *testing.T) {
+	mockExecOK(t)
+	job := newTestJob(t, 10*time.Second)
+	go job.Loop()
+
+	job.EventChannel <- SFUParticipantGone // should be ignored in WaitingForInitialConnect
+	time.Sleep(20 * time.Millisecond)
+
+	job.Cancel()
+	job.Close()
+}
+
+// TestDelayedEventSignal_SFUParticipantGone_String verifies String() for the
+// new signal value.
+func TestDelayedEventSignal_SFUParticipantGone_String(t *testing.T) {
+	if got := SFUParticipantGone.String(); got != "SFUParticipantGone" {
+		t.Errorf("SFUParticipantGone.String() = %q, want %q", got, "SFUParticipantGone")
+	}
+}
+
+// TestLiveKitRoomMonitor_SanityCheck_DetectsGoneParticipant verifies the full
+// sanity-check path: after the initial lookup succeeds, the periodic ticker
+// detects that the participant is gone and emits SFUParticipantGone → the job
+// transitions to Disconnected and the monitor sends NoJobsLeft.
+func TestLiveKitRoomMonitor_SanityCheck_DetectsGoneParticipant(t *testing.T) {
+	// Phase 1 (initial lookup): succeed immediately.
+	// Phase 2 (sanity): fail on first tick → emit SFUParticipantGone.
+	lookupCount := 0
+	original := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = original })
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, id LiveKitIdentity) (SFUMessage, error) {
+		lookupCount++
+		if lookupCount == 1 {
+			// Initial lookup succeeds.
+			return SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: id}, nil
+		}
+		// Sanity tick: participant gone.
+		return SFUMessage{}, fmt.Errorf("not found")
+	}
+
+	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	}
+
+	const sanityInterval = 50 * time.Millisecond
+
+	alias := LiveKitRoomAlias("sanity-check-room")
+	handlerCh := make(chan HandlerMessage, 5)
+	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
+	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias, sanityInterval)
+	go m.Loop()
+	t.Cleanup(func() {
+		if err := m.Close(); err != nil {
+			t.Errorf("Close() failed: %v", err)
+		}
+	})
+
+	_, ok := m.HandoverJob(&DelayedEventRequest{
+		DelayCsApiUrl:   "https://matrix.example.com",
+		DelayId:         "sanity-delay-id",
+		DelayTimeout:    10 * time.Second,
+		LiveKitRoom:     alias,
+		LiveKitIdentity: "@sanity-user:example.com",
+	})
+	if !ok {
+		t.Fatal("HandoverJob failed")
+	}
+
+	// Wait for NoJobsLeft — sanity check detected gone participant → Disconnected.
+	select {
+	case msg := <-handlerCh:
+		if msg.Event != NoJobsLeft {
+			t.Errorf("expected NoJobsLeft, got %v", msg.Event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for NoJobsLeft after sanity check detected gone participant")
+	}
+}
+
+// TestLiveKitRoomMonitor_SanityCheck_Disabled verifies that when
+// sanityCheckInterval is 0, the goroutine exits after the initial lookup
+// without starting the ticker — no spurious SFUParticipantGone signals.
+func TestLiveKitRoomMonitor_SanityCheck_Disabled(t *testing.T) {
+	lookupCount := 0
+	original := LiveKitParticipantLookup
+	t.Cleanup(func() { LiveKitParticipantLookup = original })
+	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, id LiveKitIdentity) (SFUMessage, error) {
+		lookupCount++
+		if lookupCount == 1 {
+			return SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: id}, nil
+		}
+		// Should never be called again when sanity check is disabled.
+		t.Errorf("unexpected lookup call #%d (sanity check should be disabled)", lookupCount)
+		return SFUMessage{}, fmt.Errorf("not found")
+	}
+
+	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	}
+
+	alias := LiveKitRoomAlias("sanity-disabled-room")
+	handlerCh := make(chan HandlerMessage, 5)
+	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
+	// sanityCheckInterval = 0 → disabled
+	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias, 0)
+	go m.Loop()
+	t.Cleanup(func() {
+		if err := m.Close(); err != nil {
+			t.Errorf("Close() failed: %v", err)
+		}
+	})
+
+	_, ok := m.HandoverJob(&DelayedEventRequest{
+		DelayCsApiUrl:   "https://matrix.example.com",
+		DelayId:         "disabled-delay-id",
+		DelayTimeout:    10 * time.Second,
+		LiveKitRoom:     alias,
+		LiveKitIdentity: "@no-sanity:example.com",
+	})
+	if !ok {
+		t.Fatal("HandoverJob failed")
+	}
+
+	// Wait briefly — no SFUParticipantGone should arrive.
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify that no unexpected signals arrived.
+	select {
+	case msg := <-handlerCh:
+		t.Errorf("unexpected handler message: %+v", msg)
+	default:
+		// Expected: no messages.
 	}
 }

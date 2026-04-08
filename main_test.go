@@ -97,6 +97,7 @@ func TestHandle_MethodNotAllowed(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
 		false, []string{"*"},
+		0, // sanityCheckInterval disabled
 	)
 	t.Cleanup(handler.Close)
 
@@ -115,6 +116,7 @@ func TestHandle_Options(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
 		false, []string{"*"},
+		0, // sanityCheckInterval disabled
 	)
 	t.Cleanup(handler.Close)
 	req := httptest.NewRequest("OPTIONS", "/get_token", nil)
@@ -130,6 +132,7 @@ func TestHandle_InvalidJSON(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
 		false, []string{"*"},
+		0, // sanityCheckInterval disabled
 	)
 	t.Cleanup(handler.Close)
 	req := httptest.NewRequest("POST", "/get_token", strings.NewReader("{invalid json}"))
@@ -144,6 +147,7 @@ func TestHandlePost(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true, []string{"example.com"},
+		0, // sanityCheckInterval disabled
 	)
 
 	var matrixServerName string
@@ -225,6 +229,7 @@ func TestLegacyHandlePost(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true, []string{"example.com"},
+		0, // sanityCheckInterval disabled
 	)
 
 	var matrixServerName string
@@ -302,6 +307,7 @@ func TestIsFullAccessUser(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true, []string{"example.com", "another.example.com"},
+		0, // sanityCheckInterval disabled
 	)
 	for _, tc := range []struct {
 		server string
@@ -357,6 +363,7 @@ func TestHandle_UnauthorizedUser(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
 		false, []string{"*"},
+		0, // sanityCheckInterval disabled
 	)
 	t.Cleanup(handler.Close)
 
@@ -597,6 +604,7 @@ func TestProcessSFURequest(t *testing.T) {
 			handler := NewHandler(
 				LiveKitAuth{key: apiKey, secret: "secret", lkUrl: "wss://lk.local:8080/foo"},
 				false, []string{"example.com"},
+				0, // sanityCheckInterval disabled
 			)
 			req := &SFURequest{
 				RoomID: "!room:example.com", SlotID: "slot",
@@ -663,6 +671,7 @@ func TestProcessLegacySFURequest(t *testing.T) {
 			handler := NewHandler(
 				LiveKitAuth{key: apiKey, secret: "secret", lkUrl: "wss://lk.local:8080/foo"},
 				false, []string{"example.com"},
+				0, // sanityCheckInterval disabled
 			)
 			req := &LegacySFURequest{
 				Room:        "!room:example.com",
@@ -702,7 +711,7 @@ func newTestMonitor(t *testing.T, alias LiveKitRoomAlias) (*LiveKitRoomMonitor, 
 
 	handlerCh := make(chan HandlerMessage, 10)
 	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
-	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias)
+	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias, 0)
 	go m.Loop()
 
 	t.Cleanup(func() { // runs first
@@ -804,7 +813,7 @@ func TestLiveKitRoomMonitor_RaceConditionStress(t *testing.T) {
 
 	alias := LiveKitRoomAlias("stress-room")
 	handlerCh := make(chan HandlerMessage, 100)
-	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, alias)
+	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, alias, 0)
 	go m.Loop()
 	t.Cleanup(func() {
 		if err := m.Close(); err != nil {
@@ -860,7 +869,7 @@ func TestLiveKitRoomMonitor_NoJobsLeftSignal(t *testing.T) {
 
 	alias := LiveKitRoomAlias("nojobsleft-room")
 	handlerCh := make(chan HandlerMessage, 5)
-	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, alias)
+	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, alias, 0)
 	go m.Loop()
 	t.Cleanup(func() {
 		if err := m.Close(); err != nil {
@@ -900,6 +909,7 @@ func TestHandler_Close(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost"},
 		false, []string{"*"},
+		0, // sanityCheckInterval disabled
 	)
 	done := make(chan struct{})
 	go func() { handler.Close(); close(done) }()
@@ -931,6 +941,7 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
+		0, // sanityCheckInterval disabled
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
@@ -965,6 +976,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
+		0, // sanityCheckInterval disabled
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
@@ -1042,6 +1054,7 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost"},
 		false, []string{"*"},
+		0, // sanityCheckInterval disabled
 	)
 	handler.Close() // shut down loop() so ctx is cancelled
 
@@ -1182,6 +1195,7 @@ func TestHandler_loop_AllMonitorsClosedOnShutdown(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
+		0, // sanityCheckInterval disabled
 	)
 
 	// Start three jobs in three different rooms → three monitors.
@@ -1234,6 +1248,7 @@ func TestHandler_loop_NoJobsLeft_MonitorFullyClosedBeforeHandlerClose(t *testing
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
+		0, // sanityCheckInterval disabled
 	)
 
 	room := LiveKitRoomAlias("nojobsleft-shutdown-room")
@@ -1302,6 +1317,7 @@ func TestHandler_loop_MonitorIdMismatch_NoDeadlock(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
+		0, // sanityCheckInterval disabled
 	)
 
 	room := LiveKitRoomAlias("mismatch-room")

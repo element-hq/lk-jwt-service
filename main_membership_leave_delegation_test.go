@@ -336,6 +336,7 @@ func newMembershipLeaveDelegationHandler(t *testing.T) *Handler {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false,
 		[]string{"example.com"},
+		0, // sanityCheckInterval disabled
 	)
 	t.Cleanup(handler.Close)
 	return handler

@@ -68,6 +68,10 @@ const (
 	WaitingStateTimedOut
 	SFUNotAvailable
 	JobReplaced
+	// SFUParticipantGone is emitted by the sanity-check phase of the
+	// participant-lookup goroutine when a Connected participant can no longer
+	// be found on the SFU — indicating a missed disconnect webhook.
+	SFUParticipantGone
 )
 
 func (s DelayedEventSignal) String() string {
@@ -92,6 +96,8 @@ func (s DelayedEventSignal) String() string {
 		return "SFUNotAvailable"
 	case JobReplaced:
 		return "JobReplaced"
+	case SFUParticipantGone:
+		return "SFUParticipantGone"
 	default:
 		return fmt.Sprintf("DelayedEventSignal(%d)", int(s))
 	}
@@ -312,6 +318,8 @@ func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) (stateChanged 
 		return job.handleEventWaitingStateTimedOut()
 	case SFUNotAvailable:
 		// noop
+	case SFUParticipantGone:
+		return job.handleEventSFUParticipantGone()
 	case JobReplaced:
 		job.state = Replaced
 		slog.Info("Job: → Replaced (JobReplaced)",
@@ -335,12 +343,14 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 			job.fsmTimerWaitingState.Stop()
 		}
 
-		// Start the delayed-event reset timer.
-		// The timer fires at 80 % of the original timeout so we have headroom
-		// to call Restart on the homeserver before the event is emitted.
-		restartDur := job.delayRestartDuration()
+		// Set up fsmTimerDelayedEvent so that handleEventDelayedEventReset can
+		// call timer.reset() on subsequent restarts.  The AfterFunc fires
+		// DelayedEventReset into the FSM when the restart interval elapses.
+		// We stop it immediately and trigger the first reset manually so the
+		// homeserver timer is synced right away — we don't know how long elapsed
+		// between token creation and the participant actually connecting.
 		job.fsmTimerDelayedEvent = newDelayedEventTimer(
-			job.DelayTimeout,
+			job.delayRestartDuration(),
 			func() {
 				select {
 				case job.EventChannel <- DelayedEventReset:
@@ -348,10 +358,6 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 				}
 			},
 		)
-		_ = restartDur // restartDur is used inside newDelayedEventTimer via closure — kept for clarity
-
-		// Immediately trigger a reset to sync the timer with the homeserver
-		// (we don't know how long we took between token creation and now).
 		job.fsmTimerDelayedEvent.stop()
 		select {
 		case job.EventChannel <- DelayedEventReset:
@@ -367,29 +373,19 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 		snapshotRemaining := remaining
 		snapshotEvent := event
 
-		// Notify the monitor immediately so it can proceed with teardown
-		// without waiting for the ActionSend HTTP call to complete.
-		// ActionSend runs concurrently and is a best-effort operation.
+		// ActionSend runs in a background goroutine so Loop() stays responsive.
+		// It retries with exponential backoff until snapshotRemaining elapses —
+		// this is the core of the delegation: we keep trying to send the leave
+		// event until the original delayed-event timeout would have fired anyway.
 		//
-		// Sending first also breaks the circular dependency:
-		//   monitor.Loop() receives → job.Cancel() → ActionSend goroutine exits
-		// If we sent after ActionSend, the monitor could never cancel the job
-		// context to unblock the goroutine. Deadlock.
-		select {
-		case job.monitorCh <- MonitorMessage{
-			LiveKitIdentity: job.LiveKitIdentity,
-			State:           Disconnected,
-			Event:           snapshotEvent,
-			JobId:           job.JobId,
-		}:
-		case <-job.ctx.Done():
-			// Context cancelled — monitor will clean up via teardown path.
-			return
-		}
-
-		// ActionSend is best-effort: fire and forget, bounded by job.ctx.
-		// The monitor has already been notified above, so this goroutine
-		// completing (or not) does not affect the job lifecycle.
+		// The monitor is notified AFTER ActionSend completes (or times out) so
+		// that job.ctx is NOT cancelled prematurely by monitor teardown.
+		// Cancelling job.ctx would abort ActionSend before the leave event is
+		// sent — defeating the purpose of the delegation.
+		//
+		// Teardown order:
+		//   ActionSend completes → monitorCh notified → monitor calls job.Cancel()
+		//   → job.Close() → resetWg.Wait() → Loop() exits cleanly.
 		job.resetWg.Add(1)
 		go func() {
 			defer job.resetWg.Done()
@@ -421,6 +417,21 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 				slog.Info("Job: ActionSend — delayed event already sent or cancelled",
 					"state", Disconnected, "event", snapshotEvent,
 					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
+			}
+
+			// Notify the monitor only after ActionSend has completed (or timed
+			// out).  This is intentional: the monitor must not cancel job.ctx
+			// before ActionSend finishes, or the leave event would never be sent.
+			select {
+			case job.monitorCh <- MonitorMessage{
+				LiveKitIdentity: job.LiveKitIdentity,
+				State:           Disconnected,
+				Event:           snapshotEvent,
+				JobId:           job.JobId,
+			}:
+			case <-job.ctx.Done():
+				// Context cancelled externally (e.g. handler shutdown) before
+				// ActionSend completed — teardown path handles cleanup.
 			}
 		}()
 
@@ -600,6 +611,17 @@ func (job *DelayedEventJob) handleEventWaitingStateTimedOut() bool {
 	return false
 }
 
+func (job *DelayedEventJob) handleEventSFUParticipantGone() bool {
+	if job.state == Connected {
+		job.state = Disconnected
+		slog.Info("Job: → Disconnected (SFUParticipantGone — missed disconnect webhook)",
+			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
+			"delayId", job.DelayId, "jobId", job.JobId)
+		return true
+	}
+	return false
+}
+
 // ── delayedEventTimer ────────────────────────────────────────────────────────
 
 // delayedEventTimer is a thin wrapper around time.Timer that also tracks the
@@ -682,6 +704,10 @@ type LiveKitRoomMonitor struct {
 	// handlerCommChan sends events to the owning Handler.
 	handlerCommChan chan HandlerMessage
 	lkAuth          *LiveKitAuth
+
+	// sanityCheckInterval is the period between re-checks of connected
+	// participants.  Zero disables the sanity check.
+	sanityCheckInterval time.Duration
 }
 
 // handoverRequest is the message sent through handoverCh to add a new job
@@ -701,18 +727,20 @@ func NewLiveKitRoomMonitor(
 	handlerCommChan chan HandlerMessage,
 	lkAuth *LiveKitAuth,
 	roomAlias LiveKitRoomAlias,
+	sanityCheckInterval time.Duration,
 ) *LiveKitRoomMonitor {
 	ctx, cancel := context.WithCancel(parentCtx)
 	m := &LiveKitRoomMonitor{
-		MonitorId:       NewUniqueID(),
-		RoomAlias:       roomAlias,
-		SFUCommChan:     make(chan SFUMessage, 100),
-		handoverCh:      make(chan handoverRequest),
-		ctx:             ctx,
-		cancel:          cancel,
-		done:            make(chan struct{}),
-		handlerCommChan: handlerCommChan,
-		lkAuth:          lkAuth,
+		MonitorId:           NewUniqueID(),
+		RoomAlias:           roomAlias,
+		SFUCommChan:         make(chan SFUMessage, 100),
+		handoverCh:          make(chan handoverRequest),
+		ctx:                 ctx,
+		cancel:              cancel,
+		done:                make(chan struct{}),
+		handlerCommChan:     handlerCommChan,
+		lkAuth:              lkAuth,
+		sanityCheckInterval: sanityCheckInterval,
 	}
 	slog.Info("LiveKitRoomMonitor: created", "room", roomAlias, "MonitorId", m.MonitorId)
 	return m
@@ -781,6 +809,8 @@ func (m *LiveKitRoomMonitor) Loop() {
 				job.EventChannel <- ParticipantDisconnectedIntentionally
 			case ParticipantConnectionAborted:
 				job.EventChannel <- ParticipantConnectionAborted
+			case SFUParticipantGone:
+				job.EventChannel <- SFUParticipantGone
 			default:
 				slog.Warn("RoomMonitor: unhandled SFU event type",
 					"room", m.RoomAlias, "lkId", event.LiveKitIdentity, "type", event.Type)
@@ -902,10 +932,19 @@ func (m *LiveKitRoomMonitor) Loop() {
 				// backgroundWg tracks this goroutine so teardown() can wait for it
 				// to exit before Loop() returns — preventing races on the global
 				// LiveKitParticipantLookup variable in tests.
+				//
+				// Note on connection overhead: lksdk.NewRoomServiceClient creates a
+				// lightweight struct (URL + credentials); the actual HTTP connection is
+				// established per-request and reused via Go's http.DefaultTransport
+				// connection pool.  A persistent connection would add complexity for
+				// negligible gain at the low lookup frequencies used here.
 				waitingDuration := min(time.Hour, job.DelayTimeout)
 				backgroundWg.Add(1)
-				go func(j *DelayedEventJob) {
+				go func(j *DelayedEventJob, sanityInterval time.Duration) {
 					defer backgroundWg.Done()
+
+					// ── Phase 1: initial lookup with exponential backoff ─────────
+					// Retry until the participant appears or the delay timeout expires.
 					expBackOff := backoff.NewExponentialBackOff()
 					expBackOff.InitialInterval = 1000 * time.Millisecond
 					expBackOff.Multiplier = 1.5
@@ -930,12 +969,47 @@ func (m *LiveKitRoomMonitor) Loop() {
 							"jobId", j.JobId, "err", err)
 						return
 					}
-					// Forward result via SFUCommChan — channel owned by Loop().
+					// Forward ParticipantLookupSuccessful via SFUCommChan.
 					select {
 					case m.SFUCommChan <- msg:
 					case <-j.ctx.Done():
+						return
 					}
-				}(job)
+
+					// ── Phase 2: periodic sanity check ──────────────────────────
+					// Only active when sanityCheckInterval > 0. Re-checks whether
+					// the participant is still present on the SFU at the configured
+					// interval, catching missed disconnect webhooks.
+					if sanityInterval == 0 {
+						return
+					}
+					ticker := time.NewTicker(sanityInterval)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-j.ctx.Done():
+							return
+						case <-ticker.C:
+							_, err := LiveKitParticipantLookup(j.ctx, *m.lkAuth, j.LiveKitRoom, j.LiveKitIdentity)
+							if err == nil {
+								// Still present — continue.
+								continue
+							}
+							if j.ctx.Err() != nil {
+								// Context cancelled concurrently — not a real gone event.
+								return
+							}
+							slog.Warn("RoomMonitor: sanity check: participant no longer on SFU",
+								"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
+								"jobId", j.JobId, "err", err)
+							select {
+							case m.SFUCommChan <- SFUMessage{Type: SFUParticipantGone, LiveKitIdentity: j.LiveKitIdentity}:
+							case <-j.ctx.Done():
+							}
+							return
+						}
+					}
+				}(job, m.sanityCheckInterval)
 
 			req.result <- handoverResult{jobId: job.JobId, ok: true}
 			slog.Info("RoomMonitor: job added",

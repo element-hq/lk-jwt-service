@@ -18,8 +18,9 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"strings"
 	"sync"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/MatusOllah/slogcolor"
@@ -57,6 +58,11 @@ type Config struct {
 	SkipVerifyTLS         bool
 	FullAccessHomeservers []string
 	LkJwtBind             string
+	// SanityCheckInterval is the period at which the participant-lookup
+	// goroutine re-checks whether a connected participant is still present on
+	// the SFU.  Zero (the default) disables the sanity check entirely.
+	// Configure via LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS (unit: seconds).
+	SanityCheckInterval   time.Duration
 }
 
 type MatrixRTCMemberType struct {
@@ -291,6 +297,9 @@ type Handler struct {
 	liveKitAuth           LiveKitAuth
 	fullAccessHomeservers []string
 	skipVerifyTLS         bool
+	// sanityCheckInterval is the period between re-checks of connected
+	// participants.  Zero disables the sanity check.
+	sanityCheckInterval time.Duration
 	// loopDone is closed when loop() has exited.
 	loopDone         chan struct{}
 	monitorCommChan  chan HandlerMessage
@@ -316,7 +325,7 @@ type sfuEventRequest struct {
 	msg       SFUMessage
 }
 
-func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string) *Handler {
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
 		ctx:                   ctx,
@@ -324,6 +333,7 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		liveKitAuth:           lkAuth,
 		skipVerifyTLS:         skipVerifyTLS,
 		fullAccessHomeservers: fullAccessHomeservers,
+		sanityCheckInterval:   sanityCheckInterval,
 		loopDone:              make(chan struct{}),
 		monitorCommChan:       make(chan HandlerMessage, 10),
 		addJobCh:              make(chan addJobRequest),
@@ -360,7 +370,7 @@ func (h *Handler) loop() {
 				return m
 			}
 		}
-		m := NewLiveKitRoomMonitor(h.ctx, h.monitorCommChan, &h.liveKitAuth, lkRoom)
+		m := NewLiveKitRoomMonitor(h.ctx, h.monitorCommChan, &h.liveKitAuth, lkRoom, h.sanityCheckInterval)
 		monitorWg.Add(1)
 		go func() {
 			defer monitorWg.Done()
@@ -429,7 +439,11 @@ func (h *Handler) loop() {
 				slog.Info("Handler: removing LiveKitRoomMonitor",
 					"room", event.RoomAlias, "MonitorId", m.MonitorId)
 				delete(monitors, event.RoomAlias)
-				// Close in a goroutine so loop() stays responsive.
+				// m.Loop() has already cancelled itself and called monitorWg.Done()
+				// before sending NoJobsLeft, so the monitorWg entry for this monitor
+				// is already settled.  Close() is called in a goroutine purely to
+				// avoid blocking loop() on the Close timeout — it does not need
+				// separate tracking.
 				go func(mon *LiveKitRoomMonitor) {
 					if err := mon.Close(); err != nil {
 						slog.Error("Handler: error closing monitor",
@@ -1006,6 +1020,16 @@ func parseConfig() (*Config, error) {
 		return nil, fmt.Errorf("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together")
 	}
 
+	var sanityCheckInterval time.Duration
+	if s := os.Getenv("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS"); s != "" {
+		if secs, err := strconv.Atoi(s); err != nil || secs <= 0 {
+			return nil, fmt.Errorf("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a positive integer, got %q", s)
+		} else {
+			sanityCheckInterval = time.Duration(secs) * time.Second
+			slog.Info("Sanity check enabled", "interval", sanityCheckInterval)
+		}
+	}
+
 	return &Config{
 		Key:                   key,
 		Secret:                secret,
@@ -1013,6 +1037,7 @@ func parseConfig() (*Config, error) {
 		SkipVerifyTLS:         skipVerifyTLS,
 		FullAccessHomeservers: strings.Fields(strings.ReplaceAll(fullAccessHomeservers, ",", " ")),
 		LkJwtBind:             lkJwtBind,
+		SanityCheckInterval:   sanityCheckInterval,
 	}, nil
 }
 
@@ -1036,6 +1061,7 @@ func main() {
 		},
 		config.SkipVerifyTLS,
 		config.FullAccessHomeservers,
+		config.SanityCheckInterval,
 	)
 
 	slog.Info("Starting service",
@@ -1045,6 +1071,7 @@ func main() {
 		"SkipVerifyTLS", config.SkipVerifyTLS,
 		"LiveKit key", config.Key,
 		"LiveKit secret", config.Secret,
+		"SanityCheckInterval", config.SanityCheckInterval,
 	)
 
 	log.Fatal(http.ListenAndServe(config.LkJwtBind, handler.prepareMux()))

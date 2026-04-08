@@ -10,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestReadKeySecret(t *testing.T) {
@@ -192,18 +193,53 @@ func TestParseConfig(t *testing.T) {
 			},
 			wantErrMsg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together",
 		},
+		{
+			name: "Sanity check interval configured",
+			env: map[string]string{
+				"LIVEKIT_KEY":                           "test_key",
+				"LIVEKIT_SECRET":                        "test_secret",
+				"LIVEKIT_URL":                           "wss://test.livekit.cloud",
+				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "30",
+			},
+			wantConfig: &Config{
+				Key:                   "test_key",
+				Secret:                "test_secret",
+				LkUrl:                 "wss://test.livekit.cloud",
+				FullAccessHomeservers: []string{"*"},
+				LkJwtBind:             ":8080",
+				SanityCheckInterval:   30 * time.Second,
+			},
+		},
+		{
+			name: "Sanity check interval invalid",
+			env: map[string]string{
+				"LIVEKIT_KEY":                           "test_key",
+				"LIVEKIT_SECRET":                        "test_secret",
+				"LIVEKIT_URL":                           "wss://test.livekit.cloud",
+				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "not-a-number",
+			},
+			wantErrMsg: `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a positive integer, got "not-a-number"`,
+		},
+		{
+			name: "Sanity check interval zero rejected",
+			env: map[string]string{
+				"LIVEKIT_KEY":                           "test_key",
+				"LIVEKIT_SECRET":                        "test_secret",
+				"LIVEKIT_URL":                           "wss://test.livekit.cloud",
+				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "0",
+			},
+			wantErrMsg: `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a positive integer, got "0"`,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Setup: set env variables
 			for k, v := range tc.env {
 				if err := os.Setenv(k, v); err != nil {
 					t.Fatalf("Failed to set environment variable %s: %v", k, err)
 				}
 			}
 			defer func() {
-				// Cleanup: reset env variables after test
 				for k := range tc.env {
 					if err := os.Unsetenv(k); err != nil {
 						t.Errorf("Failed to unset environment variable %s: %v", k, err)
@@ -211,10 +247,8 @@ func TestParseConfig(t *testing.T) {
 				}
 			}()
 
-			// parse config from env variables
 			got, err := parseConfig()
 
-			// Given error(s), check potential error messages
 			if tc.wantErrMsg != "" {
 				if err == nil {
 					t.Errorf("parseConfig() error = nil, wantErr %q", tc.wantErrMsg)
@@ -226,13 +260,11 @@ func TestParseConfig(t *testing.T) {
 				return
 			}
 
-			// Given no error, check for unexpected error messages
 			if err != nil {
 				t.Errorf("parseConfig() unexpected error: %v", err)
 				return
 			}
 
-			// Compare parsed (got) config with wanted config
 			if got.Key != tc.wantConfig.Key {
 				t.Errorf("Key = %q, want %q", got.Key, tc.wantConfig.Key)
 			}
@@ -250,6 +282,9 @@ func TestParseConfig(t *testing.T) {
 			}
 			if got.LkJwtBind != tc.wantConfig.LkJwtBind {
 				t.Errorf("JwtBind = %q, want %q", got.LkJwtBind, tc.wantConfig.LkJwtBind)
+			}
+			if got.SanityCheckInterval != tc.wantConfig.SanityCheckInterval {
+				t.Errorf("SanityCheckInterval = %v, want %v", got.SanityCheckInterval, tc.wantConfig.SanityCheckInterval)
 			}
 		})
 	}
