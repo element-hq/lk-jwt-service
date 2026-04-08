@@ -993,6 +993,9 @@ func (m *LiveKitRoomMonitor) Loop() {
 							_, err := LiveKitParticipantLookup(j.ctx, *m.lkAuth, j.LiveKitRoom, j.LiveKitIdentity)
 							if err == nil {
 								// Still present — continue.
+								slog.Debug("RoomMonitor: sanity check: participant still on SFU",
+									"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
+									"jobId", j.JobId)
 								continue
 							}
 							if j.ctx.Err() != nil {
