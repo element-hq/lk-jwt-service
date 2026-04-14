@@ -377,7 +377,7 @@ func TestGetJoinToken(t *testing.T) {
 	room := "testRoom"
 	identity := "testIdentity@example.com"
 	
-	tokenString, err := getJoinToken(apiKey, apiSecret, room, identity)
+	tokenString, err := getJoinToken(apiKey, apiSecret, room, identity, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -845,18 +845,6 @@ func TestMapSFURequestMemoryLeak(t *testing.T) {
 }
 
 func TestProcessSFURequest(t *testing.T) {
-    // mock createLiveKitRoom
-    var called_createLiveKitRoom bool
-	original_createLiveKitRoom := createLiveKitRoom
-    createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
-        called_createLiveKitRoom = true
-        if room == "" {
-            t.Error("expected room name passed into mock")
-        }
-        return nil
-    }
-    t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
-
     // mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool
 	var exchangeOpenIdUserInfo_MatrixID string
@@ -931,8 +919,6 @@ func TestProcessSFURequest(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// --- mock createLiveKitRoom ---
-			called_createLiveKitRoom = false
 			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
 			exchangeOpenIdUserInfo_MatrixID = tc.MatrixID
 
@@ -965,10 +951,6 @@ func TestProcessSFURequest(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if called_createLiveKitRoom != tc.expectCreateRoomCall {
-				t.Errorf("expected createLiveKitRoom called=%v, got %v", tc.expectCreateRoomCall, called_createLiveKitRoom)
-			}
-
 		})
 	}
 
@@ -976,18 +958,6 @@ func TestProcessSFURequest(t *testing.T) {
 }
 
 func TestProcessLegacySFURequest(t *testing.T) {
-    // mock createLiveKitRoom
-    var called_createLiveKitRoom bool
-	original_createLiveKitRoom := createLiveKitRoom
-    createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
-        called_createLiveKitRoom = true
-        if room == "" {
-            t.Error("expected room name passed into mock")
-        }
-        return nil
-    }
-    t.Cleanup(func() { createLiveKitRoom = original_createLiveKitRoom })
-
     // mock OpenID lookup
 	var failed_exchangeOpenIdUserInfo bool
     original_exchangeOpenIdUserInfo := exchangeOpenIdUserInfo
@@ -1047,8 +1017,6 @@ func TestProcessLegacySFURequest(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// --- mock createLiveKitRoom ---
-			called_createLiveKitRoom = false
 			failed_exchangeOpenIdUserInfo = tc.expectExchangeOpendIdError
 
 		    handler := &Handler{
@@ -1073,10 +1041,6 @@ func TestProcessLegacySFURequest(t *testing.T) {
 			}
 			if !tc.expectError && err != nil {
 				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if called_createLiveKitRoom != tc.expectCreateRoomCall {
-				t.Errorf("expected createLiveKitRoom called=%v, got %v", tc.expectCreateRoomCall, called_createLiveKitRoom)
 			}
 
 		})
