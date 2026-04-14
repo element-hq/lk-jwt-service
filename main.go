@@ -238,7 +238,13 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	// 
     // This change ensures compatibility with clients using pseudonymous livekit_aliases.
     slotId := "m.call#ROOM"
-    lkRoomAliasHash := sha256.Sum256([]byte(req.Room + "|" + slotId))
+
+    lkRoomAliasRawBytes, err := json.Marshal([]string{req.Room, slotId})
+    if err != nil {
+        panic("unreachable, probably")
+    }
+    lkRoomAliasRaw := string(lkRoomAliasRawBytes)
+    lkRoomAliasHash := sha256.Sum256([]byte(lkRoomAliasRaw))
     lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
     token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
     if err != nil {
@@ -293,11 +299,20 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
         map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
     )
 
-	lkIdentityRaw := userInfo.Sub + "|" + req.Member.ClaimedDeviceID + "|" + req.Member.ID
+	lkIdentityRawBytes, err := json.Marshal([]string{userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID})
+	if err != nil {
+		panic("unreachable, probably")
+	}
+	lkIdentityRaw := string(lkIdentityRawBytes)	
 	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
 	lkIdentity := unpaddedBase64.EncodeToString(lkIdentityHash[:])
 
-    lkRoomAliasHash := sha256.Sum256([]byte(req.RoomID + "|" + req.SlotID))
+	lkRoomAliasRawBytes, err := json.Marshal([]string{req.RoomID, req.SlotID})
+	if err != nil {
+		panic("unreachable, probably")
+	}
+	lkRoomAliasRaw := string(lkRoomAliasRawBytes)
+	lkRoomAliasHash := sha256.Sum256([]byte(lkRoomAliasRaw))
 	lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
 
     token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
