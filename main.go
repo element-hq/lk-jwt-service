@@ -889,6 +889,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 // (roomAlias, SFUMessage) pair.  Returns ok=false for event types that do
 // not require routing (e.g. room events, unknown types).
 func sfuEventFromWebhook(event *livekit.WebhookEvent) (LiveKitRoomAlias, SFUMessage, bool) {
+	// https://docs.livekit.io/intro/basics/rooms-participants-tracks/webhooks-events/#webhook-events
 	roomAlias := LiveKitRoomAlias(event.Room.Name)
 	switch event.Event {
 	case "participant_joined":
