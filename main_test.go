@@ -204,14 +204,24 @@ func TestHandlePost(t *testing.T) {
 			t.Fatalf("failed to parse claims from JWT: %v", err)
 		}
 
-		want_sub_hash := sha256.Sum256([]byte("@user:"+ matrixServerName + "|testDevice|member_test_id"))
+		want_sub_hash_raw_bytes, err := json.Marshal([]string{"@user:"+ matrixServerName, "testDevice", "member_test_id"})
+		if err != nil {
+			panic("unreachable, probably")
+		}
+		want_hash_sub_raw := string(want_sub_hash_raw_bytes)
+		want_sub_hash := sha256.Sum256([]byte(want_hash_sub_raw))
 		want_sub := unpaddedBase64.EncodeToString(want_sub_hash[:])
 		if claims["sub"] != want_sub {
 			t.Errorf("unexpected sub: got %v want %v", claims["sub"], "member_test_id")
 		}
 
 		// should have permission for the room
-		want_room_hash := sha256.Sum256([]byte("!testRoom:example.com" + "|" +  "m.call#ROOM"))
+		want_room_hash_raw_bytes, err := json.Marshal([]string{"!testRoom:example.com", "m.call#ROOM"})
+		if err != nil {
+			panic("unreachable, probably")
+		}
+		want_room_hash_raw := string(want_room_hash_raw_bytes)
+		want_room_hash := sha256.Sum256([]byte(want_room_hash_raw))
 		want_room := unpaddedBase64.EncodeToString(want_room_hash[:])
 		if claims["video"].(map[string]interface{})["room"] != want_room {
 			t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], want_room)
@@ -318,7 +328,12 @@ func TestLegacyHandlePost(t *testing.T) {
 		}
 
 		slotId := "m.call#ROOM"
-		lkRoomAliasHash := sha256.Sum256([]byte(matrixRoom + "|" + slotId))
+		lkRoomAliasRawBytes, err := json.Marshal([]string{matrixRoom, slotId})
+		if err != nil {
+			panic("unreachable, probably")
+		}
+		lkRoomAliasRaw := string(lkRoomAliasRawBytes)
+		lkRoomAliasHash := sha256.Sum256([]byte(lkRoomAliasRaw))
 		lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
 
 		// should have permission for the room
