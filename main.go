@@ -8,43 +8,63 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
-
+	"sync"
 	"time"
 
+	"github.com/MatusOllah/slogcolor"
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
-	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/livekit/protocol/webhook"
+	"github.com/mattn/go-isatty"
 
 	"github.com/matrix-org/gomatrix"
-	"github.com/matrix-org/gomatrixserverlib/fclient"
-	"github.com/matrix-org/gomatrixserverlib/spec"
 )
 
-type Handler struct {
-	key, secret, lkUrl    string
-	fullAccessHomeservers []string
-	skipVerifyTLS         bool
+type LiveKitAuth struct {
+	key          string
+	secret       string
+	authProvider *auth.SimpleKeyProvider
+	lkUrl        string
 }
+
+type RoomMonitorEvent int
+
+const (
+	NoJobsLeft RoomMonitorEvent = iota
+)
+
+type HandlerMessage struct {
+	RoomAlias LiveKitRoomAlias
+	Event     RoomMonitorEvent
+	MonitorId UniqueID
+}
+
 type Config struct {
 	Key                   string
 	Secret                string
 	LkUrl                 string
 	SkipVerifyTLS         bool
 	FullAccessHomeservers []string
-	LkJwtBind               string
+	LkJwtBind             string
+	// SanityCheckInterval is the period at which the participant-lookup
+	// goroutine re-checks whether a connected participant is still present on
+	// the SFU.  Zero (the default) disables the sanity check entirely.
+	// Configure via LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS (unit: seconds).
+	SanityCheckInterval   time.Duration
 }
+
 type MatrixRTCMemberType struct {
 	ID              string `json:"id"`
 	ClaimedUserID   string `json:"claimed_user_id"`
@@ -64,92 +84,168 @@ type LegacySFURequest struct {
 	DeviceID    string          `json:"device_id"`
 }
 
-type SFURequest struct {
-	RoomID         string              `json:"room_id"`
-	SlotID         string              `json:"slot_id"`
-	OpenIDToken    OpenIDTokenType     `json:"openid_token"`
-	Member         MatrixRTCMemberType `json:"member"`
-	DelayedEventID string              `json:"delayed_event_id"`
+type DelayedEventRequest struct {
+	DelayId         string
+	DelayTimeout    time.Duration
+	DelayCsApiUrl   string
+	LiveKitRoom     LiveKitRoomAlias
+	LiveKitIdentity LiveKitIdentity
 }
+
+type SFURequest struct {
+	RoomID        string              `json:"room_id"`
+	SlotID        string              `json:"slot_id"`
+	OpenIDToken   OpenIDTokenType     `json:"openid_token"`
+	Member        MatrixRTCMemberType `json:"member"`
+	DelayId       string              `json:"delay_id,omitempty"`
+	DelayTimeout  int                 `json:"delay_timeout,omitempty"`
+	DelayCsApiUrl string              `json:"delay_cs_api_url,omitempty"`
+}
+
 type SFUResponse struct {
 	URL string `json:"url"`
 	JWT string `json:"jwt"`
 }
 
+// MembershipLeaveDelegationRequest is the body of POST /membership_leave_delegation.
+// It is used when the client is already connected to the SFU and wants to
+// hand over the delayed disconnect event after the fact — i.e. no JWT is
+// needed and the LiveKit room already exists.
+//
+// All three delayed-event fields are mandatory (unlike SFURequest where they
+// are optional).  The participant is assumed to be already present on the SFU,
+// so the monitor will use the participant-lookup backoff to confirm presence
+// rather than waiting for the webhook (which has already fired).
+type MembershipLeaveDelegationRequest struct {
+	RoomID        string              `json:"room_id"`
+	SlotID        string              `json:"slot_id"`
+	OpenIDToken   OpenIDTokenType     `json:"openid_token"`
+	Member        MatrixRTCMemberType `json:"member"`
+	DelayId       string              `json:"delay_id"`
+	DelayTimeout  int                 `json:"delay_timeout"`
+	DelayCsApiUrl string              `json:"delay_cs_api_url"`
+}
+
+func (r *MembershipLeaveDelegationRequest) Validate() error {
+	if r.RoomID == "" || r.SlotID == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `room_id` or `slot_id`",
+		}
+	}
+	if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body `member` is missing `id`, `claimed_user_id` or `claimed_device_id`",
+		}
+	}
+	if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body `openid_token` is missing `access_token` or `matrix_server_name`",
+		}
+	}
+	if r.DelayId == "" || r.DelayTimeout <= 0 || r.DelayCsApiUrl == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `delay_id`, `delay_timeout` or `delay_cs_api_url`",
+		}
+	}
+	return nil
+}
+
 type MatrixErrorResponse struct {
 	Status  int
-	ErrCode string 
+	ErrCode string
 	Err     string
 }
 
 type ValidatableSFURequest interface {
-    Validate() error
+	Validate() error
 }
 
-var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
-
-func (e *MatrixErrorResponse) Error() string { 
-    return e.Err
+func (e *MatrixErrorResponse) Error() string {
+	return e.Err
 }
 
 func (r *SFURequest) Validate() error {
-    if r.RoomID == "" || r.SlotID == "" {
-		log.Printf("Missing room_id or slot_id: room_id='%s', slot_id='%s'", r.RoomID, r.SlotID)
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "The request body is missing `room_id` or `slot_id`",
-        }
-    }
-    if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
-        log.Printf("Missing member parameters: %+v", r.Member)
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "The request body `member` is missing a `id`, `claimed_user_id` or `claimed_device_id`",
-        }
-    }
-    if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
-		log.Printf("Missing OpenID token parameters: %+v", r.OpenIDToken)
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "The request body `openid_token` is missing a `access_token` or `matrix_server_name`",
-        }
-    }
-    return nil
+	if r.RoomID == "" || r.SlotID == "" {
+		slog.Error("Missing room_id or slot_id", "room_id", r.RoomID, "slot_id", r.SlotID)
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `room_id` or `slot_id`",
+		}
+	}
+	if r.Member.ID == "" || r.Member.ClaimedUserID == "" || r.Member.ClaimedDeviceID == "" {
+		slog.Error("Handler -> SFURequest: Missing member parameters", "Member", r.Member)
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body `member` is missing a `id`, `claimed_user_id` or `claimed_device_id`",
+		}
+	}
+	if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
+		slog.Error("Handler -> SFURequest: Missing OpenID token parameters:", "OpenIDToken", r.OpenIDToken)
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body `openid_token` is missing a `access_token` or `matrix_server_name`",
+		}
+	}
+
+	allDelayedEventParamsPresent := r.DelayId != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
+	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
+	if atLeastOneDelayedEventParamPresent && !allDelayedEventParamsPresent {
+		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
+			"DelayId", r.DelayId,
+			"DelayTimeout", r.DelayTimeout,
+			"DelayCsApiUrl", r.DelayCsApiUrl,
+		)
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `delay_id`, `delay_timeout` or `delay_cs_api_url`",
+		}
+	}
+
+	return nil
 }
 
 func (r *LegacySFURequest) Validate() error {
-    if r.Room == "" {
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "Missing room parameter",
-        }
-    }
-    if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
-        return &MatrixErrorResponse{
-            Status:  http.StatusBadRequest,
-            ErrCode: "M_BAD_JSON",
-            Err:     "Missing OpenID token parameters",
-        }
-    }
-    return nil
+	if r.Room == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Missing room parameter",
+		}
+	}
+	if r.OpenIDToken.AccessToken == "" || r.OpenIDToken.MatrixServerName == "" {
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Missing OpenID token parameters",
+		}
+	}
+	return nil
 }
 
 // writeMatrixError writes a Matrix-style error response to the HTTP response writer.
 func writeMatrixError(w http.ResponseWriter, status int, errCode string, errMsg string) {
-    w.WriteHeader(status)
-    if err := json.NewEncoder(w).Encode(gomatrix.RespError{
-        ErrCode: errCode,
-        Err:     errMsg,
-    }); err != nil {
-        log.Printf("failed to encode json error message! %v", err)
-    }
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(gomatrix.RespError{
+		ErrCode: errCode,
+		Err:     errMsg,
+	}); err != nil {
+		slog.Error("Handler: failed to encode json error message!", "err", err)
+	}
 }
 
-func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
+func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identity LiveKitIdentity) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
@@ -159,39 +255,237 @@ func getJoinToken(apiKey, apiSecret, room, identity string) (string, error) {
 		RoomCreate:   false,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
-		Room:         room,
+		Room:         string(room),
 	}
 
 	at.SetVideoGrant(grant).
-		SetIdentity(identity).
+		SetIdentity(string(identity)).
 		SetValidFor(time.Hour)
 
 	return at.ToJWT()
 }
 
-var exchangeOpenIdUserInfo = func(
-	ctx context.Context, token OpenIDTokenType, skipVerifyTLS bool,
-) (*fclient.UserInfo, error) {
-	if token.AccessToken == "" || token.MatrixServerName == "" {
-		return nil, errors.New("missing parameters in openid token")
+// ── Handler ──────────────────────────────────────────────────────────────────
+
+// Handler is the top-level HTTP handler.
+//
+// # Concurrency model
+//
+// Handler.loop() is the single goroutine that owns the liveKitRoomMonitors
+// map — no mutex needed.  HTTP handler goroutines communicate with loop()
+// exclusively through channels:
+//
+//   - addJobCh:      deliver a new DelayedEventRequest to loop(), which
+//                    creates/reuses a monitor and calls HandoverJob atomically.
+//   - sfuEventCh:    deliver an SFU webhook event to loop(), which routes it
+//                    to the correct monitor.
+//   - monitorCommChan: monitors send NoJobsLeft back to loop() for cleanup.
+//
+// Because all map mutations happen in a single goroutine there are no data
+// races and no mutex is required.
+//
+// # Atomicity of job handover
+//
+// loop() performs both steps atomically: it looks up (or creates) the
+// monitor and calls HandoverJob in the same iteration, with no opportunity
+// for the monitor to be removed in between.
+type Handler struct {
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	liveKitAuth           LiveKitAuth
+	fullAccessHomeservers []string
+	skipVerifyTLS         bool
+	// sanityCheckInterval is the period between re-checks of connected
+	// participants.  Zero disables the sanity check.
+	sanityCheckInterval time.Duration
+	// loopDone is closed when loop() has exited.
+	loopDone         chan struct{}
+	monitorCommChan  chan HandlerMessage
+	addJobCh         chan addJobRequest
+	sfuEventCh       chan sfuEventRequest
+}
+
+// addJobRequest is sent by HTTP handlers to loop() to add a delayed-event job.
+type addJobRequest struct {
+	jobRequest *DelayedEventRequest
+	// result receives the outcome; buffered so loop() never blocks.
+	result chan addJobResult
+}
+
+type addJobResult struct {
+	jobId UniqueID
+	ok    bool
+}
+
+// sfuEventRequest is sent by handleSfuWebhook to loop() for routing.
+type sfuEventRequest struct {
+	roomAlias LiveKitRoomAlias
+	msg       SFUMessage
+}
+
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration) *Handler {
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &Handler{
+		ctx:                   ctx,
+		cancel:                cancel,
+		liveKitAuth:           lkAuth,
+		skipVerifyTLS:         skipVerifyTLS,
+		fullAccessHomeservers: fullAccessHomeservers,
+		sanityCheckInterval:   sanityCheckInterval,
+		loopDone:              make(chan struct{}),
+		monitorCommChan:       make(chan HandlerMessage, 10),
+		addJobCh:              make(chan addJobRequest),
+		sfuEventCh:            make(chan sfuEventRequest, 200),
+	}
+	go h.loop()
+	return h
+}
+
+// loop is the sole owner of liveKitRoomMonitors — no locking needed.
+func (h *Handler) loop() {
+	defer close(h.loopDone)
+
+	// The map lives entirely inside this goroutine.
+	monitors := make(map[LiveKitRoomAlias]*LiveKitRoomMonitor)
+
+	// monitorWg tracks all monitors started by loop() so that when loop()
+	// exits it can wait for every monitor (and its lookup goroutines) to
+	// finish before returning.  This ensures that background goroutines no
+	// longer read global variables (e.g. LiveKitParticipantLookup) by the
+	// time tests restore them.
+	var monitorWg sync.WaitGroup
+
+	// acquireMonitor returns the live monitor for a room, creating one if
+	// needed.  Called only from within loop().
+	acquireMonitor := func(lkRoom LiveKitRoomAlias) *LiveKitRoomMonitor {
+		if m, ok := monitors[lkRoom]; ok {
+			select {
+			case <-m.ctx.Done():
+				// Monitor is shutting down — replace it.
+				slog.Info("Handler: replacing shutting-down monitor",
+					"room", lkRoom, "MonitorId", m.MonitorId)
+			default:
+				return m
+			}
+		}
+		m := NewLiveKitRoomMonitor(h.ctx, h.monitorCommChan, &h.liveKitAuth, lkRoom, h.sanityCheckInterval)
+		monitorWg.Add(1)
+		go func() {
+			defer monitorWg.Done()
+			m.Loop()
+		}()
+		monitors[lkRoom] = m
+		slog.Debug("Handler: created LiveKitRoomMonitor",
+			"room", lkRoom, "MonitorId", m.MonitorId)
+		return m
 	}
 
-	if skipVerifyTLS {
-		log.Printf("!!! WARNING !!! Skipping TLS verification for matrix client connection to %s", token.MatrixServerName)
-		// Disable TLS verification on the default HTTP Transport for the well-known lookup
-		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	}
-	client := fclient.NewClient(fclient.WithWellKnownSRVLookups(true), fclient.WithSkipVerify(skipVerifyTLS))
+	for {
+		select {
+		case <-h.ctx.Done():
+			slog.Debug("Handler: loop exiting")
+			// Close all remaining monitors and wait for them — and their
+			// lookup goroutines — to finish before loop() returns.  This
+			// prevents background goroutines from reading global function
+			// variables (e.g. LiveKitParticipantLookup) after tests have
+			// restored them.
+			for _, m := range monitors {
+				if err := m.Close(); err != nil {
+					slog.Error("Handler: error closing monitor on shutdown",
+						"room", m.RoomAlias, "MonitorId", m.MonitorId, "err", err)
+				}
+			}
+			monitorWg.Wait()
+			return
 
-	// validate the openid token by getting the user's ID
-	userinfo, err := client.LookupUserInfo(
-		ctx, spec.ServerName(token.MatrixServerName), token.AccessToken,
-	)
-	if err != nil {
-		log.Printf("Failed to look up user info: %v", err)
-		return nil, errors.New("failed to look up user info")
+		// ── job handover (atomic: lookup + HandoverJob in one step) ──────────
+		case req := <-h.addJobCh:
+			m := acquireMonitor(req.jobRequest.LiveKitRoom)
+			jobId, ok := m.HandoverJob(req.jobRequest)
+			if !ok {
+				slog.Error("Handler: HandoverJob failed",
+					"room", req.jobRequest.LiveKitRoom,
+					"lkId", req.jobRequest.LiveKitIdentity)
+			}
+			req.result <- addJobResult{jobId: jobId, ok: ok}
+
+		// ── SFU webhook routing ──────────────────────────────────────────────
+		case ev := <-h.sfuEventCh:
+			if m, ok := monitors[ev.roomAlias]; ok {
+				select {
+				case m.SFUCommChan <- ev.msg:
+				case <-m.ctx.Done():
+					// Monitor shutting down; event can be dropped safely.
+				}
+			}
+
+		// ── monitor lifecycle ────────────────────────────────────────────────
+		case event := <-h.monitorCommChan:
+			switch event.Event {
+			case NoJobsLeft:
+				m, ok := monitors[event.RoomAlias]
+				if !ok {
+					break
+				}
+				if m.MonitorId != event.MonitorId {
+					slog.Error("Handler: MonitorId mismatch on NoJobsLeft — ignoring",
+						"room", event.RoomAlias,
+						"mapMonitorId", m.MonitorId,
+						"eventMonitorId", event.MonitorId)
+					break
+				}
+				slog.Info("Handler: removing LiveKitRoomMonitor",
+					"room", event.RoomAlias, "MonitorId", m.MonitorId)
+				delete(monitors, event.RoomAlias)
+				// m.Loop() has already cancelled itself and called monitorWg.Done()
+				// before sending NoJobsLeft, so the monitorWg entry for this monitor
+				// is already settled.  Close() is called in a goroutine purely to
+				// avoid blocking loop() on the Close timeout — it does not need
+				// separate tracking.
+				go func(mon *LiveKitRoomMonitor) {
+					if err := mon.Close(); err != nil {
+						slog.Error("Handler: error closing monitor",
+							"room", event.RoomAlias, "MonitorId", mon.MonitorId, "err", err)
+					}
+				}(m)
+			}
+		}
 	}
-	return &userinfo, nil
+}
+
+// Close shuts down the handler and waits for loop() to exit.
+func (h *Handler) Close() {
+	h.cancel()
+	select {
+	case <-h.loopDone:
+	case <-time.After(10 * time.Second):
+		slog.Warn("Handler: Close() timed out")
+	}
+}
+
+// addDelayedEventJob sends a job request to loop() and waits for the result.
+// loop() performs the monitor lookup and HandoverJob atomically.
+func (h *Handler) addDelayedEventJob(jobRequest *DelayedEventRequest) {
+	slog.Debug("Handler: adding delayed event job",
+		"room", jobRequest.LiveKitRoom,
+		"lkId", jobRequest.LiveKitIdentity,
+		"DelayId", jobRequest.DelayId)
+
+	result := make(chan addJobResult, 1)
+	select {
+	case h.addJobCh <- addJobRequest{jobRequest: jobRequest, result: result}:
+	case <-h.ctx.Done():
+		slog.Warn("Handler: addDelayedEventJob called after shutdown",
+			"room", jobRequest.LiveKitRoom)
+		return
+	}
+	res := <-result
+	if !res.ok {
+		slog.Error("Handler: job handover failed",
+			"room", jobRequest.LiveKitRoom,
+			"lkId", jobRequest.LiveKitIdentity,
+			"jobId", res.jobId)
+	}
 }
 
 func (h *Handler) isFullAccessUser(matrixServerName string) bool {
@@ -205,266 +499,336 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 }
 
 func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
-	// Note LegacySFURequest has already been validated at this point
-	
-    userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
-    if err != nil {
+	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	if err != nil {
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusInternalServerError,
+			Status:  http.StatusInternalServerError,
 			ErrCode: "M_LOOKUP_FAILED",
-			Err: "Failed to look up user info from homeserver",
+			Err:     "Failed to look up user info from homeserver",
 		}
-    }
+	}
 
-    isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
+	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
 
-    log.Printf(
-        "Got Matrix user info for %s (%s)",
-        userInfo.Sub,
-        map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
-    )
+	slog.Debug("Handler: got Matrix user info",
+		"userInfo.Sub", userInfo.Sub,
+		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser])
 
-    // TODO: is DeviceID required? If so then we should have validated at the start
-    lkIdentity := userInfo.Sub + ":" + req.DeviceID
-    
-	// We can hard-code the slotId since for the m.call application only the m.call#ROOM slot is defined. 
-	// This ensures that the same LiveKit room alias being derived for the same Matrix room for both the 
-	// LegacySFURequest (/sfu/get endpoint) and the SFURequest (/get_token endpoint). 
-    // 
-	// Note a mismatch between the legacy livekit_alias (which is the Matrix roomId) field in the MatrixRTC 
-	// membership state event and the actual lkRoomAlias (as derived below and used on the SFU) which is 
-	// part of the LiveKit JWT Token does in general NOT confuse clients as the JWT token is passed as is
-	// to the livekit-client SDK.
-	// 
-    // This change ensures compatibility with clients using pseudonymous livekit_aliases.
-    slotId := "m.call#ROOM"
+	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
+	slotId := "m.call#ROOM"
+	lkRoomAlias := CreateLiveKitRoomAlias(req.Room, slotId)
 
-    lkRoomAliasRawBytes, err := json.Marshal([]string{req.Room, slotId})
-    if err != nil {
-        panic("unreachable, probably")
-    }
-    lkRoomAliasRaw := string(lkRoomAliasRawBytes)
-    lkRoomAliasHash := sha256.Sum256([]byte(lkRoomAliasRaw))
-    lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
-    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
-    if err != nil {
+	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
+	if err != nil {
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusInternalServerError,
+			Status:  http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
-			Err: "Internal Server Error",
+			Err:     "Internal Server Error",
 		}
-    }
+	}
 
-    if isFullAccessUser {
-        if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+	if isFullAccessUser {
+		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
-				Status: http.StatusInternalServerError,
+				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
-				Err: "Unable to create room on SFU",
+				Err:     "Unable to create room on SFU",
 			}
-        }
-    }
+		}
+	}
 
-    return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
+	slog.Info("Handler: generated Legacy SFU access token",
+		"matrixId", userInfo.Sub,
+		"ClaimedDeviceID", req.DeviceID,
+		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
+		"MatrixRoom", req.Room,
+		"lkId", lkIdentity,
+		"room", lkRoomAlias,
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
+	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
 func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
-	// Note SFURequest has already been validated at this point
-	
-    userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
-    if err != nil {
+	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	if err != nil {
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusUnauthorized,
+			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
-			Err: "The request could not be authorised.",
+			Err:     "The request could not be authorised.",
 		}
-    }
+	}
 
-	// Check if validated userInfo.Sub matches req.Member.ClaimedUserID
 	if req.Member.ClaimedUserID != userInfo.Sub {
-		log.Printf("Claimed user ID %s does not match token subject %s", req.Member.ClaimedUserID, userInfo.Sub)
+		slog.Warn("Handler: ClaimedUserID does not match token subject",
+			"ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusUnauthorized,
+			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
-			Err: "The request could not be authorised.",
+			Err:     "The request could not be authorised.",
 		}
 	}
 
-	// Does the user belong to homeservers granted full access
-    isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
+	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
+	delayedEventDelegationRequested := req.DelayId != ""
 
-    log.Printf(
-        "Got Matrix user info for %s (%s)",
-        userInfo.Sub,
-        map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser],
-    )
-
-	lkIdentityRawBytes, err := json.Marshal([]string{userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID})
-	if err != nil {
-		panic("unreachable, probably")
-	}
-	lkIdentityRaw := string(lkIdentityRawBytes)	
-	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
-	lkIdentity := unpaddedBase64.EncodeToString(lkIdentityHash[:])
-
-	lkRoomAliasRawBytes, err := json.Marshal([]string{req.RoomID, req.SlotID})
-	if err != nil {
-		panic("unreachable, probably")
-	}
-	lkRoomAliasRaw := string(lkRoomAliasRawBytes)
-	lkRoomAliasHash := sha256.Sum256([]byte(lkRoomAliasRaw))
-	lkRoomAlias := unpaddedBase64.EncodeToString(lkRoomAliasHash[:])
-
-    token, err := getJoinToken(h.key, h.secret, lkRoomAlias, lkIdentity)
-    if err != nil {
-		log.Printf("Error getting LiveKit token: %v", err)
+	if delayedEventDelegationRequested && !isFullAccessUser {
 		return nil, &MatrixErrorResponse{
-			Status: http.StatusInternalServerError,
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Delegation of delayed events is only supported for full access users",
+		}
+	}
+
+	slog.Debug("Handler: got Matrix user info",
+		"userInfo.Sub", userInfo.Sub,
+		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser])
+
+	lkIdentity := CreateLiveKitIdentity(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
+	lkRoomAlias := CreateLiveKitRoomAlias(req.RoomID, req.SlotID)
+
+	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
+	if err != nil {
+		slog.Error("Handler: error getting LiveKit token", "userInfo.Sub", userInfo.Sub, "err", err)
+		return nil, &MatrixErrorResponse{
+			Status:  http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
-			Err: "Internal Server Error",
+			Err:     "Internal Server Error",
 		}
-    }
+	}
 
-    if isFullAccessUser {
-        if err := createLiveKitRoom(r.Context(), h, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+	if isFullAccessUser {
+		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
-				Status: http.StatusInternalServerError,
+				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
-				Err: "Unable to create room on SFU",
+				Err:     "Unable to create room on SFU",
 			}
-        }
-    }
+		}
 
-    return &SFUResponse{URL: h.lkUrl, JWT: token}, nil
-}
-
-var createLiveKitRoom = func(ctx context.Context, h *Handler, room, matrixUser, lkIdentity string) error {
-    roomClient := lksdk.NewRoomServiceClient(h.lkUrl, h.key, h.secret)
-    creationStart := time.Now().Unix()
-    lkRoom, err := roomClient.CreateRoom(
-        ctx,
-        &livekit.CreateRoomRequest{
-            Name:             room,
-            EmptyTimeout:     5 * 60, // 5 Minutes to keep the room open if no one joins
-            DepartureTimeout: 20,     // number of seconds to keep the room after everyone leaves
-            MaxParticipants:  0,      // 0 == no limitation
-        },
-    )
-
-    if err != nil {
-        return fmt.Errorf("unable to create room %s: %w", room, err)
-    }
-
-    // Log the room creation time and the user info
-    isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
-    log.Printf(
-        "%s LiveKit room sid: %s (alias: %s) for full-access Matrix user %s (LiveKit identity: %s)",
-        map[bool]string{true: "Created", false: "Using"}[isNewRoom],
-        lkRoom.Sid, room, matrixUser, lkIdentity,
-    )
-
-    return nil
-}
-
-func (h *Handler) prepareMux() *http.ServeMux {
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/sfu/get", h.handle_legacy) // TODO: This is deprecated and will be removed in future versions
- 	mux.HandleFunc("/get_token", h.handle)
-	mux.HandleFunc("/healthz", h.healthcheck)
-
-	return mux
-}
-
-func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Health check from %s", r.RemoteAddr)
-
-	if r.Method == "GET" || r.Method == "HEAD" {
-		w.WriteHeader(http.StatusOK)
-		return
-	} else {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}
-}
-
-// TODO: This is deprecated and will be removed in future versions
-func mapSFURequest(data *[]byte) (any, error) {
-	requestTypes := []ValidatableSFURequest{&LegacySFURequest{}, &SFURequest{}}
-	for _, req := range requestTypes {
-		decoder := json.NewDecoder(strings.NewReader(string(*data)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(req); err == nil {
-            if err := req.Validate(); err != nil {
-                return nil, err
-            }			
-			return req, nil
+		if delayedEventDelegationRequested {
+			slog.Info("Handler: scheduling delayed event job",
+				"room", lkRoomAlias, "lkId", lkIdentity,
+				"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
+			h.addDelayedEventJob(&DelayedEventRequest{
+				DelayCsApiUrl:   req.DelayCsApiUrl,
+				DelayId:         req.DelayId,
+				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
+				LiveKitRoom:     lkRoomAlias,
+				LiveKitIdentity: lkIdentity,
+			})
 		}
 	}
 
-	return nil, &MatrixErrorResponse{
-		Status: http.StatusBadRequest,
-		ErrCode: "M_BAD_JSON",
-		Err: "The request body was malformed, missing required fields, or contained invalid values (e.g. missing `room_id`, `slot_id`, or `openid_token`).",
-	}
+	slog.Info("Handler: generated SFU access token",
+		"matrixId", userInfo.Sub,
+		"ClaimedDeviceID", req.Member.ClaimedDeviceID,
+		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
+		"MatrixRoom", req.RoomID,
+		"MatrixRTCSlot", req.SlotID,
+		"lkId", lkIdentity,
+		"room", lkRoomAlias,
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
+	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
-// TODO: This is deprecated and will be removed in future versions
-func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
+// processMembershipLeaveDelegation handles the /membership_leave_delegation endpoint.
+//
+// Unlike processSFURequest it:
+//   - Does NOT issue a JWT (the client is already connected to the SFU).
+//   - Does NOT call CreateLiveKitRoom (the room already exists).
+//   - Requires all three delayed-event parameters (they are mandatory here).
+//
+// The participant is assumed to be already present on the SFU.  The
+// LiveKitRoomMonitor will use its participant-lookup backoff to confirm
+// presence, which covers the case where the SFU webhook has already fired
+// before this request arrived.
+func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *MembershipLeaveDelegationRequest) error {
+	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	if err != nil {
+		return &MatrixErrorResponse{
+			Status:  http.StatusUnauthorized,
+			ErrCode: "M_UNAUTHORIZED",
+			Err:     "The request could not be authorised.",
+		}
+	}
 
+	if req.Member.ClaimedUserID != userInfo.Sub {
+		slog.Warn("Handler: membership_leave_delegation: ClaimedUserID does not match token subject",
+			"ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
+		return &MatrixErrorResponse{
+			Status:  http.StatusUnauthorized,
+			ErrCode: "M_UNAUTHORIZED",
+			Err:     "The request could not be authorised.",
+		}
+	}
+
+	// Delayed event delegation is restricted to full-access homeservers.
+	if !h.isFullAccessUser(req.OpenIDToken.MatrixServerName) {
+		return &MatrixErrorResponse{
+			Status:  http.StatusForbidden,
+			ErrCode: "M_FORBIDDEN",
+			Err:     "Delegation of delayed events is only supported for full access users",
+		}
+	}
+
+	lkIdentity := CreateLiveKitIdentity(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
+	lkRoomAlias := CreateLiveKitRoomAlias(req.RoomID, req.SlotID)
+
+	slog.Info("Handler: scheduling delayed event job (membership_leave_delegation)",
+		"room", lkRoomAlias, "lkId", lkIdentity,
+		"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl,
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
+	h.addDelayedEventJob(&DelayedEventRequest{
+		DelayCsApiUrl:   req.DelayCsApiUrl,
+		DelayId:         req.DelayId,
+		DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
+		LiveKitRoom:     lkRoomAlias,
+		LiveKitIdentity: lkIdentity,
+	})
+
+	return nil
+}
+
+func (h *Handler) handleMembershipLeaveDelegation(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-
-	// Set the CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST")
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
 	switch r.Method {
 	case "OPTIONS":
-		// Handle preflight request (CORS)
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
-		// Read request body once for later JSON parsing
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("Error reading request body: %v", err)
+		slog.Debug("Handler: membership_leave_delegation request",
+			"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
+		var req MembershipLeaveDelegationRequest
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			slog.Error("Handler: membership_leave_delegation: error reading body",
+				"RemoteAddr", r.RemoteAddr, "err", err)
 			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
 			return
 		}
 
-		var sfuAccessResponse *SFUResponse
+		if err := req.Validate(); err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+			}
+			return
+		}
+
+		if err := h.processMembershipLeaveDelegation(r, &req); err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
+			}
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) prepareMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sfu/get", h.handle_legacy) // TODO: deprecated
+	mux.HandleFunc("/get_token", h.handle)
+	mux.HandleFunc("/membership_leave_delegation", h.handleMembershipLeaveDelegation)
+	mux.HandleFunc("/sfu_webhook", h.handleSfuWebhook)
+	mux.HandleFunc("/healthz", h.healthcheck)
+	return mux
+}
+
+func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
+	slog.Info("Handler: health check", "RemoteAddr", r.RemoteAddr)
+
+	if r.Method == "GET" || r.Method == "HEAD" {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// TODO: deprecated
+func mapSFURequest(data *[]byte) (any, error) {
+	requestTypes := []ValidatableSFURequest{&LegacySFURequest{}, &SFURequest{}}
+	for _, req := range requestTypes {
+		decoder := json.NewDecoder(strings.NewReader(string(*data)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(req); err == nil {
+			if err := req.Validate(); err != nil {
+				return nil, err
+			}
+			return req, nil
+		}
+	}
+	return nil, &MatrixErrorResponse{
+		Status:  http.StatusBadRequest,
+		ErrCode: "M_BAD_JSON",
+		Err:     "The request body was malformed, missing required fields, or contained invalid values.",
+	}
+}
+
+// TODO: deprecated
+func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("Handler (legacy): new request",
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
+
+	switch r.Method {
+	case "OPTIONS":
+		w.WriteHeader(http.StatusOK)
+		return
+	case "POST":
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			slog.Error("Handler (legacy): error reading body",
+				"RemoteAddr", r.RemoteAddr, "err", err)
+			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
+			return
+		}
 
 		sfuAccessRequest, err := mapSFURequest(&body)
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				log.Printf("Error processing request: %v", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-				return
 			}
+			return
 		}
-		
+
+		var sfuAccessResponse *SFUResponse
 		switch sfuReq := sfuAccessRequest.(type) {
 		case *SFURequest:
-			log.Printf("Processing SFU request")
 			sfuAccessResponse, err = h.processSFURequest(r, sfuReq)
 		case *LegacySFURequest:
-			log.Printf("Processing legacy SFU request")
 			sfuAccessResponse, err = h.processLegacySFURequest(r, sfuReq)
 		}
 
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				log.Printf("Error processing request: %v", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-				return
 			}
+			return
 		}
 
 		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-			log.Printf("failed to encode json response! %v", err)
+			slog.Error("Handler (legacy): failed to encode response",
+				"RemoteAddr", r.RemoteAddr, "err", err)
 		}
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -472,154 +836,201 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Request from %s at \"%s\"", r.RemoteAddr, r.Header.Get("Origin"))
-
 	w.Header().Set("Content-Type", "application/json")
-
-	// Set the CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST")
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
 
-	// Handle preflight request (CORS)
 	switch r.Method {
 	case "OPTIONS":
+		slog.Debug("Handler: preflight", "RemoteAddr", r.RemoteAddr)
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
+		slog.Debug("Handler: new request", "RemoteAddr", r.RemoteAddr)
 		var sfuAccessRequest SFURequest
 
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&sfuAccessRequest); err == nil {
-			if err := sfuAccessRequest.Validate(); err != nil {
-				matrixErr := &MatrixErrorResponse{}
-				if errors.As(err, &matrixErr) {
-					log.Printf("Error processing request: %v", matrixErr.Err)
-					writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-					return
-				}
+		if err := decoder.Decode(&sfuAccessRequest); err != nil {
+			slog.Error("Handler: error reading body",
+				"RemoteAddr", r.RemoteAddr, "err", err)
+			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
+			return
+		}
+
+		if err := sfuAccessRequest.Validate(); err != nil {
+			matrixErr := &MatrixErrorResponse{}
+			if errors.As(err, &matrixErr) {
+				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
 			}
-		} else {
-            log.Printf("Error reading request body: %v", err)
-            writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
-            return
-        }			
+			return
+		}
 
-		log.Printf("Processing SFU request")
 		sfuAccessResponse, err := h.processSFURequest(r, &sfuAccessRequest)
-
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
-				log.Printf("Error processing request: %v", matrixErr.Err)
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-				return
 			}
+			return
 		}
 
 		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-			log.Printf("failed to encode json response! %v", err)
+			slog.Error("Handler: failed to encode response",
+				"RemoteAddr", r.RemoteAddr, "err", err)
 		}
-
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
+// sfuEventFromWebhook translates a validated LiveKit webhook event into an
+// (roomAlias, SFUMessage) pair.  Returns ok=false for event types that do
+// not require routing (e.g. room events, unknown types).
+func sfuEventFromWebhook(event *livekit.WebhookEvent) (LiveKitRoomAlias, SFUMessage, bool) {
+	// https://docs.livekit.io/intro/basics/rooms-participants-tracks/webhooks-events/#webhook-events
+	roomAlias := LiveKitRoomAlias(event.Room.Name)
+	switch event.Event {
+	case "participant_joined":
+		slog.Debug("Handler: SFU participant joined",
+			"lkId", event.Participant.Identity, "room", event.Room.Name)
+		return roomAlias, SFUMessage{
+			Type:            ParticipantConnected,
+			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+		}, true
+
+	case "participant_left", "participant_connection_aborted":
+		msgType := ParticipantConnectionAborted
+		if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
+			msgType = ParticipantDisconnectedIntentionally
+		}
+		slog.Debug("Handler: SFU participant left",
+			"lkId", event.Participant.Identity, "room", event.Room.Name,
+			"DisconnectReason", event.Participant.DisconnectReason)
+		return roomAlias, SFUMessage{
+			Type:            msgType,
+			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
+		}, true
+
+	default:
+		return "", SFUMessage{}, false
+	}
+}
+
+func (h *Handler) handleSfuWebhook(w http.ResponseWriter, r *http.Request) {
+	event, err := webhook.ReceiveWebhookEvent(r, h.liveKitAuth.authProvider)
+	if err != nil {
+		slog.Warn("Handler: SFU webhook error", "err", err)
+		return
+	}
+
+	roomAlias, msg, ok := sfuEventFromWebhook(event)
+	if !ok {
+		return
+	}
+
+	// Route via loop() so the map is accessed by a single goroutine only.
+	select {
+	case h.sfuEventCh <- sfuEventRequest{roomAlias: roomAlias, msg: msg}:
+	case <-h.ctx.Done():
+	}
+}
+
+// ── config / main ─────────────────────────────────────────────────────────────
+
 func readKeySecret() (string, string) {
-	// We initialize keys & secrets from environment variables
 	key := os.Getenv("LIVEKIT_KEY")
 	secret := os.Getenv("LIVEKIT_SECRET")
-	// We initialize potential key & secret path from environment variables
 	keyPath := os.Getenv("LIVEKIT_KEY_FROM_FILE")
 	secretPath := os.Getenv("LIVEKIT_SECRET_FROM_FILE")
 	keySecretPath := os.Getenv("LIVEKIT_KEY_FILE")
 
-	// If keySecretPath is set we read the file and split it into two parts
-	// It takes over any other initialization
 	if keySecretPath != "" {
-		if keySecretBytes, err := os.ReadFile(keySecretPath); err != nil {
+		keySecretBytes, err := os.ReadFile(keySecretPath)
+		if err != nil {
 			log.Fatal(err)
-		} else {
-			keySecrets := strings.Split(string(keySecretBytes), ":")
-			if len(keySecrets) != 2 {
-				log.Fatalf("invalid key secret file format!")
-			}
-			log.Printf("Using LiveKit API key and API secret from LIVEKIT_KEY_FILE")
-			key = keySecrets[0]
-			secret = keySecrets[1]
 		}
+		parts := strings.Split(string(keySecretBytes), ":")
+		if len(parts) != 2 {
+			log.Fatalf("invalid key secret file format!")
+		}
+		slog.Info("Using LiveKit API key and secret from LIVEKIT_KEY_FILE", "keySecretPath", keySecretPath)
+		key = parts[0]
+		secret = parts[1]
 	} else {
-		// If keySecretPath is not set, we try to read the key and secret from files
-		// If those files are not set, we return the key & secret from the environment variables
 		if keyPath != "" {
-			if keyBytes, err := os.ReadFile(keyPath); err != nil {
+			keyBytes, err := os.ReadFile(keyPath)
+			if err != nil {
 				log.Fatal(err)
-			} else {
-				log.Printf("Using LiveKit API key from LIVEKIT_KEY_FROM_FILE")
-				key = string(keyBytes)
 			}
+			slog.Info("Using LiveKit API key from LIVEKIT_KEY_FROM_FILE", "keyPath", keyPath)
+			key = string(keyBytes)
 		}
-
 		if secretPath != "" {
-			if secretBytes, err := os.ReadFile(secretPath); err != nil {
+			secretBytes, err := os.ReadFile(secretPath)
+			if err != nil {
 				log.Fatal(err)
-			} else {
-				log.Printf("Using LiveKit API secret from LIVEKIT_SECRET_FROM_FILE")
-				secret = string(secretBytes)
 			}
+			slog.Info("Using LiveKit API secret from LIVEKIT_SECRET_FROM_FILE", "secretPath", secretPath)
+			secret = string(secretBytes)
 		}
-
 	}
 
-	// remove white spaces, new lines and carriage returns
-	// from key and secret
 	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
 func parseConfig() (*Config, error) {
 	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
 	if skipVerifyTLS {
-		log.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-		log.Printf("!!! WARNING !!!  LIVEKIT_INSECURE_SKIP_VERIFY_TLS        !!! WARNING !!!")
-		log.Printf("!!! WARNING !!!  Allow to skip invalid TLS certificates  !!! WARNING !!!")
-		log.Printf("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
-		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		slog.Warn("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		slog.Warn("!!! WARNING !!!  LIVEKIT_INSECURE_SKIP_VERIFY_TLS        !!! WARNING !!!")
+		slog.Warn("!!! WARNING !!!  Allow to skip invalid TLS certificates  !!! WARNING !!!")
+		slog.Warn("!!! WARNING !!!  Use only for testing or debugging       !!! WARNING !!!")
+		slog.Warn("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
+		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
 	key, secret := readKeySecret()
 	lkUrl := os.Getenv("LIVEKIT_URL")
 
 	if key == "" || secret == "" || lkUrl == "" {
-		return nil, fmt.Errorf("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set")
+		return nil, fmt.Errorf("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL must be set")
 	}
 
 	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
-
 	if len(fullAccessHomeservers) == 0 {
 		localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
 		if len(localHomeservers) > 0 {
-			log.Printf("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, please use LIVEKIT_FULL_ACCESS_HOMESERVERS instead !!!")
+			slog.Warn("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, use LIVEKIT_FULL_ACCESS_HOMESERVERS !!!")
 			fullAccessHomeservers = localHomeservers
 		} else {
-			log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*) for full access")
+			slog.Warn("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*)")
 			fullAccessHomeservers = "*"
 		}
 	}
 
 	lkJwtBind := os.Getenv("LIVEKIT_JWT_BIND")
 	lkJwtPort := os.Getenv("LIVEKIT_JWT_PORT")
-
 	if lkJwtBind == "" {
 		if lkJwtPort == "" {
 			lkJwtPort = "8080"
 		} else {
-			log.Printf("!!! LIVEKIT_JWT_PORT is deprecated, please use LIVEKIT_JWT_BIND instead !!!")
+			slog.Warn("!!! LIVEKIT_JWT_PORT is deprecated, use LIVEKIT_JWT_BIND !!!")
 		}
 		lkJwtBind = fmt.Sprintf(":%s", lkJwtPort)
 	} else if lkJwtPort != "" {
-		return nil, fmt.Errorf("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables MUST NOT be set together")
+		return nil, fmt.Errorf("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together")
+	}
+
+	var sanityCheckInterval time.Duration
+	if s := os.Getenv("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS"); s != "" {
+		if secs, err := strconv.Atoi(s); err != nil || secs <= 0 {
+			return nil, fmt.Errorf("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a positive integer, got %q", s)
+		} else {
+			sanityCheckInterval = time.Duration(secs) * time.Second
+			slog.Info("Sanity check enabled", "interval", sanityCheckInterval)
+		}
 	}
 
 	return &Config{
@@ -629,25 +1040,59 @@ func parseConfig() (*Config, error) {
 		SkipVerifyTLS:         skipVerifyTLS,
 		FullAccessHomeservers: strings.Fields(strings.ReplaceAll(fullAccessHomeservers, ",", " ")),
 		LkJwtBind:             lkJwtBind,
+		SanityCheckInterval:   sanityCheckInterval,
 	}, nil
 }
 
 func main() {
+	opts := slogcolor.DefaultOptions
+	opts.NoColor = !isatty.IsTerminal(os.Stderr.Fd())
+
+	logLevelString := os.Getenv("LIVEKIT_LOG_LEVEL")
+	switch strings.ToLower(logLevelString) {
+	case "debug":
+		opts.Level = slog.LevelDebug
+	case "info":
+	case "warn", "warning":
+		opts.Level = slog.LevelWarn
+	case "error":
+		opts.Level = slog.LevelError
+	case "":
+		opts.Level = slog.LevelInfo
+		slog.Info("log level defaulting to info")
+	default:
+		opts.Level = slog.LevelInfo
+		slog.Warn("Invalid log level in LIVEKIT_LOG_LEVEL, defaulting to info",
+			"invalidValue", logLevelString)
+	}
+	slog.SetDefault(slog.New(slogcolor.NewHandler(os.Stderr, opts)))
+
 	config, err := parseConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("LIVEKIT_URL: %s, LIVEKIT_JWT_BIND: %s", config.LkUrl, config.LkJwtBind)
-	log.Printf("LIVEKIT_FULL_ACCESS_HOMESERVERS: %v", config.FullAccessHomeservers)
+	handler := NewHandler(
+		LiveKitAuth{
+			key:          config.Key,
+			secret:       config.Secret,
+			authProvider: auth.NewSimpleKeyProvider(config.Key, config.Secret),
+			lkUrl:        config.LkUrl,
+		},
+		config.SkipVerifyTLS,
+		config.FullAccessHomeservers,
+		config.SanityCheckInterval,
+	)
 
-	handler := &Handler{
-		key:                   config.Key,
-		secret:                config.Secret,
-		lkUrl:                 config.LkUrl,
-		skipVerifyTLS:         config.SkipVerifyTLS,
-		fullAccessHomeservers: config.FullAccessHomeservers,
-	}
+	slog.Info("Starting service",
+		"LIVEKIT_URL", config.LkUrl,
+		"LIVEKIT_JWT_BIND", config.LkJwtBind,
+		"LIVEKIT_FULL_ACCESS_HOMESERVERS", config.FullAccessHomeservers,
+		"SkipVerifyTLS", config.SkipVerifyTLS,
+		"LiveKit key", config.Key,
+		"LiveKit secret", config.Secret,
+		"SanityCheckInterval", config.SanityCheckInterval,
+	)
 
 	log.Fatal(http.ListenAndServe(config.LkJwtBind, handler.prepareMux()))
 }
