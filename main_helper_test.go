@@ -90,6 +90,17 @@ func TestNewUniqueIDStringConversion(t *testing.T) {
 
 // ── CreateLiveKitRoomAlias ────────────────────────────────────────────────────
 
+// TestCreateLiveKitRoomAlias_TestVector verifies against the test vector from the
+// spec proposal to ensure compliance with the expected hashing and encoding scheme.
+// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
+func TestCreateLiveKitRoomAlias_TestVector(t *testing.T) {
+	id := string(CreateLiveKitRoomAlias("!roomid:example.com", "slot123"))
+	wantId := "AUDmNDQiVHmWYRE+rKBvieWX8AUSzepenuj6u+d/n9c"
+	if id != wantId {
+		t.Errorf("CreateLiveKitRoomAlias test vector mismatch: got %s, want %s", id, wantId)
+	}
+}
+
 // TestCreateLiveKitRoomAlias_Deterministic verifies that the same inputs always
 // produce the same alias.
 func TestCreateLiveKitRoomAlias_Deterministic(t *testing.T) {
@@ -136,6 +147,17 @@ func TestCreateLiveKitRoomAlias_Format(t *testing.T) {
 }
 
 // ── CreateLiveKitIdentity ─────────────────────────────────────────────────────
+
+// TestCreateLiveKitIdentity_TestVector verifies against the test vector from the
+// spec proposal to ensure compliance with the expected hashing and encoding scheme.
+// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
+func TestCreateLiveKitIdentity_TestVector(t *testing.T) {
+	id := string(CreateLiveKitIdentity("@alice:example.com", "DEVICE123", "memberABC"))
+	wantId := "J+T45tGruxc+HrUOqJJlyQSV33m728Cme4+vt8/SWrU"
+	if id != wantId {
+		t.Errorf("CreateLiveKitIdentity test vector mismatch: got %s, want %s", id, wantId)
+	}
+}
 
 // TestCreateLiveKitIdentity_Deterministic verifies that the same inputs always
 // produce the same identity.

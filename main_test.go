@@ -165,7 +165,7 @@ func TestHandlePost(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "application/json")
-		if _, err := fmt.Fprintf(w, `{"sub": "@user:%s"}`, matrixServerName); err != nil {
+		if _, err := fmt.Fprintf(w, `{"sub": "@alice:%s"}`, matrixServerName); err != nil {
 			t.Fatalf("failed to write response: %v", err)
 		}
 	}))
@@ -175,14 +175,15 @@ func TestHandlePost(t *testing.T) {
 	matrixServerName = u.Host
 
 	testCase := map[string]interface{}{
-		"room_id": "!testRoom:example.com", "slot_id": "m.call#ROOM",
+		// from https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
+		"room_id": "!roomid:example.com", "slot_id": "slot123",
 		"openid_token": map[string]interface{}{
 			"access_token": "testAccessToken", "token_type": "testTokenType",
 			"matrix_server_name": u.Host, "expires_in": 3600,
 		},
 		"member": map[string]interface{}{
-			"id": "member_test_id", "claimed_user_id": "@user:" + matrixServerName,
-			"claimed_device_id": "testDevice",
+			"id": "memberABC", "claimed_user_id": "@alice:" + matrixServerName,
+			"claimed_device_id": "DEVICE123",
 		},
 	}
 
@@ -218,13 +219,21 @@ func TestHandlePost(t *testing.T) {
 	if !ok || !token.Valid {
 		t.Fatalf("failed to parse claims from JWT")
 	}
-	wantSubHash := sha256.Sum256([]byte("@user:" + matrixServerName + "|testDevice|member_test_id"))
-	wantSub := unpaddedBase64.EncodeToString(wantSubHash[:])
+	// from https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
+
+	wantSubRawBytes, err := json.Marshal([]string{"@alice:" + matrixServerName, "DEVICE123", "memberABC"})
+	if err != nil {
+		panic("unreachable, probably")
+	}
+	wantSubIdentityRaw := string(wantSubRawBytes)	
+	wantSubIdentityHash := sha256.Sum256([]byte(wantSubIdentityRaw))
+	wantSub :=	unpaddedBase64.EncodeToString(wantSubIdentityHash[:])
 	if claims["sub"] != wantSub {
 		t.Errorf("unexpected sub: got %v want %v", claims["sub"], wantSub)
 	}
-	wantRoomHash := sha256.Sum256([]byte("!testRoom:example.com" + "|" + "m.call#ROOM"))
-	wantRoom := unpaddedBase64.EncodeToString(wantRoomHash[:])
+	
+	// from https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
+	wantRoom := "AUDmNDQiVHmWYRE+rKBvieWX8AUSzepenuj6u+d/n9c"
 	if claims["video"].(map[string]interface{})["room"] != wantRoom {
 		t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], wantRoom)
 	}

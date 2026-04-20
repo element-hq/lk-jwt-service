@@ -14,6 +14,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -76,17 +77,23 @@ var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 func CreateLiveKitRoomAlias(matrixRoom string, matrixRtcSlot string) LiveKitRoomAlias {
 	// Create a deterministic LiveKit room alias based on Matrix room ID and slot ID
 	// to ensure uniqueness and avoid collisions.
-	lkRoomAliasHash := sha256.Sum256([]byte(matrixRoom + "|" + matrixRtcSlot))
+	lkRoomAliasRawBytes, err := json.Marshal([]string{matrixRoom, matrixRtcSlot})
+	if err != nil {
+		panic("unreachable, probably")
+	}
+	lkRoomAliasRaw := string(lkRoomAliasRawBytes)
+	lkRoomAliasHash := sha256.Sum256([]byte(lkRoomAliasRaw))
 	return LiveKitRoomAlias(unpaddedBase64.EncodeToString(lkRoomAliasHash[:]))
 }
 
 func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) LiveKitIdentity {
 	// Create a deterministic LiveKit identity based on user ID and device ID
 	// to ensure uniqueness and avoid collisions.
-	// TODO: "|" is not a safe delimiter since all fields are
-	// attacker-controlled. Replace with JSON array serialisation once client
-	// libraries have been updated to match.
-	lkIdentityRaw := matrixID + "|" + deviceId + "|" + memberID
+	lkIdentityRawBytes, err := json.Marshal([]string{matrixID, deviceId, memberID})
+	if err != nil {
+		panic("unreachable, probably")
+	}
+	lkIdentityRaw := string(lkIdentityRawBytes)	
 	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
 	return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
 }
