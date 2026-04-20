@@ -69,8 +69,12 @@ type SFURequest struct {
 	SlotID         string              `json:"slot_id"`
 	OpenIDToken    OpenIDTokenType     `json:"openid_token"`
 	Member         MatrixRTCMemberType `json:"member"`
-	DelayedEventID string              `json:"delayed_event_id"`
-}
+    // Note, proper parsing and handling of the additional information needed for the 
+	// delegation of the MatrixRTC member leave event is part of
+	// PR#171. For now we "only" provide the JSON signature.	
+	DelayId        string              `json:"delay_id,omitempty"`
+	DelayTimeout   int                 `json:"delay_timeout,omitempty"`
+	DelayCsApiUrl  string              `json:"delay_cs_api_url,omitempty"`}
 type SFUResponse struct {
 	URL string `json:"url"`
 	JWT string `json:"jwt"`
