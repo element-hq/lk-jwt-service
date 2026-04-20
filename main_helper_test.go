@@ -111,26 +111,25 @@ func TestCreateLiveKitRoomAlias_Deterministic(t *testing.T) {
 	}
 }
 
-// TestCreateLiveKitRoomAlias_Distinct verifies that different inputs produce
-// different aliases.
-func TestCreateLiveKitRoomAlias_Distinct(t *testing.T) {
+// TestCreateLiveKitRoomAlias_SampleInputsDistinct verifies that different
+// inputs produce different aliases.
+func TestCreateLiveKitRoomAlias_SampleInputsDistinct(t *testing.T) {
 	cases := [][2]string{
 		{"!room1:example.com", "m.call#ROOM"},
 		{"!room2:example.com", "m.call#ROOM"},
 		{"!room1:example.com", "m.call#OTHER"},
 		{"", ""},
 	}
-	seen := make(map[LiveKitRoomAlias]string)
+	seen := make(map[LiveKitRoomAlias][2]string)
 	for _, c := range cases {
 		alias := CreateLiveKitRoomAlias(c[0], c[1])
-		key := c[0] + "|" + c[1]
 		for prev, prevKey := range seen {
 			if alias == prev {
-				t.Errorf("collision: (%q, %q) and (%q) produced the same alias %s",
-					c[0], c[1], prevKey, alias)
+				t.Errorf("collision: (%v) and (%v) produced the same alias %s",
+					c, prevKey, alias)
 			}
 		}
-		seen[alias] = key
+		seen[alias] = c
 	}
 }
 
@@ -169,9 +168,9 @@ func TestCreateLiveKitIdentity_Deterministic(t *testing.T) {
 	}
 }
 
-// TestCreateLiveKitIdentity_Distinct verifies that different inputs produce
-// different identities.
-func TestCreateLiveKitIdentity_Distinct(t *testing.T) {
+// TestCreateLiveKitIdentity_SampleInputsDistinct verifies that different inputs 
+// produce different identities.
+func TestCreateLiveKitIdentity_SampleInputsDistinct(t *testing.T) {
 	cases := [][3]string{
 		{"@alice:example.com", "DEV1", "mem1"},
 		{"@bob:example.com", "DEV1", "mem1"},
