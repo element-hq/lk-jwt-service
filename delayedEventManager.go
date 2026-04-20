@@ -138,9 +138,84 @@ type MonitorMessage struct {
 //
 //  1. Created by LiveKitRoomMonitor.HandoverJob().
 //  2. Caller starts Loop() — typically in a goroutine: go job.Loop().
-//  3. Events arrive via EventChannel (SFU webhooks, internal timers).
+//  3. Events arrive via EventChannel (SFU webhooks, internal FSM timers).
 //  4. Loop() exits when ctx is cancelled (via Close() or parent cancellation).
 //  5. Close() cancels the context and blocks until Loop() has returned.
+//
+// # Finite State Machine (FSM) — Main Job Lifecycle
+//
+//                         ParticipantConnected,            DelayedEventReset /
+//    (Start)              ParticipantLookupSuccessful    (Execute ActionRestart)
+//       |                ┌───────────────────────────┐          ┌──────┐
+//       ▼                |                           ▼          |      |
+//  ┌──────────────────────────┐        ┌───────────────────────────┐   |
+//  │ WaitingForInitialConnect │        │ Connected                 │◄──┘
+//  │                          │        │                           │ 
+//  │ On Entry: (none)         │        │ On Entry:                 │
+//  └──────────────────────────┘        │ • Stop waiting timer      │
+//      |                 |             │ • Setup delayed timer     │
+//      |                 |             │ • Emit: DelayedEventReset │
+//      |                 |             └───────────────────────────┘
+//      |                 |                           │
+//      |                 | DelayedEventTimedOut,     │ DelayedEventTimedOut,
+//      |                 | DelayedEventNotFound,     │ DelayedEventNotFound,
+//      |                 | WaitingStateTimedOut      │ ParticipantDisconnected,
+//      |                 |                           │ SFUParticipantGone
+//      |                 └───────────────────────────│
+//      |                                             │
+//      | ParticipantConnectionAborted                │
+//      ▼                                             ▼
+//  ┌──────────────────────┐              ┌──────────────────────┐
+//  │ Completed            │              │ Disconnected         │
+//  │                      |              │                      │
+//  │ On Entry:            │              │ On Entry:            │
+//  │ • Stop FSM timers    │              │ • Stop timers        │
+//  │ • Notify monitor     │              │ • Execute ActionSend │
+//  └──────────────────────┘              │ • Notify monitor     │
+//                                        └──────────────────────┘
+//
+//      (from any state)
+//             |
+//             │ JobReplaced
+//             ▼
+//  ┌──────────────────────┐
+//  │ Replaced             │
+//  │                      │
+//  │ On Entry: (none)     │
+//  └──────────────────────┘
+//
+// # FSM — Waiting-State Timer
+//
+//  ┌──────────────────────────────┐               ┌────────────────────────┐
+//  │ Active                       │               │ Fired                  │
+//  │                              │ Timer elapses │                        │
+//  │ On Entry:                    │──────────────►│ On Entry:              │
+//  │ • Start timer                │               │ • Emit:                |
+//  │   (≤ 1 hour or DelayTimeout) │               |   WaitingStateTimedOut |
+//  └──────────────────────────────┘               └────────────────────────┘
+//
+// # FSM — Delayed-Event Restart Timer
+//
+//  ┌──────────────────────────────┐
+//  │ Created                      │
+//  │                              │
+//  │ On Entry:                    │
+//  │ • Create AfterFunc timer     │
+//  │   (timeoutDuration)          │
+//  └──────────────────────────────┘
+//                 |
+//                 ▼
+//  ┌──────────────────────────────┐               ┌───────────────────────────┐
+//  │ Active                       │               │ Fired                     │
+//  │                              │ Timer elapses │                           │
+//  │ On Entry: (none)             │──────────────►│ On Entry:                 │
+//  │                              │               │ • Emit: DelayedEventReset |
+//  └──────────────────────────────┘               └───────────────────────────┘
+//                 ▲
+//                 │ Restart / (restart timer)
+//                 |
+//    (from Active / Fired state)
+
 type DelayedEventJob struct {
 	// Immutable after construction — safe to read without a lock.
 	JobId           UniqueID
@@ -324,7 +399,7 @@ func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) (stateChanged 
 		job.state = Replaced
 		slog.Info("Job: → Replaced (JobReplaced)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
-		return false // no state-entry action for Replaced
+		return false // no state change: no state-entry action for Replaced
 	default:
 		slog.Error("Job: FSM unknown event",
 			"event", event, "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
@@ -348,7 +423,8 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 		// DelayedEventReset into the FSM when the restart interval elapses.
 		// We stop it immediately and trigger the first reset manually so the
 		// homeserver timer is synced right away — we don't know how long elapsed
-		// between token creation and the participant actually connecting.
+		// between submitting the delayed event to the homeserver and handing over
+		// the delegation to this service.
 		job.fsmTimerDelayedEvent = newDelayedEventTimer(
 			job.delayRestartDuration(),
 			func() {
@@ -456,9 +532,9 @@ func (job *DelayedEventJob) handleEventParticipantConnected() bool {
 		slog.Info("Job: → Connected (ParticipantConnected)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
-		return true
+		return true // new state: trigger state-entry action
 	}
-	return false
+	return false // no state change: no state-entry action
 }
 
 func (job *DelayedEventJob) handleEventParticipantLookupSuccessful() bool {
@@ -467,9 +543,9 @@ func (job *DelayedEventJob) handleEventParticipantLookupSuccessful() bool {
 		slog.Info("Job: → Connected (ParticipantLookupSuccessful)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
-		return true
+		return true // new state: trigger state-entry action
 	}
-	return false
+	return false // no state change: no state-entry action
 }
 
 func (job *DelayedEventJob) handleEventParticipantDisconnected() bool {
@@ -478,9 +554,9 @@ func (job *DelayedEventJob) handleEventParticipantDisconnected() bool {
 		slog.Info("Job: → Disconnected (ParticipantDisconnected)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
-		return true
+		return true // new state: trigger state-entry action
 	}
-	return false
+	return false // no state change: no state-entry action
 }
 
 func (job *DelayedEventJob) handleEventParticipantConnectionAborted() bool {
@@ -489,9 +565,9 @@ func (job *DelayedEventJob) handleEventParticipantConnectionAborted() bool {
 		slog.Info("Job: → Completed (ParticipantConnectionAborted)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
-		return true
+		return true // new state: trigger state-entry action
 	}
-	return false
+	return false // no state change: no state-entry action
 }
 
 func (job *DelayedEventJob) handleEventDelayedEventTimedOut() bool {
@@ -502,7 +578,7 @@ func (job *DelayedEventJob) handleEventDelayedEventTimedOut() bool {
 			"delayId", job.DelayId, "jobId", job.JobId)
 		return true
 	}
-	return false
+	return false // no state change: no state-entry action
 }
 
 func (job *DelayedEventJob) handleEventDelayedEventNotFound() bool {
@@ -511,15 +587,15 @@ func (job *DelayedEventJob) handleEventDelayedEventNotFound() bool {
 		slog.Info("Job: → Disconnected (DelayedEventNotFound)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
-		return true
+		return true // new state: trigger state-entry action
 	}
-	return false
+	return false // no state change: no state-entry action
 }
 
 func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 	if (job.state != Connected && job.state != WaitingForInitialConnect) ||
 		job.fsmTimerDelayedEvent == nil {
-		return false
+		return false // no state change: no state-entry action
 	}
 
 	remaining := job.fsmTimerDelayedEvent.timeRemaining()
@@ -528,7 +604,7 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 		slog.Info("Job: → Disconnected (DelayedEventReset, remaining=0)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
-		return true
+		return true // new state: trigger state-entry action
 	}
 
 	// Issue the restart call in a background goroutine so Loop() stays
@@ -597,7 +673,7 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 		}
 	}()
 
-	return false
+	return false // no state change: no state-entry action
 }
 
 func (job *DelayedEventJob) handleEventWaitingStateTimedOut() bool {
@@ -606,9 +682,9 @@ func (job *DelayedEventJob) handleEventWaitingStateTimedOut() bool {
 		slog.Info("Job: → Disconnected (WaitingStateTimedOut)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
-		return true
+		return true // new state: trigger state-entry action
 	}
-	return false
+	return false // no state change: no state-entry action
 }
 
 func (job *DelayedEventJob) handleEventSFUParticipantGone() bool {
@@ -617,9 +693,9 @@ func (job *DelayedEventJob) handleEventSFUParticipantGone() bool {
 		slog.Info("Job: → Disconnected (SFUParticipantGone — missed disconnect webhook)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
-		return true
+		return true // new state: trigger state-entry action
 	}
-	return false
+	return false // no state change: no state-entry action
 }
 
 // ── delayedEventTimer ────────────────────────────────────────────────────────
