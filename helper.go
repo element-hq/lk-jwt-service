@@ -74,6 +74,17 @@ var exchangeOpenIdUserInfo = func(
 
 var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 
+// RoomClient defines the interface for room operations
+type RoomClient interface {
+	CreateRoom(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error)
+	GetParticipant(ctx context.Context, req *livekit.RoomParticipantIdentity) (*livekit.ParticipantInfo, error)
+}
+
+// mockable lksdk.NewRoomServiceClient for testing
+var newRoomServiceClient = func(url, key, secret string) RoomClient {
+	return lksdk.NewRoomServiceClient(url, key, secret)
+}
+
 func CreateLiveKitRoomAlias(matrixRoom string, matrixRtcSlot string) LiveKitRoomAlias {
 	// Create a deterministic LiveKit room alias based on Matrix room ID and slot ID
 	// to ensure uniqueness and avoid collisions.
@@ -99,7 +110,7 @@ func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) Li
 }
 
 var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
-	roomClient := lksdk.NewRoomServiceClient(liveKitAuth.lkUrl, liveKitAuth.key, liveKitAuth.secret)
+	roomClient := newRoomServiceClient(liveKitAuth.lkUrl, liveKitAuth.key, liveKitAuth.secret)
 	creationStart := time.Now().Unix()
 
 	const emptyTimeoutSecs     = 5 * 60 // 5 minutes: keep room open if no one joins
@@ -116,6 +127,14 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 	)
 
 	if err != nil {
+		slog.Error(
+			"CreateLiveKitRoom: Error creating room",
+			"room", room,
+			"lkId", lkIdentity,
+			"matrixUser", matrixUser,
+			"access", "full",
+			"err", err,
+		)
 		return fmt.Errorf("unable to create room %s: %w", room, err)
 	}
 
@@ -143,7 +162,7 @@ var LiveKitParticipantLookup = func(
 	lkRoomAlias LiveKitRoomAlias,
 	lkId LiveKitIdentity,
 ) (SFUMessage, error) {
-	roomClient := lksdk.NewRoomServiceClient(
+	roomClient := newRoomServiceClient(
 		lkAuth.lkUrl,
 		lkAuth.key,
 		lkAuth.secret,

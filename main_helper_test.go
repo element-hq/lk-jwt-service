@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
+	"github.com/livekit/protocol/livekit"
 )
 
 // ── NewUniqueID ───────────────────────────────────────────────────────────────
@@ -397,5 +399,183 @@ func TestExecuteDelayedEventAction_ContentType(t *testing.T) {
 	_, _ = ExecuteDelayedEventAction(ts.URL, "id", ActionRestart)
 	if capturedContentType != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %q", capturedContentType)
+	}
+}
+
+// ── CreateLiveKitRoom ─────────────────────────────────────────────────────────
+
+// mockRoomServiceClient implements the RoomClient interface for testing
+type mockRoomServiceClient struct {
+	createRoomFunc      func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error)
+	getParticipantFunc  func(ctx context.Context, req *livekit.RoomParticipantIdentity) (*livekit.ParticipantInfo, error)
+}
+
+func (m *mockRoomServiceClient) CreateRoom(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
+	if m.createRoomFunc != nil {
+		return m.createRoomFunc(ctx, req)
+	}
+	return &livekit.Room{}, nil
+}
+
+func (m *mockRoomServiceClient) GetParticipant(ctx context.Context, req *livekit.RoomParticipantIdentity) (*livekit.ParticipantInfo, error) {
+	if m.getParticipantFunc != nil {
+		return m.getParticipantFunc(ctx, req)
+	}
+	return &livekit.ParticipantInfo{}, nil
+}
+
+// TestCreateLiveKitRoom_SuccessCreatingNewRoom verifies that CreateLiveKitRoom
+// successfully creates a new room and properly detects it as newly created.
+func TestCreateLiveKitRoom_SuccessCreatingNewRoom(t *testing.T) {
+	ctx := context.Background()
+	liveKitAuth := &LiveKitAuth{
+		key:    "test-key",
+		secret: "test-secret",
+		lkUrl:  "http://localhost:55002",
+	}
+	roomAlias := LiveKitRoomAlias("test-room-alias")
+	identity := LiveKitIdentity("test-identity")
+	matrixUser := "@user:example.com"
+
+	creationStart := time.Now().Unix()
+	mockRoom := &livekit.Room{
+		Sid:          "room-sid-123",
+		CreationTime: creationStart + 1, // Room created after our start marker
+	}
+
+	originalNewClient := newRoomServiceClient
+	newRoomServiceClient = func(url, key, secret string) RoomClient {
+		return &mockRoomServiceClient{
+		createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
+				if string(req.Name) != string(roomAlias) {
+					t.Errorf("expected room name %q, got %q", roomAlias, req.Name)
+				}
+				if req.EmptyTimeout != 5*60 {
+					t.Errorf("expected empty timeout 300s, got %ds", req.EmptyTimeout)
+				}
+				if req.DepartureTimeout != 20 {
+					t.Errorf("expected departure timeout 20s, got %ds", req.DepartureTimeout)
+				}
+				if req.MaxParticipants != 0 {
+					t.Errorf("expected max participants 0 (unlimited), got %d", req.MaxParticipants)
+				}
+				return mockRoom, nil
+			},
+		}
+	}
+	defer func() { newRoomServiceClient = originalNewClient }()
+
+	err := CreateLiveKitRoom(ctx, liveKitAuth, roomAlias, matrixUser, identity)
+
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+// TestCreateLiveKitRoom_SuccessUsingExistingRoom verifies that CreateLiveKitRoom
+// succeeds when the room already exists (creation time is before our start marker).
+func TestCreateLiveKitRoom_SuccessUsingExistingRoom(t *testing.T) {
+	ctx := context.Background()
+	liveKitAuth := &LiveKitAuth{
+		key:    "test-key",
+		secret: "test-secret",
+		lkUrl:  "http://localhost:55002",
+	}
+	roomAlias := LiveKitRoomAlias("existing-room")
+	identity := LiveKitIdentity("test-identity")
+	matrixUser := "@user:example.com"
+
+	creationStart := time.Now().Unix()
+	mockRoom := &livekit.Room{
+		Sid:          "room-sid-456",
+		CreationTime: creationStart - 100, // Room created long ago
+	}
+
+	originalNewClient := newRoomServiceClient
+	newRoomServiceClient = func(url, key, secret string) RoomClient {
+		return &mockRoomServiceClient{
+		createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
+				return mockRoom, nil
+			},
+		}
+	}
+	defer func() { newRoomServiceClient = originalNewClient }()
+
+	err := CreateLiveKitRoom(ctx, liveKitAuth, roomAlias, matrixUser, identity)
+
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+// TestCreateLiveKitRoom_ErrorHandling verifies that errors from the LiveKit SDK
+// are properly wrapped and returned with the room alias in the message.
+func TestCreateLiveKitRoom_ErrorHandling(t *testing.T) {
+	ctx := context.Background()
+	liveKitAuth := &LiveKitAuth{
+		key:    "test-key",
+		secret: "test-secret",
+		lkUrl:  "http://localhost:55002",
+	}
+	roomAlias := LiveKitRoomAlias("failed-room")
+	identity := LiveKitIdentity("test-identity")
+	matrixUser := "@user:example.com"
+
+	sdkErr := errors.New("SDK connection failed")
+	originalNewClient := newRoomServiceClient
+	newRoomServiceClient = func(url, key, secret string) RoomClient {
+		return &mockRoomServiceClient{
+			createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
+				return nil, sdkErr
+			},
+		}
+	}
+	defer func() { newRoomServiceClient = originalNewClient }()
+
+	err := CreateLiveKitRoom(ctx, liveKitAuth, roomAlias, matrixUser, identity)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), string(roomAlias)) {
+		t.Errorf("error should mention room alias, got: %v", err)
+	}
+}
+
+// TestCreateLiveKitRoom_RoomConfigurationParameters verifies that the room
+// is created with correct timeout configuration.
+func TestCreateLiveKitRoom_RoomConfigurationParameters(t *testing.T) {
+	ctx := context.Background()
+	liveKitAuth := &LiveKitAuth{
+		key:    "test-key",
+		secret: "test-secret",
+		lkUrl:  "http://localhost:55002",
+	}
+
+	var capturedRequest *livekit.CreateRoomRequest
+	originalNewClient := newRoomServiceClient
+	newRoomServiceClient = func(url, key, secret string) RoomClient {
+		return &mockRoomServiceClient{
+		createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
+				capturedRequest = req
+				return &livekit.Room{Sid: "test", CreationTime: time.Now().Unix()}, nil
+			},
+		}
+	}
+	defer func() { newRoomServiceClient = originalNewClient }()
+
+	_ = CreateLiveKitRoom(ctx, liveKitAuth, LiveKitRoomAlias("room"), "@user:example.com", LiveKitIdentity("id"))
+
+	if capturedRequest == nil {
+		t.Fatal("CreateRoom was not called")
+	}
+	if capturedRequest.EmptyTimeout != 5*60 {
+		t.Errorf("expected empty timeout 300s, got %ds", capturedRequest.EmptyTimeout)
+	}
+	if capturedRequest.DepartureTimeout != 20 {
+		t.Errorf("expected departure timeout 20s, got %ds", capturedRequest.DepartureTimeout)
+	}
+	if capturedRequest.MaxParticipants != 0 {
+		t.Errorf("expected max participants 0 (unlimited), got %d", capturedRequest.MaxParticipants)
 	}
 }
