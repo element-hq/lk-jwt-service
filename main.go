@@ -79,9 +79,12 @@ type OpenIDTokenType struct {
 }
 
 type LegacySFURequest struct {
-	Room        string          `json:"room"`
-	OpenIDToken OpenIDTokenType `json:"openid_token"`
-	DeviceID    string          `json:"device_id"`
+	Room          string          `json:"room"`
+	OpenIDToken   OpenIDTokenType `json:"openid_token"`
+	DeviceID      string          `json:"device_id"`
+	DelayId       string          `json:"delay_id,omitempty"`
+	DelayTimeout  int             `json:"delay_timeout,omitempty"`
+	DelayCsApiUrl string          `json:"delay_cs_api_url,omitempty"`
 }
 
 type DelayedEventRequest struct {
@@ -229,6 +232,20 @@ func (r *LegacySFURequest) Validate() error {
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
 			Err:     "Missing OpenID token parameters",
+		}
+	}
+	allDelayedEventParamsPresent := r.DelayId != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
+	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
+	if atLeastOneDelayedEventParamPresent && !allDelayedEventParamsPresent {
+		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
+			"DelayId", r.DelayId,
+			"DelayTimeout", r.DelayTimeout,
+			"DelayCsApiUrl", r.DelayCsApiUrl,
+		)
+		return &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "The request body is missing `delay_id`, `delay_timeout` or `delay_cs_api_url`",
 		}
 	}
 	return nil
@@ -509,6 +526,15 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
+	delayedEventDelegationRequested := req.DelayId != ""
+
+	if delayedEventDelegationRequested && !isFullAccessUser {
+		return nil, &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Delegation of delayed events is only supported for full access users",
+		}
+	}
 
 	slog.Debug("Handler: got Matrix user info",
 		"userInfo.Sub", userInfo.Sub,
@@ -535,6 +561,19 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 				Err:     "Unable to create room on SFU",
 			}
 		}
+		if delayedEventDelegationRequested {
+			slog.Info("Handler: scheduling delayed event job",
+				"room", lkRoomAlias, "lkId", lkIdentity,
+				"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
+			h.addDelayedEventJob(&DelayedEventRequest{
+				DelayCsApiUrl:   req.DelayCsApiUrl,
+				DelayId:         req.DelayId,
+				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
+				LiveKitRoom:     lkRoomAlias,
+				LiveKitIdentity: lkIdentity,
+			})
+		}
+
 	}
 
 	slog.Info("Handler: generated Legacy SFU access token",

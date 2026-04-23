@@ -511,6 +511,35 @@ func TestMapSFURequest(t *testing.T) {
 	}
 }
 
+// TestLegacySFURequest_Validate_DelayedEventPartialParams verifies that providing
+// only some delayed-event parameters returns M_BAD_JSON.
+func TestLegacySFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		delayID string
+		timeout int
+		csURL   string
+	}{
+		{"only delay_id", "did", 0, ""},
+		{"only timeout", "", 1000, ""},
+		{"only cs_api_url", "", 0, "https://example.com"},
+		{"delay_id + timeout", "did", 1000, ""},
+		{"delay_id + cs_api_url", "did", 0, "https://example.com"},
+		{"timeout + cs_api_url", "", 1000, "https://example.com"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req := &LegacySFURequest{
+				Room: "!r:x", DeviceID: "DEVICE1234",
+				OpenIDToken: OpenIDTokenType{AccessToken: "tok", MatrixServerName: "x"},
+				DelayId:     c.delayID, DelayTimeout: c.timeout, DelayCsApiUrl: c.csURL,
+			}
+			if err := req.Validate(); err == nil {
+				t.Error("expected validation error for partial delayed-event params, got nil")
+			}
+		})
+	}
+}
+
 // TestSFURequest_Validate_DelayedEventPartialParams verifies that providing
 // only some delayed-event parameters returns M_BAD_JSON.
 func TestSFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
