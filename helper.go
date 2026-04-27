@@ -104,7 +104,7 @@ func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) Li
 	if err != nil {
 		panic("unreachable, probably")
 	}
-	lkIdentityRaw := string(lkIdentityRawBytes)	
+	lkIdentityRaw := string(lkIdentityRawBytes)
 	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
 	return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
 }
@@ -113,8 +113,8 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 	roomClient := newRoomServiceClient(liveKitAuth.lkUrl, liveKitAuth.key, liveKitAuth.secret)
 	creationStart := time.Now().Unix()
 
-	const emptyTimeoutSecs     = 5 * 60 // 5 minutes: keep room open if no one joins
-	const departureTimeoutSecs = 20     // 20 seconds: keep room after everyone leaves
+	const emptyTimeoutSecs = 5 * 60 // 5 minutes: keep room open if no one joins
+	const departureTimeoutSecs = 20 // 20 seconds: keep room after everyone leaves
 
 	lkRoom, err := roomClient.CreateRoom(
 		ctx,
@@ -207,6 +207,11 @@ var ExecuteDelayedEventAction = func(CsApiUrl string, delayID string, action Del
 	// 404 means the delayed event is already sent or does not exist.
 	if action == ActionSend && resp.StatusCode == http.StatusNotFound {
 		return resp, nil
+	}
+
+	// Retry 502s (bad gateway) to handle transient API outages (restarts/network).
+	if resp.StatusCode == http.StatusBadGateway {
+		return resp, fmt.Errorf("CS API temporarily unavailable (http status code 502)")
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {

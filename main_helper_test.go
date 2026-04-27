@@ -373,6 +373,22 @@ func TestExecuteDelayedEventAction_429WithoutRetryAfter(t *testing.T) {
 	}
 }
 
+// TestExecuteDelayedEventAction_502BadGateway verifies that a 502 error is handled as error
+func TestExecuteDelayedEventAction_502BadGateway(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer ts.Close()
+
+	resp, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+	if err == nil {
+		t.Fatalf("Expected error: CS API temporarily unavailable (http status code 502)")
+	}
+	if resp == nil || resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("expected 502 response, got %v", resp)
+	}
+}
+
 // TestExecuteDelayedEventAction_NetworkError verifies that a connection error
 // is returned as a non-nil error.
 func TestExecuteDelayedEventAction_NetworkError(t *testing.T) {
