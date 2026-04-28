@@ -76,7 +76,7 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            oci-push.vpn.infra.element.io/lk-jwt-service
+            ${{ github.event_name != 'pull_request' && 'oci-push.vpn.infra.element.io/lk-jwt-service' || '' }}
           tags: ${{ inputs.docker_tags }}
 
       - name: Set up Docker Buildx
