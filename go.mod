@@ -76,7 +76,7 @@ require (
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
-	go.opentelemetry.io/otel v1.40.0 // indirect
+	go.opentelemetry.io/otel v1.41.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
