@@ -1009,93 +1009,93 @@ func (m *LiveKitRoomMonitor) Loop() {
 			jobs[job.LiveKitIdentity] = job
 			go job.Loop()
 
-				// Start participant lookup with exponential backoff in a separate
-				// goroutine.  On success the SFUMessage is forwarded on SFUCommChan,
-				// keeping channel ownership in Loop().
-				// backgroundWg tracks this goroutine so teardown() can wait for it
-				// to exit before Loop() returns — preventing races on the global
-				// LiveKitParticipantLookup variable in tests.
-				//
-				// Note on connection overhead: lksdk.NewRoomServiceClient creates a
-				// lightweight struct (URL + credentials); the actual HTTP connection is
-				// established per-request and reused via Go's http.DefaultTransport
-				// connection pool.  A persistent connection would add complexity for
-				// negligible gain at the low lookup frequencies used here.
-				waitingDuration := min(time.Hour, job.DelayTimeout)
-				backgroundWg.Add(1)
-				go func(j *DelayedEventJob, sanityInterval time.Duration) {
-					defer backgroundWg.Done()
+			// Start participant lookup with exponential backoff in a separate
+			// goroutine.  On success the SFUMessage is forwarded on SFUCommChan,
+			// keeping channel ownership in Loop().
+			// backgroundWg tracks this goroutine so teardown() can wait for it
+			// to exit before Loop() returns — preventing races on the global
+			// LiveKitParticipantLookup variable in tests.
+			//
+			// Note on connection overhead: lksdk.NewRoomServiceClient creates a
+			// lightweight struct (URL + credentials); the actual HTTP connection is
+			// established per-request and reused via Go's http.DefaultTransport
+			// connection pool.  A persistent connection would add complexity for
+			// negligible gain at the low lookup frequencies used here.
+			waitingDuration := min(time.Hour, job.DelayTimeout)
+			backgroundWg.Add(1)
+			go func(j *DelayedEventJob, sanityInterval time.Duration) {
+				defer backgroundWg.Done()
 
-					// ── Phase 1: initial lookup with exponential backoff ─────────
-					// Retry until the participant appears or the delay timeout expires.
-					expBackOff := backoff.NewExponentialBackOff()
-					expBackOff.InitialInterval = 1000 * time.Millisecond
-					expBackOff.Multiplier = 1.5
-					expBackOff.RandomizationFactor = 0.5
-					expBackOff.MaxInterval = 60 * time.Second
+				// ── Phase 1: initial lookup with exponential backoff ─────────
+				// Retry until the participant appears or the delay timeout expires.
+				expBackOff := backoff.NewExponentialBackOff()
+				expBackOff.InitialInterval = 1000 * time.Millisecond
+				expBackOff.Multiplier = 1.5
+				expBackOff.RandomizationFactor = 0.5
+				expBackOff.MaxInterval = 60 * time.Second
 
-					msg, err := backoff.Retry(
-						j.ctx,
-						func() (SFUMessage, error) {
-							msg, err := LiveKitParticipantLookup(j.ctx, *m.lkAuth, j.LiveKitRoom, j.LiveKitIdentity)
-							if err != nil {
-								return SFUMessage{}, err
-							}
-							return msg, nil
-						},
-						backoff.WithBackOff(expBackOff),
-						backoff.WithMaxElapsedTime(waitingDuration),
-					)
-					if err != nil {
-						slog.Warn("RoomMonitor: participant lookup failed",
-							"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
-							"jobId", j.JobId, "err", err)
-						return
-					}
-					// Forward ParticipantLookupSuccessful via SFUCommChan.
+				msg, err := backoff.Retry(
+					j.ctx,
+					func() (SFUMessage, error) {
+						msg, err := LiveKitParticipantLookup(j.ctx, *m.lkAuth, j.LiveKitRoom, j.LiveKitIdentity)
+						if err != nil {
+							return SFUMessage{}, err
+						}
+						return msg, nil
+					},
+					backoff.WithBackOff(expBackOff),
+					backoff.WithMaxElapsedTime(waitingDuration),
+				)
+				if err != nil {
+					slog.Warn("RoomMonitor: participant lookup failed",
+						"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
+						"jobId", j.JobId, "err", err)
+					return
+				}
+				// Forward ParticipantLookupSuccessful via SFUCommChan.
+				select {
+				case m.SFUCommChan <- msg:
+				case <-j.ctx.Done():
+					return
+				}
+
+				// ── Phase 2: periodic sanity check ──────────────────────────
+				// Only active when sanityCheckInterval > 0. Re-checks whether
+				// the participant is still present on the SFU at the configured
+				// interval, catching missed disconnect webhooks.
+				if sanityInterval == 0 {
+					return
+				}
+				ticker := time.NewTicker(sanityInterval)
+				defer ticker.Stop()
+				for {
 					select {
-					case m.SFUCommChan <- msg:
 					case <-j.ctx.Done():
 						return
-					}
-
-					// ── Phase 2: periodic sanity check ──────────────────────────
-					// Only active when sanityCheckInterval > 0. Re-checks whether
-					// the participant is still present on the SFU at the configured
-					// interval, catching missed disconnect webhooks.
-					if sanityInterval == 0 {
-						return
-					}
-					ticker := time.NewTicker(sanityInterval)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-j.ctx.Done():
-							return
-						case <-ticker.C:
-							_, err := LiveKitParticipantLookup(j.ctx, *m.lkAuth, j.LiveKitRoom, j.LiveKitIdentity)
-							if err == nil {
-								// Still present — continue.
-								slog.Debug("RoomMonitor: sanity check: participant still on SFU",
-									"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
-									"jobId", j.JobId)
-								continue
-							}
-							if j.ctx.Err() != nil {
-								// Context cancelled concurrently — not a real gone event.
-								return
-							}
-							slog.Warn("RoomMonitor: sanity check: participant no longer on SFU",
+					case <-ticker.C:
+						_, err := LiveKitParticipantLookup(j.ctx, *m.lkAuth, j.LiveKitRoom, j.LiveKitIdentity)
+						if err == nil {
+							// Still present — continue.
+							slog.Debug("RoomMonitor: sanity check: participant still on SFU",
 								"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
-								"jobId", j.JobId, "err", err)
-							select {
-							case m.SFUCommChan <- SFUMessage{Type: SFUParticipantGone, LiveKitIdentity: j.LiveKitIdentity}:
-							case <-j.ctx.Done():
-							}
+								"jobId", j.JobId)
+							continue
+						}
+						if j.ctx.Err() != nil {
+							// Context cancelled concurrently — not a real gone event.
 							return
 						}
+						slog.Warn("RoomMonitor: sanity check: participant no longer on SFU",
+							"room", j.LiveKitRoom, "lkId", j.LiveKitIdentity,
+							"jobId", j.JobId, "err", err)
+						select {
+						case m.SFUCommChan <- SFUMessage{Type: SFUParticipantGone, LiveKitIdentity: j.LiveKitIdentity}:
+						case <-j.ctx.Done():
+						}
+						return
 					}
-				}(job, m.sanityCheckInterval)
+				}
+			}(job, m.sanityCheckInterval)
 
 			req.result <- handoverResult{jobId: job.JobId, ok: true}
 			slog.Info("RoomMonitor: job added",
