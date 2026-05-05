@@ -159,9 +159,9 @@ type MonitorMessage struct {
 //      |                 |                           │
 //      |                 | DelayedEventTimedOut,     │ DelayedEventTimedOut,
 //      |                 | DelayedEventNotFound,     │ DelayedEventNotFound,
-//      |                 | WaitingStateTimedOut      │ ParticipantDisconnected,
-//      |                 |                           │ SFUParticipantGone
-//      |                 └───────────────────────────│
+//      |                 | WaitingStateTimedOut      │ ParticipantDisconnectedIntentionally,
+//      |                 |                           │ ParticipantConnectionAborted,
+//      |                 └───────────────────────────│ SFUParticipantGone
 //      |                                             │
 //      | ParticipantConnectionAborted                │
 //      ▼                                             ▼
@@ -563,6 +563,13 @@ func (job *DelayedEventJob) handleEventParticipantConnectionAborted() bool {
 	if job.state == WaitingForInitialConnect {
 		job.state = Completed
 		slog.Info("Job: → Completed (ParticipantConnectionAborted)",
+			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
+			"delayId", job.DelayId, "jobId", job.JobId)
+		return true // new state: trigger state-entry action
+	}
+	if job.state == Connected {
+		job.state = Disconnected
+		slog.Info("Job: → Disconnected (ParticipantConnectionAborted)",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 			"delayId", job.DelayId, "jobId", job.JobId)
 		return true // new state: trigger state-entry action

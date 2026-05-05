@@ -270,17 +270,16 @@ func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 // received in the wrong state are silently ignored (guard conditions hold).
 func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	mockExecOK(t)
+
+	// Test WaitingForInitialConnect state
 	job := newTestJob(t, 10*time.Second)
 	go job.Loop()
 
+	// SFUParticipantGone in WaitingForInitialConnect → no-op.
+	job.EventChannel <- SFUParticipantGone
+	time.Sleep(20 * time.Millisecond)
 	// ParticipantDisconnectedIntentionally in WaitingForInitialConnect → no-op.
 	job.EventChannel <- ParticipantDisconnectedIntentionally
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantConnectionAborted in Connected → no-op.
-	job.EventChannel <- ParticipantConnected
-	time.Sleep(20 * time.Millisecond)
-	job.EventChannel <- ParticipantConnectionAborted
 	time.Sleep(20 * time.Millisecond)
 
 	job.Cancel()
@@ -288,8 +287,182 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+	if job.state != DelayEventState(WaitingForInitialConnect) {
+		t.Errorf("expected state %v, got %v", DelayEventState(WaitingForInitialConnect), job.state)
+	}
+
+	// Test Connected state
+	job = newTestJob(t, 10*time.Second)
+	go job.Loop()
+	job.EventChannel <- ParticipantConnected  // Transitioning to Connected
+	time.Sleep(20 * time.Millisecond)
+	
+	// WaitingStateTimedOut in Connected → no-op.
+	job.EventChannel <- WaitingStateTimedOut
+	time.Sleep(20 * time.Millisecond)
+
+	job.Cancel()
+	err = job.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	if job.state != DelayEventState(Connected) {
 		t.Errorf("expected state %v, got %v", DelayEventState(Connected), job.state)
+	}
+
+	// Test Completed state
+	job = newTestJob(t, 10*time.Second)
+	go job.Loop()
+	job.EventChannel <- ParticipantConnectionAborted  // Transitioning to Completed
+	time.Sleep(20 * time.Millisecond)
+	
+	// WaitingStateTimedOut in Completed → no-op.
+	job.EventChannel <- WaitingStateTimedOut
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantConnected in Completed → no-op.
+	job.EventChannel <- ParticipantConnected
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantLookupSuccessful in Completed → no-op.
+	job.EventChannel <- ParticipantLookupSuccessful
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventTimedOut in Completed → no-op.
+	job.EventChannel <- DelayedEventTimedOut
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventNotFound in Completed → no-op.
+	job.EventChannel <- DelayedEventNotFound
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventReset in Completed → no-op.
+	job.EventChannel <- DelayedEventReset
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantDisconnectedIntentionally in Completed → no-op.
+	job.EventChannel <- ParticipantDisconnectedIntentionally
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantConnectionAborted in Completed → no-op.
+	job.EventChannel <- ParticipantConnectionAborted
+	time.Sleep(20 * time.Millisecond)
+
+	// SFUParticipantGone in Completed → no-op.
+	job.EventChannel <- SFUParticipantGone
+	time.Sleep(20 * time.Millisecond)
+
+	job.Cancel()
+	err = job.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if job.state != DelayEventState(Completed) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Completed), job.state)
+	}
+
+	// Test Replaced state
+	job = newTestJob(t, 10*time.Second)
+	go job.Loop()
+	job.EventChannel <- JobReplaced  // Transitioning to Replaced
+	time.Sleep(20 * time.Millisecond)
+	
+	// WaitingStateTimedOut in Replaced → no-op.
+	job.EventChannel <- WaitingStateTimedOut
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantConnected in Replaced → no-op.
+	job.EventChannel <- ParticipantConnected
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantLookupSuccessful in Replaced → no-op.
+	job.EventChannel <- ParticipantLookupSuccessful
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventTimedOut in Replaced → no-op.
+	job.EventChannel <- DelayedEventTimedOut
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventNotFound in Replaced → no-op.
+	job.EventChannel <- DelayedEventNotFound
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventReset in Replaced → no-op.
+	job.EventChannel <- DelayedEventReset
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantDisconnectedIntentionally in Replaced → no-op.
+	job.EventChannel <- ParticipantDisconnectedIntentionally
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantConnectionAborted in Replaced → no-op.
+	job.EventChannel <- ParticipantConnectionAborted
+	time.Sleep(20 * time.Millisecond)
+
+	// SFUParticipantGone in Replaced → no-op.
+	job.EventChannel <- SFUParticipantGone
+	time.Sleep(20 * time.Millisecond)
+
+	job.Cancel()
+	err = job.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if job.state != DelayEventState(Replaced) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Replaced), job.state)
+	}
+
+	// Test Disconnected state
+	job = newTestJob(t, 10*time.Second)
+	go job.Loop()
+	job.EventChannel <- ParticipantConnected  // Transitioning to Connected
+	time.Sleep(20 * time.Millisecond)
+	job.EventChannel <- ParticipantConnectionAborted  // Transitioning to Disconnected
+	time.Sleep(20 * time.Millisecond)
+	
+	// WaitingStateTimedOut in Disconnected → no-op.
+	job.EventChannel <- WaitingStateTimedOut
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantConnected in Disconnected → no-op.
+	job.EventChannel <- ParticipantConnected
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantLookupSuccessful in Disconnected → no-op.
+	job.EventChannel <- ParticipantLookupSuccessful
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventTimedOut in Disconnected → no-op.
+	job.EventChannel <- DelayedEventTimedOut
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventNotFound in Disconnected → no-op.
+	job.EventChannel <- DelayedEventNotFound
+	time.Sleep(20 * time.Millisecond)
+
+	// DelayedEventReset in Disconnected → no-op.
+	job.EventChannel <- DelayedEventReset
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantDisconnectedIntentionally in Disconnected → no-op.
+	job.EventChannel <- ParticipantDisconnectedIntentionally
+	time.Sleep(20 * time.Millisecond)
+
+	// ParticipantConnectionAborted in Disconnected → no-op.
+	job.EventChannel <- ParticipantConnectionAborted
+	time.Sleep(20 * time.Millisecond)
+
+	// SFUParticipantGone in Disconnected → no-op.
+	job.EventChannel <- SFUParticipantGone
+	time.Sleep(20 * time.Millisecond)
+
+	job.Cancel()
+	err = job.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if job.state != DelayEventState(Disconnected) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Disconnected), job.state)
 	}
 }
 
