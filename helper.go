@@ -78,6 +78,7 @@ var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 type RoomClient interface {
 	CreateRoom(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error)
 	GetParticipant(ctx context.Context, req *livekit.RoomParticipantIdentity) (*livekit.ParticipantInfo, error)
+	ListParticipants(ctx context.Context, req *livekit.ListParticipantsRequest) (*livekit.ListParticipantsResponse, error)
 }
 
 // mockable lksdk.NewRoomServiceClient for testing
@@ -151,31 +152,18 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 	return nil
 }
 
-// LiveKitParticipantLookup checks whether a participant is currently present in
-// a LiveKit room.
-//
-// The caller (outer backoff loop in LiveKitRoomMonitor.Loop()) sends the returned
-// SFUMessage on SFUCommChan after a successful lookup.
-var LiveKitParticipantLookup = func(
+// LiveKitListParticipants returns all participants currently present in a
+// LiveKit room. LiveKitRoomWorker uses this for both Phase-1 (initial lookup)
+// and Phase-2 (periodic sanity check), batching all identities in one call.
+var LiveKitListParticipants = func(
 	ctx context.Context,
 	lkAuth LiveKitAuth,
 	lkRoomAlias LiveKitRoomAlias,
-	lkId LiveKitIdentity,
-) (SFUMessage, error) {
-	roomClient := newRoomServiceClient(
-		lkAuth.lkUrl,
-		lkAuth.key,
-		lkAuth.secret,
-	)
-
-	_, err := roomClient.GetParticipant(ctx, &livekit.RoomParticipantIdentity{
-		Room:     string(lkRoomAlias),
-		Identity: string(lkId),
+) (*livekit.ListParticipantsResponse, error) {
+	roomClient := newRoomServiceClient(lkAuth.lkUrl, lkAuth.key, lkAuth.secret)
+	return roomClient.ListParticipants(ctx, &livekit.ListParticipantsRequest{
+		Room: string(lkRoomAlias),
 	})
-	if err != nil {
-		return SFUMessage{}, err
-	}
-	return SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: lkId}, nil
 }
 
 var ExecuteDelayedEventAction = func(CsApiUrl string, delayID string, action DelayEventAction) (*http.Response, error) {

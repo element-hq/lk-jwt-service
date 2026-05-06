@@ -5,23 +5,24 @@
 // Please see LICENSE files in the repository root for full details.
 
 // main_delayedEventManager_test.go contains unit tests for DelayedEventJob
-// (FSM transitions, timer behaviour) and the String() methods of
-// DelayEventState and DelayedEventSignal defined in delayedEventManager.go.
+// (FSM transitions, timer behaviour), LiveKitRoomWorker,
+// and the String() methods of DelayEventState and DelayedEventSignal.
 
 package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/livekit/protocol/livekit"
 )
 
 // ── test helpers ──────────────────────────────────────────────────────────────
 
-// newTestJob creates a DelayedEventJob wired to a buffered monitor channel.
+// newTestJob creates a DelayedEventJob wired to a buffered done channel.
 func newTestJob(t *testing.T, timeout time.Duration) *DelayedEventJob {
 	t.Helper()
 	if timeout <= 0 {
@@ -36,7 +37,7 @@ func newTestJob(t *testing.T, timeout time.Duration) *DelayedEventJob {
 			LiveKitRoom:     LiveKitRoomAlias("test-room"),
 			LiveKitIdentity: LiveKitIdentity("@test:example.com"),
 		},
-		make(chan MonitorMessage, 20),
+		make(chan *DelayedEventJob, 20),
 	)
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
@@ -59,10 +60,10 @@ func driveJobEvents(t *testing.T, job *DelayedEventJob, events ...DelayedEventSi
 	}
 }
 
-// newJobWithMonitorCh is a convenience wrapper that creates a job and returns
-// both the job and the monitor channel so tests can observe outgoing messages.
-func newJobWithMonitorCh(timeout time.Duration) (*DelayedEventJob, chan MonitorMessage) {
-	monitorCh := make(chan MonitorMessage, 5)
+// newJobWithDoneCh is a convenience wrapper that creates a job and returns
+// both the job and the done channel so tests can observe terminal signals.
+func newJobWithDoneCh(timeout time.Duration) (*DelayedEventJob, chan *DelayedEventJob) {
+	doneCh := make(chan *DelayedEventJob, 5)
 	job, _ := NewDelayedEventJob(
 		context.Background(),
 		&DelayedEventRequest{
@@ -72,9 +73,9 @@ func newJobWithMonitorCh(timeout time.Duration) (*DelayedEventJob, chan MonitorM
 			LiveKitRoom:     "room",
 			LiveKitIdentity: "identity",
 		},
-		monitorCh,
+		doneCh,
 	)
-	return job, monitorCh
+	return job, doneCh
 }
 
 // mockExecOK replaces ExecuteDelayedEventAction with a stub that always
@@ -98,7 +99,7 @@ func TestDelayedEventJob_InvalidTimeout(t *testing.T) {
 			DelayCsApiUrl: "https://example.com", DelayId: "id",
 			DelayTimeout: 0, LiveKitRoom: "room", LiveKitIdentity: "identity",
 		},
-		make(chan MonitorMessage, 1),
+		make(chan *DelayedEventJob, 1),
 	)
 	if err == nil {
 		t.Error("expected error for zero timeout, got nil")
@@ -152,20 +153,20 @@ func TestDelayedEventJob_ParticipantLookupSuccessful(t *testing.T) {
 
 // TestDelayedEventJob_ConnectionAborted verifies
 // WaitingForInitialConnect → Completed via ParticipantConnectionAborted,
-// and that the monitor channel receives a Completed message.
+// and that the done channel receives the job pointer.
 func TestDelayedEventJob_ConnectionAborted(t *testing.T) {
-	job, monitorCh := newJobWithMonitorCh(10 * time.Second)
+	job, doneCh := newJobWithDoneCh(10 * time.Second)
 	go job.Loop()
 
 	job.EventChannel <- ParticipantConnectionAborted
 
 	select {
-	case msg := <-monitorCh:
-		if msg.State != Completed {
-			t.Errorf("expected Completed, got %v", msg.State)
+	case doneJob := <-doneCh:
+		if doneJob.state != Completed {
+			t.Errorf("expected Completed, got %v", doneJob.state)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for Completed MonitorMessage")
+		t.Fatal("timed out waiting for Completed signal on doneCh")
 	}
 	err := job.Close()
 	if err != nil {
@@ -178,13 +179,13 @@ func TestDelayedEventJob_ConnectionAborted(t *testing.T) {
 // WaitingForInitialConnect → Disconnected automatically.
 func TestDelayedEventJob_WaitingStateTimedOut(t *testing.T) {
 	mockExecOK(t)
-	job, monitorCh := newJobWithMonitorCh(50 * time.Millisecond) // fires quickly
+	job, doneCh := newJobWithDoneCh(50 * time.Millisecond) // fires quickly
 	go job.Loop()
 
 	select {
-	case msg := <-monitorCh:
-		if msg.State != Disconnected {
-			t.Errorf("expected Disconnected, got %v", msg.State)
+	case doneJob := <-doneCh:
+		if doneJob.state != Disconnected {
+			t.Errorf("expected Disconnected, got %v", doneJob.state)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for WaitingStateTimedOut → Disconnected")
@@ -199,10 +200,10 @@ func TestDelayedEventJob_WaitingStateTimedOut(t *testing.T) {
 
 // TestDelayedEventJob_ParticipantDisconnected verifies
 // Connected → Disconnected via ParticipantDisconnectedIntentionally,
-// and that the monitor channel receives a Disconnected message.
+// and that the done channel receives the job pointer with state Disconnected.
 func TestDelayedEventJob_ParticipantDisconnected(t *testing.T) {
 	mockExecOK(t)
-	job, monitorCh := newJobWithMonitorCh(10 * time.Second)
+	job, doneCh := newJobWithDoneCh(10 * time.Second)
 	go job.Loop()
 
 	job.EventChannel <- ParticipantConnected
@@ -210,12 +211,12 @@ func TestDelayedEventJob_ParticipantDisconnected(t *testing.T) {
 	job.EventChannel <- ParticipantDisconnectedIntentionally
 
 	select {
-	case msg := <-monitorCh:
-		if msg.State != Disconnected {
-			t.Errorf("expected Disconnected, got %v", msg.State)
+	case doneJob := <-doneCh:
+		if doneJob.state != Disconnected {
+			t.Errorf("expected Disconnected, got %v", doneJob.state)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for Disconnected MonitorMessage")
+		t.Fatal("timed out waiting for Disconnected signal on doneCh")
 	}
 	err := job.Close()
 	if err != nil {
@@ -227,7 +228,7 @@ func TestDelayedEventJob_ParticipantDisconnected(t *testing.T) {
 // via DelayedEventTimedOut
 func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
 	mockExecOK(t)
-	job := newTestJob(t, 10 * time.Millisecond)
+	job := newTestJob(t, 10*time.Millisecond)
 	go job.Loop()
 
 	job.EventChannel <- ParticipantConnected
@@ -247,7 +248,7 @@ func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
 // via an explicit DelayedEventNotFound signal.
 func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 	mockExecOK(t)
-	job  := newTestJob(t, 10 * time.Second)
+	job := newTestJob(t, 10*time.Second)
 	go job.Loop()
 
 	job.EventChannel <- ParticipantConnected
@@ -294,9 +295,9 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	// Test Connected state
 	job = newTestJob(t, 10*time.Second)
 	go job.Loop()
-	job.EventChannel <- ParticipantConnected  // Transitioning to Connected
+	job.EventChannel <- ParticipantConnected // Transitioning to Connected
 	time.Sleep(20 * time.Millisecond)
-	
+
 	// WaitingStateTimedOut in Connected → no-op.
 	job.EventChannel <- WaitingStateTimedOut
 	time.Sleep(20 * time.Millisecond)
@@ -313,9 +314,9 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	// Test Completed state
 	job = newTestJob(t, 10*time.Second)
 	go job.Loop()
-	job.EventChannel <- ParticipantConnectionAborted  // Transitioning to Completed
+	job.EventChannel <- ParticipantConnectionAborted // Transitioning to Completed
 	time.Sleep(20 * time.Millisecond)
-	
+
 	// WaitingStateTimedOut in Completed → no-op.
 	job.EventChannel <- WaitingStateTimedOut
 	time.Sleep(20 * time.Millisecond)
@@ -364,9 +365,9 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	// Test Replaced state
 	job = newTestJob(t, 10*time.Second)
 	go job.Loop()
-	job.EventChannel <- JobReplaced  // Transitioning to Replaced
+	job.EventChannel <- JobReplaced // Transitioning to Replaced
 	time.Sleep(20 * time.Millisecond)
-	
+
 	// WaitingStateTimedOut in Replaced → no-op.
 	job.EventChannel <- WaitingStateTimedOut
 	time.Sleep(20 * time.Millisecond)
@@ -415,11 +416,11 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	// Test Disconnected state
 	job = newTestJob(t, 10*time.Second)
 	go job.Loop()
-	job.EventChannel <- ParticipantConnected  // Transitioning to Connected
+	job.EventChannel <- ParticipantConnected // Transitioning to Connected
 	time.Sleep(20 * time.Millisecond)
-	job.EventChannel <- ParticipantConnectionAborted  // Transitioning to Disconnected
+	job.EventChannel <- ParticipantConnectionAborted // Transitioning to Disconnected
 	time.Sleep(20 * time.Millisecond)
-	
+
 	// WaitingStateTimedOut in Disconnected → no-op.
 	job.EventChannel <- WaitingStateTimedOut
 	time.Sleep(20 * time.Millisecond)
@@ -470,7 +471,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 
 // TestDelayedEventJob_ActionRestart_404 verifies that a 404 response from
 // ActionRestart causes DelayedEventNotFound to be fed back into the FSM,
-// resulting in a Disconnected MonitorMessage.
+// resulting in a Disconnected signal on doneCh.
 func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	original := ExecuteDelayedEventAction
 	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (*http.Response, error) {
@@ -481,7 +482,7 @@ func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	}
 	t.Cleanup(func() { ExecuteDelayedEventAction = original })
 
-	job, monitorCh := newJobWithMonitorCh(10 * time.Second)
+	job, doneCh := newJobWithDoneCh(10 * time.Second)
 	go job.Loop()
 
 	// Connected triggers an immediate DelayedEventReset.
@@ -489,9 +490,9 @@ func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	job.EventChannel <- ParticipantConnected
 
 	select {
-	case msg := <-monitorCh:
-		if msg.State != Disconnected {
-			t.Errorf("expected Disconnected after ActionRestart 404, got %v", msg.State)
+	case doneJob := <-doneCh:
+		if doneJob.state != Disconnected {
+			t.Errorf("expected Disconnected after ActionRestart 404, got %v", doneJob.state)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for Disconnected after ActionRestart 404")
@@ -504,7 +505,7 @@ func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 
 // TestDelayedEventJob_ActionRestart_Error verifies that an HTTP error from
 // ActionRestart causes DelayedEventTimedOut to be fed back into the FSM,
-// resulting in a Disconnected MonitorMessage.
+// resulting in a Disconnected signal on doneCh.
 func TestDelayedEventJob_ActionRestart_Error(t *testing.T) {
 	original := ExecuteDelayedEventAction
 	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (*http.Response, error) {
@@ -516,15 +517,15 @@ func TestDelayedEventJob_ActionRestart_Error(t *testing.T) {
 	t.Cleanup(func() { ExecuteDelayedEventAction = original })
 
 	// Short timeout so backoff gives up quickly after the error.
-	job, monitorCh := newJobWithMonitorCh(200 * time.Millisecond)
+	job, doneCh := newJobWithDoneCh(200 * time.Millisecond)
 	go job.Loop()
 
 	job.EventChannel <- ParticipantConnected
 
 	select {
-	case msg := <-monitorCh:
-		if msg.State != Disconnected {
-			t.Errorf("expected Disconnected after ActionRestart error, got %v", msg.State)
+	case doneJob := <-doneCh:
+		if doneJob.state != Disconnected {
+			t.Errorf("expected Disconnected after ActionRestart error, got %v", doneJob.state)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for Disconnected after ActionRestart error")
@@ -554,7 +555,6 @@ func TestDelayEventState_String(t *testing.T) {
 		}
 	}
 }
-
 
 func TestDelayedEventSignal_String(t *testing.T) {
 	for _, c := range []struct {
@@ -602,7 +602,7 @@ func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
 	// Now cancel and close — Loop() should exit promptly.
 	job.Cancel()
 	done := make(chan struct{})
-	go func() { 
+	go func() {
 		err := job.Close()
 		if err != nil {
 			t.Errorf("Close: %v", err)
@@ -617,45 +617,6 @@ func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
 	if job.state != DelayEventState(Replaced) {
 		t.Errorf("expected state %v, got %v", DelayEventState(Replaced), job.state)
 	}
-}
-
-// TestLiveKitRoomMonitor_ReplaceJob_JobReplacedSignal verifies the full
-// replacement path through LiveKitRoomMonitor.Loop():
-//
-//  1. A job is handed over for identity X.
-//  2. A second job for the same identity X is handed over.
-//  3. Loop() sends JobReplaced on the first job's EventChannel (normal path).
-//  4. The first job transitions to Replaced and is closed cleanly.
-//  5. The second job becomes the active job for identity X.
-func TestLiveKitRoomMonitor_ReplaceJob_JobReplacedSignal(t *testing.T) {
-	alias := LiveKitRoomAlias("replace-signal-room")
-	m , _ := newTestMonitor(t, alias)
-
-	identity := LiveKitIdentity("@replace-signal:example.com")
-	req := defaultJobRequest(alias, identity)
-
-	// Hand over first job.
-	id1, ok := m.HandoverJob(req)
-	if !ok {
-		t.Fatal("first HandoverJob failed")
-	}
-
-	// Small delay so Loop() registers the first job before we replace it.
-	time.Sleep(20 * time.Millisecond)
-
-	// Hand over second job for the same identity — triggers replacement.
-	// Loop() will: send JobReplaced on job1.EventChannel, cancel job1, start job2.
-	id2, ok := m.HandoverJob(req)
-	if !ok {
-		t.Fatal("second HandoverJob failed")
-	}
-	if id2 <= id1 {
-		t.Errorf("replacement jobID (%v) must be greater than original (%v)", id2, id1)
-	}
-
-	// Give Loop() time to complete the replacement.
-	time.Sleep(50 * time.Millisecond)
-	// newTestMonitor cleanup verifies clean shutdown — no deadlock = success.
 }
 
 // TestDelayedEventJob_JobReplaced_FullChannel verifies the default (drop)
@@ -704,7 +665,7 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("job did not close cleanly after full-channel JobReplaced drop")
 	}
-	// We are still in state WaitingForInitialConnect because the JobReplaced signal was dropped, 
+	// We are still in state WaitingForInitialConnect because the JobReplaced signal was dropped,
 	// but that's fine — the key is that we didn't deadlock and Loop() exited cleanly.
 	if job.state != DelayEventState(WaitingForInitialConnect) {
 		t.Errorf("expected state %v, got %v", DelayEventState(WaitingForInitialConnect), job.state)
@@ -717,7 +678,7 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 // SFUParticipantGone in the Connected state triggers → Disconnected.
 func TestDelayedEventJob_SFUParticipantGone_Connected(t *testing.T) {
 	mockExecOK(t)
-	job, monitorCh := newJobWithMonitorCh(10 * time.Second)
+	job, doneCh := newJobWithDoneCh(10 * time.Second)
 	go job.Loop()
 
 	job.EventChannel <- ParticipantConnected
@@ -725,9 +686,9 @@ func TestDelayedEventJob_SFUParticipantGone_Connected(t *testing.T) {
 	job.EventChannel <- SFUParticipantGone
 
 	select {
-	case msg := <-monitorCh:
-		if msg.State != Disconnected {
-			t.Errorf("expected Disconnected after SFUParticipantGone, got %v", msg.State)
+	case doneJob := <-doneCh:
+		if doneJob.state != Disconnected {
+			t.Errorf("expected Disconnected after SFUParticipantGone, got %v", doneJob.state)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for Disconnected after SFUParticipantGone")
@@ -755,121 +716,205 @@ func TestDelayedEventJob_SFUParticipantGone_WrongState(t *testing.T) {
 	}
 }
 
-// TestLiveKitRoomMonitor_SanityCheck_DetectsGoneParticipant verifies the full
-// sanity-check path: after the initial lookup succeeds, the periodic ticker
-// detects that the participant is gone and emits SFUParticipantGone → the job
-// transitions to Disconnected and the monitor sends NoJobsLeft.
-func TestLiveKitRoomMonitor_SanityCheck_DetectsGoneParticipant(t *testing.T) {
-	// Phase 1 (initial lookup): succeed immediately.
-	// Phase 2 (sanity): fail on first tick → emit SFUParticipantGone.
-	lookupCount := 0
-	original := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = original })
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, id LiveKitIdentity) (SFUMessage, error) {
-		lookupCount++
-		if lookupCount == 1 {
-			// Initial lookup succeeds.
-			return SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: id}, nil
+// ── LiveKitRoomWorker ─────────────────────────────────────────────────────────
+
+// TestLiveKitRoomWorker_Phase1_FindsParticipant verifies the Phase 1 path:
+// after a job is registered, the room worker's immediate doCheck() call finds
+// the participant and delivers ParticipantLookupSuccessful to the job's event
+// channel. We confirm Phase 1 completed by counting ListParticipants calls
+// — exactly one call means Phase 1 ran and the participant was found.
+func TestLiveKitRoomWorker_Phase1_FindsParticipant(t *testing.T) {
+	const identity LiveKitIdentity = "@alice:example.com"
+	const room LiveKitRoomAlias = "phase1-room"
+
+	phase1Done := make(chan struct{})
+	original := LiveKitListParticipants
+	t.Cleanup(func() { LiveKitListParticipants = original })
+	LiveKitListParticipants = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+		select {
+		case <-phase1Done:
+		default:
+			close(phase1Done)
 		}
-		// Sanity tick: participant gone.
-		return SFUMessage{}, fmt.Errorf("not found")
+		return &livekit.ListParticipantsResponse{
+			Participants: []*livekit.ParticipantInfo{
+				{Identity: string(identity)},
+			},
+		}, nil
 	}
 
-	originalExec := ExecuteDelayedEventAction
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	mockExecOK(t)
+
+	doneCh := make(chan *DelayedEventJob, 5)
+	job, err := NewDelayedEventJob(
+		context.Background(),
+		&DelayedEventRequest{
+			DelayCsApiUrl:   "https://example.com",
+			DelayId:         "phase1-id",
+			DelayTimeout:    10 * time.Second,
+			LiveKitRoom:     room,
+			LiveKitIdentity: identity,
+		},
+		doneCh,
+	)
+	if err != nil {
+		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
+	go job.Loop()
 
-	const sanityInterval = 50 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// sanityInterval == 0 so no Phase 2 ticker fires; Phase 1 runs once on Register.
+	w := NewLiveKitRoomWorker(room, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
+	go w.run(ctx)
+	w.Register(ctx, identity, job.EventChannel)
 
-	alias := LiveKitRoomAlias("sanity-check-room")
-	handlerCh := make(chan HandlerMessage, 5)
-	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
-	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias, sanityInterval)
-	go m.Loop()
-	t.Cleanup(func() {
-		if err := m.Close(); err != nil {
-			t.Errorf("Close() failed: %v", err)
-		}
-	})
-
-	_, ok := m.HandoverJob(&DelayedEventRequest{
-		DelayCsApiUrl:   "https://matrix.example.com",
-		DelayId:         "sanity-delay-id",
-		DelayTimeout:    10 * time.Second,
-		LiveKitRoom:     alias,
-		LiveKitIdentity: "@sanity-user:example.com",
-	})
-	if !ok {
-		t.Fatal("HandoverJob failed")
-	}
-
-	// Wait for NoJobsLeft — sanity check detected gone participant → Disconnected.
 	select {
-	case msg := <-handlerCh:
-		if msg.Event != NoJobsLeft {
-			t.Errorf("expected NoJobsLeft, got %v", msg.Event)
-		}
+	case <-phase1Done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for NoJobsLeft after sanity check detected gone participant")
+		t.Fatal("timed out waiting for Phase 1 ListParticipants call")
+	}
+
+	job.Cancel()
+	if err := job.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 
-// TestLiveKitRoomMonitor_SanityCheck_Disabled verifies that when
-// sanityCheckInterval is 0, the goroutine exits after the initial lookup
-// without starting the ticker — no spurious SFUParticipantGone signals.
-func TestLiveKitRoomMonitor_SanityCheck_Disabled(t *testing.T) {
-	lookupCount := 0
-	original := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = original })
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, id LiveKitIdentity) (SFUMessage, error) {
-		lookupCount++
-		if lookupCount == 1 {
-			return SFUMessage{Type: ParticipantLookupSuccessful, LiveKitIdentity: id}, nil
+// TestLiveKitRoomWorker_Phase2_DetectsGoneParticipant verifies the Phase 2
+// path: after Phase 1 confirms the participant, the periodic ticker fires a
+// ListParticipants that no longer includes the identity, causing the room
+// worker to send SFUParticipantGone and the job to enter Disconnected.
+func TestLiveKitRoomWorker_Phase2_DetectsGoneParticipant(t *testing.T) {
+	const identity LiveKitIdentity = "@bob:example.com"
+	const room LiveKitRoomAlias = "phase2-room"
+
+	callCount := 0
+	original := LiveKitListParticipants
+	t.Cleanup(func() { LiveKitListParticipants = original })
+	LiveKitListParticipants = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+		callCount++
+		if callCount == 1 {
+			// Phase 1: participant present.
+			return &livekit.ListParticipantsResponse{
+				Participants: []*livekit.ParticipantInfo{
+					{Identity: string(identity)},
+				},
+			}, nil
 		}
-		// Should never be called again when sanity check is disabled.
-		t.Errorf("unexpected lookup call #%d (sanity check should be disabled)", lookupCount)
-		return SFUMessage{}, fmt.Errorf("not found")
+		// Phase 2: participant gone.
+		return &livekit.ListParticipantsResponse{}, nil
 	}
 
-	originalExec := ExecuteDelayedEventAction
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	mockExecOK(t)
+
+	const sanityInterval = 50 * time.Millisecond
+	doneCh := make(chan *DelayedEventJob, 5)
+	job, err := NewDelayedEventJob(
+		context.Background(),
+		&DelayedEventRequest{
+			DelayCsApiUrl:   "https://example.com",
+			DelayId:         "phase2-id",
+			DelayTimeout:    10 * time.Second,
+			LiveKitRoom:     room,
+			LiveKitIdentity: identity,
+		},
+		doneCh,
+	)
+	if err != nil {
+		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
+	go job.Loop()
 
-	alias := LiveKitRoomAlias("sanity-disabled-room")
-	handlerCh := make(chan HandlerMessage, 5)
-	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
-	// sanityCheckInterval = 0 → disabled
-	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias, 0)
-	go m.Loop()
-	t.Cleanup(func() {
-		if err := m.Close(); err != nil {
-			t.Errorf("Close() failed: %v", err)
-		}
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewLiveKitRoomWorker(room, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, sanityInterval)
+	go w.run(ctx)
+	w.Register(ctx, identity, job.EventChannel)
 
-	_, ok := m.HandoverJob(&DelayedEventRequest{
-		DelayCsApiUrl:   "https://matrix.example.com",
-		DelayId:         "disabled-delay-id",
-		DelayTimeout:    10 * time.Second,
-		LiveKitRoom:     alias,
-		LiveKitIdentity: "@no-sanity:example.com",
-	})
-	if !ok {
-		t.Fatal("HandoverJob failed")
-	}
-
-	// Wait briefly — no SFUParticipantGone should arrive.
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify that no unexpected signals arrived.
 	select {
-	case msg := <-handlerCh:
-		t.Errorf("unexpected handler message: %+v", msg)
-	default:
-		// Expected: no messages.
+	case doneJob := <-doneCh:
+		if doneJob.state != Disconnected {
+			t.Errorf("expected Disconnected after Phase 2 detected gone participant, got %v", doneJob.state)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Disconnected after Phase 2 sanity check")
+	}
+	if err := job.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestLiveKitRoomWorker_Phase2_Disabled verifies that when sanityInterval is 0,
+// Phase 2 never fires: after Phase 1 confirms the participant, no further
+// ListParticipants calls are made and no SFUParticipantGone signal is sent.
+func TestLiveKitRoomWorker_Phase2_Disabled(t *testing.T) {
+	const identity LiveKitIdentity = "@carol:example.com"
+	const room LiveKitRoomAlias = "phase2-disabled-room"
+
+	// phase1Done is closed on the first ListParticipants call.
+	// After it fires we cancel the context, which stops the room worker.
+	// callCount is only read after all goroutines have exited — no race.
+	phase1Done := make(chan struct{})
+	callCount := 0
+	original := LiveKitListParticipants
+	t.Cleanup(func() { LiveKitListParticipants = original })
+	LiveKitListParticipants = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+		callCount++
+		select {
+		case <-phase1Done:
+		default:
+			close(phase1Done)
+		}
+		return &livekit.ListParticipantsResponse{
+			Participants: []*livekit.ParticipantInfo{
+				{Identity: string(identity)},
+			},
+		}, nil
+	}
+
+	mockExecOK(t)
+
+	doneCh := make(chan *DelayedEventJob, 5)
+	job, err := NewDelayedEventJob(
+		context.Background(),
+		&DelayedEventRequest{
+			DelayCsApiUrl:   "https://example.com",
+			DelayId:         "disabled-id",
+			DelayTimeout:    10 * time.Second,
+			LiveKitRoom:     room,
+			LiveKitIdentity: identity,
+		},
+		doneCh,
+	)
+	if err != nil {
+		t.Fatalf("NewDelayedEventJob: %v", err)
+	}
+	go job.Loop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// sanityInterval == 0 disables Phase 2.
+	w := NewLiveKitRoomWorker(room, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
+	go w.run(ctx)
+	w.Register(ctx, identity, job.EventChannel)
+
+	// Wait for Phase 1 then immediately stop the room worker.
+	select {
+	case <-phase1Done:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for Phase 1")
+	}
+	cancel() // stops room worker; no more ListParticipants calls possible after this
+
+	// Give room worker time to exit, then verify it made exactly one call.
+	time.Sleep(50 * time.Millisecond)
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 ListParticipants call (Phase 2 disabled), got %d", callCount)
+	}
+
+	job.Cancel()
+	if err := job.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }

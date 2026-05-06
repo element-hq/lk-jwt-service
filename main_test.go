@@ -5,7 +5,7 @@
 // Please see LICENSE files in the repository root for full details.
 
 // main_test.go contains integration tests for HTTP handlers, SFURequest
-// validation, and LiveKitRoomMonitor lifecycle.
+// validation, and Handler.loop() job lifecycle.
 
 package main
 
@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -735,215 +734,6 @@ func TestProcessLegacySFURequest(t *testing.T) {
 	}
 }
 
-// ── LiveKitRoomMonitor integration tests ──────────────────────────────────────
-//
-// All state lives inside Loop(). Tests use the public API only:
-//   HandoverJob(), Close(), SFUCommChan.
-
-// newTestMonitor creates a monitor with LIFO cleanup to prevent races on the
-// LiveKitParticipantLookup global: monitor closes first, then global restored.
-func newTestMonitor(t *testing.T, alias LiveKitRoomAlias) (*LiveKitRoomMonitor, chan HandlerMessage) {
-	t.Helper()
-	original := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = original }) // runs last
-
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
-		<-ctx.Done()
-		return SFUMessage{}, ctx.Err()
-	}
-
-	handlerCh := make(chan HandlerMessage, 10)
-	lkAuth := &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}
-	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, lkAuth, alias, 0)
-	go m.Loop()
-
-	t.Cleanup(func() { // runs first
-		if err := m.Close(); err != nil {
-			t.Errorf("newTestMonitor cleanup: Close() failed: %v", err)
-		}
-	})
-	return m, handlerCh
-}
-
-func defaultJobRequest(alias LiveKitRoomAlias, identity LiveKitIdentity) *DelayedEventRequest {
-	return &DelayedEventRequest{
-		DelayCsApiUrl:   "https://synapse.m.localhost",
-		DelayId:         "syd_astTzXBzAazONpxHCqzW",
-		DelayTimeout:    10 * time.Second,
-		LiveKitRoom:     alias,
-		LiveKitIdentity: identity,
-	}
-}
-
-func TestLiveKitRoomMonitor_HandoverAndNoJobsLeft(t *testing.T) {
-	alias := LiveKitRoomAlias("test-room-1")
-	m, _ := newTestMonitor(t, alias)
-
-	jobID, ok := m.HandoverJob(defaultJobRequest(alias, "@alice:example.com"))
-	if !ok {
-		t.Fatal("HandoverJob returned not-ok")
-	}
-	if jobID == "" {
-		t.Fatal("expected non-empty jobID")
-	}
-	if err := m.Close(); err != nil {
-		t.Fatalf("Close() failed: %v", err)
-	}
-	select {
-	case <-m.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("monitor did not shut down in time")
-	}
-}
-
-func TestLiveKitRoomMonitor_MultipleHandovers(t *testing.T) {
-	alias := LiveKitRoomAlias("test-room-multi")
-	m, _ := newTestMonitor(t, alias)
-
-	for _, id := range []LiveKitIdentity{"@alice:example.com", "@bob:example.com", "@charlie:example.com"} {
-		if _, ok := m.HandoverJob(defaultJobRequest(alias, id)); !ok {
-			t.Fatalf("HandoverJob failed for %s", id)
-		}
-	}
-	if err := m.Close(); err != nil {
-		t.Fatalf("Close() failed: %v", err)
-	}
-	select {
-	case <-m.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("monitor did not shut down in time")
-	}
-}
-
-func TestLiveKitRoomMonitor_HandoverOnClosedMonitor(t *testing.T) {
-	alias := LiveKitRoomAlias("test-room-closed")
-	m, _ := newTestMonitor(t, alias)
-
-	if err := m.Close(); err != nil {
-		t.Fatalf("Close() failed: %v", err)
-	}
-	select {
-	case <-m.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("monitor did not close in time")
-	}
-	if _, ok := m.HandoverJob(defaultJobRequest(alias, "@late:example.com")); ok {
-		t.Error("expected HandoverJob to fail on a closed monitor")
-	}
-}
-
-func TestLiveKitRoomMonitor_SFUEventsRouted(t *testing.T) {
-	alias := LiveKitRoomAlias("test-room-sfu")
-	m, _ := newTestMonitor(t, alias)
-
-	identity := LiveKitIdentity("@sfu-user:example.com")
-	if _, ok := m.HandoverJob(defaultJobRequest(alias, identity)); !ok {
-		t.Fatal("HandoverJob failed")
-	}
-	time.Sleep(20 * time.Millisecond)
-	m.SFUCommChan <- SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity}
-	m.SFUCommChan <- SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity}
-	time.Sleep(20 * time.Millisecond)
-}
-
-func TestLiveKitRoomMonitor_RaceConditionStress(t *testing.T) {
-	original := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = original })
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
-		<-ctx.Done()
-		return SFUMessage{}, ctx.Err()
-	}
-
-	alias := LiveKitRoomAlias("stress-room")
-	handlerCh := make(chan HandlerMessage, 100)
-	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, alias, 0)
-	go m.Loop()
-	t.Cleanup(func() {
-		if err := m.Close(); err != nil {
-			t.Errorf("Close() failed: %v", err)
-		}
-	})
-
-	var wg sync.WaitGroup
-	wg.Add(50)
-	for i := 0; i < 50; i++ {
-		go func(n int) {
-			defer wg.Done()
-			_, _ = m.HandoverJob(defaultJobRequest(alias, LiveKitIdentity(fmt.Sprintf("@user%d:example.com", n))))
-		}(i)
-	}
-	wg.Wait()
-}
-
-func TestLiveKitRoomMonitor_ReplaceJob(t *testing.T) {
-	alias := LiveKitRoomAlias("replace-room")
-	m, _ := newTestMonitor(t, alias)
-
-	identity := LiveKitIdentity("@replace-me:example.com")
-	req := defaultJobRequest(alias, identity)
-
-	id1, ok := m.HandoverJob(req)
-	if !ok {
-		t.Fatal("first HandoverJob failed")
-	}
-	time.Sleep(20 * time.Millisecond)
-	id2, ok := m.HandoverJob(req)
-	if !ok {
-		t.Fatal("second HandoverJob (replacement) failed")
-	}
-	if id2 <= id1 {
-		t.Errorf("replacement jobID (%v) must be greater than original (%v)", id2, id1)
-	}
-}
-
-func TestLiveKitRoomMonitor_NoJobsLeftSignal(t *testing.T) {
-	originalLookup := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
-		<-ctx.Done()
-		return SFUMessage{}, ctx.Err()
-	}
-
-	originalExec := ExecuteDelayedEventAction
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK}, nil
-	}
-
-	alias := LiveKitRoomAlias("nojobsleft-room")
-	handlerCh := make(chan HandlerMessage, 5)
-	m := NewLiveKitRoomMonitor(context.Background(), handlerCh, &LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, alias, 0)
-	go m.Loop()
-	t.Cleanup(func() {
-		if err := m.Close(); err != nil {
-			t.Errorf("Close() failed: %v", err)
-		}
-	})
-
-	identity := LiveKitIdentity("@nojobs:example.com")
-	if _, ok := m.HandoverJob(defaultJobRequest(alias, identity)); !ok {
-		t.Fatal("HandoverJob failed")
-	}
-
-	time.Sleep(30 * time.Millisecond)
-	m.SFUCommChan <- SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity}
-	time.Sleep(30 * time.Millisecond)
-	m.SFUCommChan <- SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity}
-
-	select {
-	case msg := <-handlerCh:
-		if msg.Event != NoJobsLeft {
-			t.Errorf("expected NoJobsLeft, got %v", msg.Event)
-		}
-		if msg.RoomAlias != alias {
-			t.Errorf("unexpected room alias: %v", msg.RoomAlias)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for NoJobsLeft")
-	}
-	slog.Info("TestLiveKitRoomMonitor_NoJobsLeftSignal passed")
-}
-
 // ── Handler.loop() internals ─────────────────────────────────────────────────
 // These tests exercise loop() directly via addDelayedEventJob and sfuEventCh.
 
@@ -968,11 +758,11 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 	// LIFO cleanup order: register global restores FIRST (run last),
 	// handler.Close LAST (runs first) — ensures all goroutines exit before
 	// the globals are restored.
-	original := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = original }) // runs last
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
+	original := LiveKitListParticipants
+	t.Cleanup(func() { LiveKitListParticipants = original }) // runs last
+	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
 		<-ctx.Done()
-		return SFUMessage{}, ctx.Err()
+		return nil, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -997,17 +787,17 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 	})
 	// No panic or deadlock = success.
 }
-// TestHandler_Loop_NoJobsLeft verifies that loop() removes a monitor after it
-// sends NoJobsLeft, exercising the full Connected → Disconnected → cleanup path.
+// TestHandler_Loop_NoJobsLeft verifies that loop() cleans up a job after it
+// signals doneCh, exercising the full Connected → Disconnected → cleanup path.
 func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	// LIFO cleanup order: register global restores FIRST (run last),
 	// handler.Close LAST (runs first) — ensures all goroutines exit before
 	// the globals are restored.
-	original := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = original }) // runs last
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
+	original := LiveKitListParticipants
+	t.Cleanup(func() { LiveKitListParticipants = original }) // runs last
+	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
 		<-ctx.Done()
-		return SFUMessage{}, ctx.Err()
+		return nil, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -1209,30 +999,24 @@ func TestSfuEventFromWebhook_UnknownEvent(t *testing.T) {
 	}
 }
 
-// ── Handler.loop() monitor lifecycle ─────────────────────────────────────────
+// ── Handler.loop() job lifecycle ─────────────────────────────────────────────
 
-// TestHandler_loop_AllMonitorsClosedOnShutdown verifies that handler.Close()
-// waits for ALL monitors to fully shut down — including their background
-// goroutines — before returning, regardless of whether monitors were removed
-// via the NoJobsLeft path or the ctx.Done() teardown path.
-//
-// This is the key invariant that prevents races on global function variables
-// (e.g. LiveKitParticipantLookup) between monitor goroutines and test cleanup.
-func TestHandler_loop_AllMonitorsClosedOnShutdown(t *testing.T) {
-	// Track which monitors have fully exited via their Loop() goroutine.
+// TestHandler_loop_AllJobsClosedOnShutdown verifies that handler.Close() waits
+// for ALL room worker goroutines to fully exit before returning.  This prevents
+// races on global function variables (e.g. LiveKitListParticipants) between
+// room worker goroutines and test cleanup.
+func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 	var mu sync.Mutex
 	var exited []string
 
-	original := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = original })
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, room LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
-		// Block until context is cancelled so we can observe that the goroutine
-		// is still running while handler.Close() must wait for it.
+	original := LiveKitListParticipants
+	t.Cleanup(func() { LiveKitListParticipants = original })
+	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, room LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
 		<-ctx.Done()
 		mu.Lock()
 		exited = append(exited, string(room))
 		mu.Unlock()
-		return SFUMessage{}, ctx.Err()
+		return nil, ctx.Err()
 	}
 
 	handler := NewHandler(
@@ -1241,7 +1025,7 @@ func TestHandler_loop_AllMonitorsClosedOnShutdown(t *testing.T) {
 		0, // sanityCheckInterval disabled
 	)
 
-	// Start three jobs in three different rooms → three monitors.
+	// Start three jobs in three different rooms — each spawns a room worker goroutine.
 	rooms := []LiveKitRoomAlias{"room-alpha", "room-beta", "room-gamma"}
 	for _, room := range rooms {
 		handler.addDelayedEventJob(&DelayedEventRequest{
@@ -1253,33 +1037,28 @@ func TestHandler_loop_AllMonitorsClosedOnShutdown(t *testing.T) {
 		})
 	}
 
-	// Give loop() time to register all three monitors.
 	time.Sleep(50 * time.Millisecond)
 
-	// Close the handler — must block until all three monitors (and their
-	// lookup goroutines) have fully exited.
+	// Close must block until all three room worker goroutines have exited.
 	handler.Close()
 
-	// After Close() returns the lookup goroutines must all have exited
-	// (they append to exited before returning).
 	mu.Lock()
 	defer mu.Unlock()
 	if len(exited) != len(rooms) {
-		t.Errorf("expected %d monitors to have exited, got %d: %v",
+		t.Errorf("expected %d room worker goroutines to have exited, got %d: %v",
 			len(rooms), len(exited), exited)
 	}
 }
 
-// TestHandler_loop_NoJobsLeft_MonitorFullyClosedBeforeHandlerClose verifies
-// the NoJobsLeft path: after a job finishes and the monitor sends NoJobsLeft,
-// the monitor is removed from the map AND its close goroutine completes before
-// handler.Close() returns.
-func TestHandler_loop_NoJobsLeft_MonitorFullyClosedBeforeHandlerClose(t *testing.T) {
-	originalLookup := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
+// TestHandler_loop_DoneCh_CleanupBeforeHandlerClose verifies the doneCh path:
+// after a job finishes and signals doneCh, the job is removed from the map AND
+// its close goroutine completes before handler.Close() returns.
+func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
+	originalLookup := LiveKitListParticipants
+	t.Cleanup(func() { LiveKitListParticipants = originalLookup })
+	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
 		<-ctx.Done()
-		return SFUMessage{}, ctx.Err()
+		return nil, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -1294,7 +1073,7 @@ func TestHandler_loop_NoJobsLeft_MonitorFullyClosedBeforeHandlerClose(t *testing
 		0, // sanityCheckInterval disabled
 	)
 
-	room := LiveKitRoomAlias("nojobsleft-shutdown-room")
+	room := LiveKitRoomAlias("donech-shutdown-room")
 	identity := LiveKitIdentity("@user:example.com")
 
 	handler.addDelayedEventJob(&DelayedEventRequest{
@@ -1305,8 +1084,7 @@ func TestHandler_loop_NoJobsLeft_MonitorFullyClosedBeforeHandlerClose(t *testing
 		LiveKitIdentity: identity,
 	})
 
-	// Drive the job to Disconnected → monitor sends NoJobsLeft → monitor removed
-	// from map and close goroutine started.
+	// Drive the job to Disconnected → ActionSend runs → doneCh signal → job removed.
 	time.Sleep(30 * time.Millisecond)
 	handler.sfuEventCh <- sfuEventRequest{
 		roomAlias: room,
@@ -1318,37 +1096,30 @@ func TestHandler_loop_NoJobsLeft_MonitorFullyClosedBeforeHandlerClose(t *testing
 		msg:       SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity},
 	}
 
-	// Wait for NoJobsLeft to be processed (monitor removed from map).
+	// Wait for doneCh to be processed (job removed from map, close goroutine started).
 	time.Sleep(200 * time.Millisecond)
 
-	// handler.Close() must complete cleanly — monitorWg.Wait() ensures the
-	// NoJobsLeft close goroutine has also finished.
+	// handler.Close() must complete cleanly — backgroundWg.Wait() ensures the
+	// close goroutine spawned from doneCh handling has also finished.
 	done := make(chan struct{})
 	go func() { handler.Close(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("handler.Close() blocked after NoJobsLeft — monitorWg not properly tracked")
+		t.Fatal("handler.Close() blocked after doneCh — backgroundWg not properly tracked")
 	}
 }
 
-// TestHandler_loop_MonitorIdMismatch_NoDeadlock verifies the MonitorId-mismatch
-// break path in the NoJobsLeft handler:
-//
-// 1. Job A is handed over for room X → Monitor M1 is created.
-// 2. M1's context is cancelled externally (simulated by handing over a second
-//    job for the same identity, which causes M1 to be replaced by M2).
-// 3. M1 sends NoJobsLeft — but by now M2 is in monitors[X], so MonitorId
-//    mismatches and loop() takes the break path without calling M1.Close().
-// 4. handler.Close() must still complete cleanly — monitorWg.Wait() must not
-//    block, proving that M1's Loop() already called monitorWg.Done() before
-//    sending NoJobsLeft, and M2 is properly closed via the ctx.Done() path.
-func TestHandler_loop_MonitorIdMismatch_NoDeadlock(t *testing.T) {
-	originalLookup := LiveKitParticipantLookup
-	t.Cleanup(func() { LiveKitParticipantLookup = originalLookup })
-	LiveKitParticipantLookup = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (SFUMessage, error) {
+// TestHandler_loop_JobReplacement_NoDeadlock verifies that replacing a job for
+// the same (room, identity) slot and then calling handler.Close() does not
+// deadlock.  A stale doneCh signal from the old job must be ignored (pointer
+// equality check in the doneCh case of loop()).
+func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
+	originalLookup := LiveKitListParticipants
+	t.Cleanup(func() { LiveKitListParticipants = originalLookup })
+	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
 		<-ctx.Done()
-		return SFUMessage{}, ctx.Err()
+		return nil, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -1363,49 +1134,28 @@ func TestHandler_loop_MonitorIdMismatch_NoDeadlock(t *testing.T) {
 		0, // sanityCheckInterval disabled
 	)
 
-	room := LiveKitRoomAlias("mismatch-room")
-	identity1 := LiveKitIdentity("@user1:example.com")
-	identity2 := LiveKitIdentity("@user2:example.com")
+	room := LiveKitRoomAlias("replacement-room")
+	identity := LiveKitIdentity("@same-user:example.com")
 
-	// Hand over job for identity1 → Monitor M1 created.
+	// Create first job.
 	handler.addDelayedEventJob(&DelayedEventRequest{
 		DelayCsApiUrl: "https://matrix.example.com", DelayId: "delay-1",
-		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity1,
+		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity,
 	})
-	time.Sleep(30 * time.Millisecond)
-
-	// Drive identity1 to Disconnected via SFU events.
-	// M1 will send NoJobsLeft and cancel itself.
-	handler.sfuEventCh <- sfuEventRequest{
-		roomAlias: room,
-		msg:       SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity1},
-	}
 	time.Sleep(20 * time.Millisecond)
-	handler.sfuEventCh <- sfuEventRequest{
-		roomAlias: room,
-		msg:       SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity1},
-	}
 
-	// Before loop() processes the NoJobsLeft from M1, hand over a new job for
-	// the same room → acquireMonitor detects M1.ctx.Done() and creates M2.
-	time.Sleep(20 * time.Millisecond)
+	// Replace with second job for the same identity — first job gets JobReplaced.
 	handler.addDelayedEventJob(&DelayedEventRequest{
 		DelayCsApiUrl: "https://matrix.example.com", DelayId: "delay-2",
-		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity2,
+		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity,
 	})
+	time.Sleep(100 * time.Millisecond)
 
-	// Give loop() time to process all events including the potentially
-	// mismatched NoJobsLeft from M1.
-	time.Sleep(200 * time.Millisecond)
-
-	// handler.Close() must complete without deadlock:
-	// - M1.Loop() already called monitorWg.Done() → no blockage there.
-	// - M2 is still in monitors map → ctx.Done() path closes it and waits.
 	done := make(chan struct{})
 	go func() { handler.Close(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("handler.Close() deadlocked after MonitorId mismatch on NoJobsLeft")
+		t.Fatal("handler.Close() deadlocked after job replacement")
 	}
 }

@@ -39,18 +39,6 @@ type LiveKitAuth struct {
 	lkUrl        string
 }
 
-type RoomMonitorEvent int
-
-const (
-	NoJobsLeft RoomMonitorEvent = iota
-)
-
-type HandlerMessage struct {
-	RoomAlias LiveKitRoomAlias
-	Event     RoomMonitorEvent
-	MonitorId UniqueID
-}
-
 type Config struct {
 	Key                   string
 	Secret                string
@@ -58,11 +46,11 @@ type Config struct {
 	SkipVerifyTLS         bool
 	FullAccessHomeservers []string
 	LkJwtBind             string
-	// SanityCheckInterval is the period at which the participant-lookup
-	// goroutine re-checks whether a connected participant is still present on
-	// the SFU.  Zero (the default) disables the sanity check entirely.
+	// SanityCheckInterval is the period at which the room worker re-checks
+	// whether connected participants are still present on the SFU.  Zero (the
+	// default) disables the sanity check entirely.
 	// Configure via LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS (unit: seconds).
-	SanityCheckInterval   time.Duration
+	SanityCheckInterval time.Duration
 }
 
 type MatrixRTCMemberType struct {
@@ -117,7 +105,7 @@ type SFUResponse struct {
 //
 // All three delayed-event fields are mandatory (unlike SFURequest where they
 // are optional).  The participant is assumed to be already present on the SFU,
-// so the monitor will use the participant-lookup backoff to confirm presence
+// so the participant-lookup goroutine uses its backoff to confirm presence
 // rather than waiting for the webhook (which has already fired).
 type MembershipLeaveDelegationRequest struct {
 	RoomID        string              `json:"room_id"`
@@ -288,38 +276,33 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 //
 // # Concurrency model
 //
-// Handler.loop() is the single goroutine that owns the liveKitRoomMonitors
-// map — no mutex needed.  HTTP handler goroutines communicate with loop()
+// Handler.loop() is the single goroutine that owns the jobs and roomWorkers
+// maps — no mutex needed.  HTTP handler goroutines communicate with loop()
 // exclusively through channels:
 //
-//   - addJobCh:      deliver a new DelayedEventRequest to loop(), which
-//                    creates/reuses a monitor and calls HandoverJob atomically.
-//   - sfuEventCh:    deliver an SFU webhook event to loop(), which routes it
-//                    to the correct monitor.
-//   - monitorCommChan: monitors send NoJobsLeft back to loop() for cleanup.
+//   - addJobCh:   deliver a new DelayedEventRequest to loop(), which creates a
+//                 DelayedEventJob and registers it with the room's worker.
+//   - sfuEventCh: deliver an SFU webhook event to loop(), which routes it
+//                 directly to the correct job by (room, identity) key.
+//   - jobDoneCh:  jobs signal loop() when they enter a terminal state so loop()
+//                 can cancel and clean them up.
 //
 // Because all map mutations happen in a single goroutine there are no data
 // races and no mutex is required.
-//
-// # Atomicity of job handover
-//
-// loop() performs both steps atomically: it looks up (or creates) the
-// monitor and calls HandoverJob in the same iteration, with no opportunity
-// for the monitor to be removed in between.
 type Handler struct {
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	liveKitAuth           LiveKitAuth
 	fullAccessHomeservers []string
 	skipVerifyTLS         bool
-	// sanityCheckInterval is the period between re-checks of connected
-	// participants.  Zero disables the sanity check.
+	// sanityCheckInterval is the period between room-worker sanity checks.
+	// Zero disables the sanity check.
 	sanityCheckInterval time.Duration
 	// loopDone is closed when loop() has exited.
-	loopDone         chan struct{}
-	monitorCommChan  chan HandlerMessage
-	addJobCh         chan addJobRequest
-	sfuEventCh       chan sfuEventRequest
+	loopDone   chan struct{}
+	jobDoneCh  chan *DelayedEventJob
+	addJobCh   chan addJobRequest
+	sfuEventCh chan sfuEventRequest
 }
 
 // addJobRequest is sent by HTTP handlers to loop() to add a delayed-event job.
@@ -350,7 +333,7 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		fullAccessHomeservers: fullAccessHomeservers,
 		sanityCheckInterval:   sanityCheckInterval,
 		loopDone:              make(chan struct{}),
-		monitorCommChan:       make(chan HandlerMessage, 10),
+		jobDoneCh:             make(chan *DelayedEventJob, 10),
 		addJobCh:              make(chan addJobRequest),
 		sfuEventCh:            make(chan sfuEventRequest, 200),
 	}
@@ -358,114 +341,135 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 	return h
 }
 
-// loop is the sole owner of liveKitRoomMonitors — no locking needed.
+// loop is the sole owner of the jobs and roomWorkers maps — no locking needed.
 func (h *Handler) loop() {
 	defer close(h.loopDone)
 
-	// The map lives entirely inside this goroutine.
-	monitors := make(map[LiveKitRoomAlias]*LiveKitRoomMonitor)
+	jobs := make(map[jobKey]*DelayedEventJob)
+	roomWorkers := make(map[LiveKitRoomAlias]*LiveKitRoomWorker)
 
-	// monitorWg tracks all monitors started by loop() so that when loop()
-	// exits it can wait for every monitor (and its lookup goroutines) to
-	// finish before returning.  This ensures that background goroutines no
-	// longer read global variables (e.g. LiveKitParticipantLookup) by the
-	// time tests restore them.
-	var monitorWg sync.WaitGroup
+	// loopWg tracks all goroutines spawned by loop(): job Loop() goroutines and
+	// room worker run() goroutines.  loopWg.Wait() in the ctx.Done() teardown
+	// path ensures no goroutine still references global function variables
+	// (e.g. LiveKitListParticipants, ExecuteDelayedEventAction) after
+	// Handler.Close() returns, which is required for test safety.
+	var loopWg sync.WaitGroup
 
-	// acquireMonitor returns the live monitor for a room, creating one if
-	// needed.  Called only from within loop().
-	acquireMonitor := func(lkRoom LiveKitRoomAlias) *LiveKitRoomMonitor {
-		if m, ok := monitors[lkRoom]; ok {
-			select {
-			case <-m.ctx.Done():
-				// Monitor is shutting down — replace it.
-				slog.Info("Handler: replacing shutting-down monitor",
-					"room", lkRoom, "MonitorId", m.MonitorId)
-			default:
-				return m
-			}
+	acquireRoomWorker := func(room LiveKitRoomAlias) *LiveKitRoomWorker {
+		if w, ok := roomWorkers[room]; ok {
+			return w
 		}
-		m := NewLiveKitRoomMonitor(h.ctx, h.monitorCommChan, &h.liveKitAuth, lkRoom, h.sanityCheckInterval)
-		monitorWg.Add(1)
+		w := NewLiveKitRoomWorker(room, h.liveKitAuth, h.sanityCheckInterval)
+		roomWorkers[room] = w
+		loopWg.Add(1)
 		go func() {
-			defer monitorWg.Done()
-			m.Loop()
+			defer loopWg.Done()
+			w.run(h.ctx)
 		}()
-		monitors[lkRoom] = m
-		slog.Debug("Handler: created LiveKitRoomMonitor",
-			"room", lkRoom, "MonitorId", m.MonitorId)
-		return m
+		return w
 	}
 
 	for {
 		select {
 		case <-h.ctx.Done():
 			slog.Debug("Handler: loop exiting")
-			// Close all remaining monitors and wait for them — and their
-			// lookup goroutines — to finish before loop() returns.  This
-			// prevents background goroutines from reading global function
-			// variables (e.g. LiveKitParticipantLookup) after tests have
-			// restored them.
-			for _, m := range monitors {
-				if err := m.Close(); err != nil {
-					slog.Error("Handler: error closing monitor on shutdown",
-						"room", m.RoomAlias, "MonitorId", m.MonitorId, "err", err)
+			// Cancel all job contexts first — unblocks goroutines waiting on
+			// jobDoneCh so they take the ctx.Done() path and exit promptly.
+			for _, job := range jobs {
+				job.Cancel()
+			}
+			// Drain any buffered terminal signals so no goroutine stays blocked
+			// trying to send on the now-dead loop.
+		drainDone:
+			for {
+				select {
+				case <-h.jobDoneCh:
+				default:
+					break drainDone
 				}
 			}
-			monitorWg.Wait()
+			// Wait for all job Loop() goroutines and room worker run() goroutines
+			// to exit before returning.
+			loopWg.Wait()
 			return
 
-		// ── job handover (atomic: lookup + HandoverJob in one step) ──────────
+		// ── add job ──────────────────────────────────────────────────────────
 		case req := <-h.addJobCh:
-			m := acquireMonitor(req.jobRequest.LiveKitRoom)
-			jobId, ok := m.HandoverJob(req.jobRequest)
-			if !ok {
-				slog.Error("Handler: HandoverJob failed",
+			key := jobKey{Room: req.jobRequest.LiveKitRoom, Identity: req.jobRequest.LiveKitIdentity}
+			roomWorker := acquireRoomWorker(key.Room)
+
+			job, err := NewDelayedEventJob(h.ctx, req.jobRequest, h.jobDoneCh)
+			if err != nil {
+				slog.Error("Handler: failed to create delayed event job",
 					"room", req.jobRequest.LiveKitRoom,
-					"lkId", req.jobRequest.LiveKitIdentity)
+					"lkId", req.jobRequest.LiveKitIdentity, "err", err)
+				req.result <- addJobResult{ok: false}
+				continue
 			}
-			req.result <- addJobResult{jobId: jobId, ok: ok}
+
+			if existing, ok := jobs[key]; ok {
+				slog.Info("Handler: replacing existing job",
+					"room", key.Room, "lkId", key.Identity,
+					"oldJobId", existing.JobId, "newJobId", job.JobId)
+				// Unregister old job from room worker before registering new one.
+				// registerCh is FIFO so the unregister is processed first.
+				roomWorker.Unregister(h.ctx, key.Identity)
+				select {
+				case existing.EventChannel <- JobReplaced:
+				default:
+				}
+				existing.Cancel()
+				// No Close() goroutine needed — existing.Loop() exits when its
+				// context is cancelled; loopWg.Wait() handles the rest.
+			}
+
+			jobs[key] = job
+			loopWg.Add(1)
+			go func() {
+				defer loopWg.Done()
+				job.Loop()
+			}()
+			roomWorker.Register(h.ctx, key.Identity, job.EventChannel)
+			slog.Debug("Handler: job created",
+				"room", key.Room, "lkId", key.Identity, "jobId", job.JobId)
+			req.result <- addJobResult{jobId: job.JobId, ok: true}
 
 		// ── SFU webhook routing ──────────────────────────────────────────────
 		case ev := <-h.sfuEventCh:
-			if m, ok := monitors[ev.roomAlias]; ok {
-				select {
-				case m.SFUCommChan <- ev.msg:
-				case <-m.ctx.Done():
-					// Monitor shutting down; event can be dropped safely.
+			key := jobKey{Room: ev.roomAlias, Identity: ev.msg.LiveKitIdentity}
+			if job, ok := jobs[key]; ok {
+				switch ev.msg.Type {
+				case ParticipantConnected, ParticipantDisconnectedIntentionally,
+					ParticipantConnectionAborted, SFUParticipantGone:
+					select {
+					case job.EventChannel <- ev.msg.Type:
+					case <-job.ctx.Done():
+					}
+				default:
+					slog.Warn("Handler: unexpected SFU event type",
+						"type", ev.msg.Type, "room", ev.roomAlias, "lkId", ev.msg.LiveKitIdentity)
 				}
 			}
 
-		// ── monitor lifecycle ────────────────────────────────────────────────
-		case event := <-h.monitorCommChan:
-			switch event.Event {
-			case NoJobsLeft:
-				m, ok := monitors[event.RoomAlias]
-				if !ok {
-					break
-				}
-				if m.MonitorId != event.MonitorId {
-					slog.Error("Handler: MonitorId mismatch on NoJobsLeft — ignoring",
-						"room", event.RoomAlias,
-						"mapMonitorId", m.MonitorId,
-						"eventMonitorId", event.MonitorId)
-					break
-				}
-				slog.Info("Handler: removing LiveKitRoomMonitor",
-					"room", event.RoomAlias, "MonitorId", m.MonitorId)
-				delete(monitors, event.RoomAlias)
-				// m.Loop() has already cancelled itself and called monitorWg.Done()
-				// before sending NoJobsLeft, so the monitorWg entry for this monitor
-				// is already settled.  Close() is called in a goroutine purely to
-				// avoid blocking loop() on the Close timeout — it does not need
-				// separate tracking.
-				go func(mon *LiveKitRoomMonitor) {
-					if err := mon.Close(); err != nil {
-						slog.Error("Handler: error closing monitor",
-							"room", event.RoomAlias, "MonitorId", mon.MonitorId, "err", err)
-					}
-				}(m)
+		// ── job lifecycle ─────────────────────────────────────────────────────
+		case doneJob := <-h.jobDoneCh:
+			key := jobKey{Room: doneJob.LiveKitRoom, Identity: doneJob.LiveKitIdentity}
+			current, ok := jobs[key]
+			if !ok || current != doneJob {
+				// Stale signal from a replaced job — pointer equality guards this.
+				slog.Debug("Handler: ignoring stale doneCh signal",
+					"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
+				break
 			}
+			slog.Info("Handler: job done, cleaning up",
+				"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
+			if w, ok := roomWorkers[key.Room]; ok {
+				w.Unregister(h.ctx, key.Identity)
+			}
+			delete(jobs, key)
+			doneJob.Cancel()
+			// No Close() goroutine needed — doneJob.Loop() exits on its own;
+			// loopWg.Wait() handles cleanup at shutdown.
 		}
 	}
 }
@@ -680,9 +684,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 //   - Requires all three delayed-event parameters (they are mandatory here).
 //
 // The participant is assumed to be already present on the SFU.  The
-// LiveKitRoomMonitor will use its participant-lookup backoff to confirm
-// presence, which covers the case where the SFU webhook has already fired
-// before this request arrived.
+// participant-lookup goroutine will use its backoff to confirm presence,
+// which covers the case where the SFU webhook has already fired before
+// this request arrived.
 func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *MembershipLeaveDelegationRequest) error {
 	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
 	if err != nil {

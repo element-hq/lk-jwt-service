@@ -424,6 +424,7 @@ func TestExecuteDelayedEventAction_ContentType(t *testing.T) {
 type mockRoomServiceClient struct {
 	createRoomFunc      func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error)
 	getParticipantFunc  func(ctx context.Context, req *livekit.RoomParticipantIdentity) (*livekit.ParticipantInfo, error)
+	listParticipantsFunc func(ctx context.Context, req *livekit.ListParticipantsRequest) (*livekit.ListParticipantsResponse, error)
 }
 
 func (m *mockRoomServiceClient) CreateRoom(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
@@ -438,6 +439,13 @@ func (m *mockRoomServiceClient) GetParticipant(ctx context.Context, req *livekit
 		return m.getParticipantFunc(ctx, req)
 	}
 	return &livekit.ParticipantInfo{}, nil
+}
+
+func (m *mockRoomServiceClient) ListParticipants(ctx context.Context, req *livekit.ListParticipantsRequest) (*livekit.ListParticipantsResponse, error) {
+	if m.listParticipantsFunc != nil {
+		return m.listParticipantsFunc(ctx, req)
+	}
+	return &livekit.ListParticipantsResponse{}, nil
 }
 
 // TestCreateLiveKitRoom_SuccessCreatingNewRoom verifies that CreateLiveKitRoom
