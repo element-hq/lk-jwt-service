@@ -276,12 +276,12 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 //
 // # Concurrency model
 //
-// Handler.loop() is the single goroutine that owns the jobs and roomWorkers
-// maps — no mutex needed.  HTTP handler goroutines communicate with loop()
-// exclusively through channels:
+// Handler.loop() is the single goroutine that owns the jobs map — no mutex
+// needed.  HTTP handler goroutines communicate with loop() exclusively through
+// channels:
 //
 //   - addJobCh:   deliver a new DelayedEventRequest to loop(), which creates a
-//                 DelayedEventJob and registers it with the room's worker.
+//                 DelayedEventJob and starts its participant-lookup goroutine.
 //   - sfuEventCh: deliver an SFU webhook event to loop(), which routes it
 //                 directly to the correct job by (room, identity) key.
 //   - jobDoneCh:  jobs signal loop() when they enter a terminal state so loop()
@@ -341,33 +341,20 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 	return h
 }
 
-// loop is the sole owner of the jobs and roomWorkers maps — no locking needed.
+// loop is the sole owner of the jobs map — no locking needed.
 func (h *Handler) loop() {
 	defer close(h.loopDone)
 
 	jobs := make(map[jobKey]*DelayedEventJob)
-	roomWorkers := make(map[LiveKitRoomAlias]*LiveKitRoomWorker)
 
-	// loopWg tracks all goroutines spawned by loop(): job Loop() goroutines and
-	// room worker run() goroutines.  loopWg.Wait() in the ctx.Done() teardown
-	// path ensures no goroutine still references global function variables
-	// (e.g. LiveKitListParticipants, ExecuteDelayedEventAction) after
-	// Handler.Close() returns, which is required for test safety.
+	// loopWg tracks all job.Loop() goroutines spawned by loop().
+	// loopWg.Wait() in the ctx.Done() teardown path ensures no goroutine still
+	// references global function variables (e.g. LiveKitListParticipants,
+	// ExecuteDelayedEventAction) after Handler.Close() returns, which is
+	// required for test safety.  Participant-lookup goroutines are tracked by
+	// job.backgroundWg and are therefore also waited on (Loop() calls backgroundWg.Wait()
+	// before it returns).
 	var loopWg sync.WaitGroup
-
-	acquireRoomWorker := func(room LiveKitRoomAlias) *LiveKitRoomWorker {
-		if w, ok := roomWorkers[room]; ok {
-			return w
-		}
-		w := NewLiveKitRoomWorker(room, h.liveKitAuth, h.sanityCheckInterval)
-		roomWorkers[room] = w
-		loopWg.Add(1)
-		go func() {
-			defer loopWg.Done()
-			w.run(h.ctx)
-		}()
-		return w
-	}
 
 	for {
 		select {
@@ -388,15 +375,13 @@ func (h *Handler) loop() {
 					break drainDone
 				}
 			}
-			// Wait for all job Loop() goroutines and room worker run() goroutines
-			// to exit before returning.
+			// Wait for all job Loop() goroutines to exit before returning.
 			loopWg.Wait()
 			return
 
 		// ── add job ──────────────────────────────────────────────────────────
 		case req := <-h.addJobCh:
 			key := jobKey{Room: req.jobRequest.LiveKitRoom, Identity: req.jobRequest.LiveKitIdentity}
-			roomWorker := acquireRoomWorker(key.Room)
 
 			job, err := NewDelayedEventJob(h.ctx, req.jobRequest, h.jobDoneCh)
 			if err != nil {
@@ -411,9 +396,6 @@ func (h *Handler) loop() {
 				slog.Info("Handler: replacing existing job",
 					"room", key.Room, "lkId", key.Identity,
 					"oldJobId", existing.JobId, "newJobId", job.JobId)
-				// Unregister old job from room worker before registering new one.
-				// registerCh is FIFO so the unregister is processed first.
-				roomWorker.Unregister(h.ctx, key.Identity)
 				select {
 				case existing.EventChannel <- JobReplaced:
 				default:
@@ -429,7 +411,7 @@ func (h *Handler) loop() {
 				defer loopWg.Done()
 				job.Loop()
 			}()
-			roomWorker.Register(h.ctx, key.Identity, job.EventChannel)
+			startParticipantLookup(job, h.liveKitAuth, h.sanityCheckInterval)
 			slog.Debug("Handler: job created",
 				"room", key.Room, "lkId", key.Identity, "jobId", job.JobId)
 			req.result <- addJobResult{jobId: job.JobId, ok: true}
@@ -463,9 +445,6 @@ func (h *Handler) loop() {
 			}
 			slog.Info("Handler: job done, cleaning up",
 				"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
-			if w, ok := roomWorkers[key.Room]; ok {
-				w.Unregister(h.ctx, key.Identity)
-			}
 			delete(jobs, key)
 			doneJob.Cancel()
 			// No Close() goroutine needed — doneJob.Loop() exits on its own;

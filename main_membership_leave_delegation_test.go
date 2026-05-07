@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/livekit/protocol/livekit"
 	"github.com/matrix-org/gomatrixserverlib/fclient"
 )
 
@@ -204,11 +203,11 @@ func TestHandleMembershipLeaveDelegation_Success(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
 
-	originalLookup := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = originalLookup })
-	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	originalLookup := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
+	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 
 	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
@@ -236,11 +235,11 @@ func TestHandleMembershipLeaveDelegation_NoJWT(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
 
-	originalLookup := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = originalLookup })
-	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	originalLookup := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
+	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 
 	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
@@ -286,11 +285,11 @@ func TestProcessMembershipLeaveDelegation_CreatesJob(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
 
-	originalLookup := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = originalLookup })
-	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	originalLookup := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
+	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 
 	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first

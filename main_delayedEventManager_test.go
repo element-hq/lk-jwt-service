@@ -12,12 +12,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/livekit/protocol/livekit"
 )
 
 // ── test helpers ──────────────────────────────────────────────────────────────
@@ -718,29 +717,25 @@ func TestDelayedEventJob_SFUParticipantGone_WrongState(t *testing.T) {
 
 // ── LiveKitRoomWorker ─────────────────────────────────────────────────────────
 
-// TestLiveKitRoomWorker_Phase1_FindsParticipant verifies the Phase 1 path:
-// after a job is registered, the room worker's immediate doCheck() call finds
-// the participant and delivers ParticipantLookupSuccessful to the job's event
-// channel. We confirm Phase 1 completed by counting ListParticipants calls
-// — exactly one call means Phase 1 ran and the participant was found.
-func TestLiveKitRoomWorker_Phase1_FindsParticipant(t *testing.T) {
+// ── startParticipantLookup ────────────────────────────────────────────────────
+
+// TestParticipantLookup_Phase1_FindsParticipant verifies that startParticipantLookup
+// immediately calls LiveKitGetParticipant and delivers ParticipantLookupSuccessful
+// to the job when the participant is present (sanityInterval == 0: one attempt only).
+func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 	const identity LiveKitIdentity = "@alice:example.com"
 	const room LiveKitRoomAlias = "phase1-room"
 
 	phase1Done := make(chan struct{})
-	original := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = original })
-	LiveKitListParticipants = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	original := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = original })
+	LiveKitGetParticipant = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		select {
 		case <-phase1Done:
 		default:
 			close(phase1Done)
 		}
-		return &livekit.ListParticipantsResponse{
-			Participants: []*livekit.ParticipantInfo{
-				{Identity: string(identity)},
-			},
-		}, nil
+		return nil // participant present
 	}
 
 	mockExecOK(t)
@@ -761,13 +756,8 @@ func TestLiveKitRoomWorker_Phase1_FindsParticipant(t *testing.T) {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
 	go job.Loop()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// sanityInterval == 0 so no Phase 2 ticker fires; Phase 1 runs once on Register.
-	w := NewLiveKitRoomWorker(room, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
-	go w.run(ctx)
-	w.Register(ctx, identity, job.EventChannel)
+	// sanityInterval == 0: one attempt only, no Phase 2.
+	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
 
 	select {
 	case <-phase1Done:
@@ -781,29 +771,23 @@ func TestLiveKitRoomWorker_Phase1_FindsParticipant(t *testing.T) {
 	}
 }
 
-// TestLiveKitRoomWorker_Phase2_DetectsGoneParticipant verifies the Phase 2
-// path: after Phase 1 confirms the participant, the periodic ticker fires a
-// ListParticipants that no longer includes the identity, causing the room
-// worker to send SFUParticipantGone and the job to enter Disconnected.
-func TestLiveKitRoomWorker_Phase2_DetectsGoneParticipant(t *testing.T) {
+// TestParticipantLookup_Phase2_DetectsGoneParticipant verifies the Phase 2 path:
+// after Phase 1 confirms the participant, the periodic ticker fires a
+// ListParticipants that no longer includes the identity, causing
+// startParticipantLookup to send SFUParticipantGone and the job to enter Disconnected.
+func TestParticipantLookup_Phase2_DetectsGoneParticipant(t *testing.T) {
 	const identity LiveKitIdentity = "@bob:example.com"
 	const room LiveKitRoomAlias = "phase2-room"
 
 	callCount := 0
-	original := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = original })
-	LiveKitListParticipants = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	original := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = original })
+	LiveKitGetParticipant = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		callCount++
 		if callCount == 1 {
-			// Phase 1: participant present.
-			return &livekit.ListParticipantsResponse{
-				Participants: []*livekit.ParticipantInfo{
-					{Identity: string(identity)},
-				},
-			}, nil
+			return nil // Phase 1: participant present.
 		}
-		// Phase 2: participant gone.
-		return &livekit.ListParticipantsResponse{}, nil
+		return errors.New("not found") // Phase 2: participant gone.
 	}
 
 	mockExecOK(t)
@@ -825,12 +809,7 @@ func TestLiveKitRoomWorker_Phase2_DetectsGoneParticipant(t *testing.T) {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
 	go job.Loop()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	w := NewLiveKitRoomWorker(room, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, sanityInterval)
-	go w.run(ctx)
-	w.Register(ctx, identity, job.EventChannel)
+	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, sanityInterval)
 
 	select {
 	case doneJob := <-doneCh:
@@ -845,32 +824,28 @@ func TestLiveKitRoomWorker_Phase2_DetectsGoneParticipant(t *testing.T) {
 	}
 }
 
-// TestLiveKitRoomWorker_Phase2_Disabled verifies that when sanityInterval is 0,
-// Phase 2 never fires: after Phase 1 confirms the participant, no further
-// ListParticipants calls are made and no SFUParticipantGone signal is sent.
-func TestLiveKitRoomWorker_Phase2_Disabled(t *testing.T) {
+// TestParticipantLookup_Phase2_Disabled verifies that when sanityInterval is 0,
+// startParticipantLookup makes exactly one ListParticipants call (Phase 1) and
+// then the goroutine exits — no Phase 2 ticker fires.
+func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 	const identity LiveKitIdentity = "@carol:example.com"
 	const room LiveKitRoomAlias = "phase2-disabled-room"
 
-	// phase1Done is closed on the first ListParticipants call.
-	// After it fires we cancel the context, which stops the room worker.
-	// callCount is only read after all goroutines have exited — no race.
+	// phase1Done is closed on the first (and only) GetParticipant call.
+	// callCount is read only after job.Close() ensures the lookup goroutine
+	// has exited (backgroundWg.Wait()), so there is no concurrent access.
 	phase1Done := make(chan struct{})
 	callCount := 0
-	original := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = original })
-	LiveKitListParticipants = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	original := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = original })
+	LiveKitGetParticipant = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		callCount++
 		select {
 		case <-phase1Done:
 		default:
 			close(phase1Done)
 		}
-		return &livekit.ListParticipantsResponse{
-			Participants: []*livekit.ParticipantInfo{
-				{Identity: string(identity)},
-			},
-		}, nil
+		return nil // participant present
 	}
 
 	mockExecOK(t)
@@ -891,30 +866,24 @@ func TestLiveKitRoomWorker_Phase2_Disabled(t *testing.T) {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
 	go job.Loop()
-
-	ctx, cancel := context.WithCancel(context.Background())
 	// sanityInterval == 0 disables Phase 2.
-	w := NewLiveKitRoomWorker(room, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
-	go w.run(ctx)
-	w.Register(ctx, identity, job.EventChannel)
+	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
 
-	// Wait for Phase 1 then immediately stop the room worker.
+	// Wait for Phase 1 to complete.
 	select {
 	case <-phase1Done:
 	case <-time.After(5 * time.Second):
-		cancel()
+		job.Cancel()
 		t.Fatal("timed out waiting for Phase 1")
 	}
-	cancel() // stops room worker; no more ListParticipants calls possible after this
 
-	// Give room worker time to exit, then verify it made exactly one call.
-	time.Sleep(50 * time.Millisecond)
-	if callCount != 1 {
-		t.Errorf("expected exactly 1 ListParticipants call (Phase 2 disabled), got %d", callCount)
-	}
-
+	// Cancel the job and wait for Close() — this waits for backgroundWg which
+	// includes the lookup goroutine.  After this, callCount is safe to read.
 	job.Cancel()
 	if err := job.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 ListParticipants call (Phase 2 disabled), got %d", callCount)
 	}
 }

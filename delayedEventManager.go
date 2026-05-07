@@ -119,143 +119,84 @@ type jobKey struct {
 	Identity LiveKitIdentity
 }
 
-// ── LiveKitRoomWorker ────────────────────────────────────────────────────────
-
-// liveKitJobRegistration registers or unregisters a job identity with a
-// LiveKitRoomWorker.
-type liveKitJobRegistration struct {
-	identity LiveKitIdentity
-	eventCh  chan<- DelayedEventSignal
-	remove   bool
-}
-
-// LiveKitRoomWorker manages participant lookups for all jobs in a single
-// LiveKit room.  A single goroutine (run()) owns all state; external callers
-// communicate exclusively via channels — no mutex needed.
+// startParticipantLookup spawns a goroutine (tracked by job.backgroundWg) that
+// performs Phase-1 and Phase-2 participant checks for the given job.
 //
-//   - Phase 1 (initial lookup): when a job is registered the worker immediately
-//     calls LiveKitListParticipants; if the participant is present it sends
-//     ParticipantLookupSuccessful to the job's EventChannel.
-//   - Phase 2 (sanity check): at every sanityInterval tick the worker calls
-//     LiveKitListParticipants for the room and sends SFUParticipantGone to any
-//     job whose identity is no longer listed.  Disabled when sanityInterval == 0.
+//   - Phase 1: calls LiveKitGetParticipant with exponential backoff until the
+//     identity is present (nil error) or job.DelayTimeout elapses.  On success
+//     sends ParticipantLookupSuccessful to job.EventChannel.
+//   - Phase 2: at every sanityInterval tick, calls LiveKitGetParticipant; if
+//     the identity is no longer present, sends SFUParticipantGone.  Disabled
+//     when sanityInterval == 0.
 //
-// Communication with jobs is identical to SFU webhooks — both send
-// DelayedEventSignal values on the job's EventChannel — so no new concurrency
-// primitives are introduced.
-type LiveKitRoomWorker struct {
-	roomAlias      LiveKitRoomAlias
-	lkAuth         LiveKitAuth
-	sanityInterval time.Duration
-	registerCh     chan liveKitJobRegistration
-}
+// Communication is identical to SFU webhooks — signals are sent on
+// job.EventChannel — so no new concurrency primitives are needed.
+func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInterval time.Duration) {
+	lkRoom := job.LiveKitRoom
+	lkId := job.LiveKitIdentity
 
-func NewLiveKitRoomWorker(roomAlias LiveKitRoomAlias, lkAuth LiveKitAuth, sanityInterval time.Duration) *LiveKitRoomWorker {
-	return &LiveKitRoomWorker{
-		roomAlias:      roomAlias,
-		lkAuth:         lkAuth,
-		sanityInterval: sanityInterval,
-		registerCh:     make(chan liveKitJobRegistration, 20),
-	}
-}
+	job.backgroundWg.Add(1)
+	go func() {
+		defer job.backgroundWg.Done()
+		ctx := job.ctx
 
-// Register tells the worker to start Phase-1 lookup for identity and to include
-// it in Phase-2 sanity checks thereafter.  Results are delivered on eventCh.
-func (w *LiveKitRoomWorker) Register(ctx context.Context, identity LiveKitIdentity, eventCh chan<- DelayedEventSignal) {
-	select {
-	case w.registerCh <- liveKitJobRegistration{identity: identity, eventCh: eventCh}:
-	case <-ctx.Done():
-	}
-}
+		// Phase 1: retry with exponential backoff until the participant appears.
 
-// Unregister tells the worker to stop tracking identity.
-func (w *LiveKitRoomWorker) Unregister(ctx context.Context, identity LiveKitIdentity) {
-	select {
-	case w.registerCh <- liveKitJobRegistration{identity: identity, remove: true}:
-	case <-ctx.Done():
-	}
-}
+		// waitingDuration is bounded to at most one hour (sticky-event timeout).
+		waitingDuration := min(time.Hour, job.DelayTimeout)
 
-// run is the worker's main goroutine.  It exits when ctx is cancelled.
-// Must be started exactly once, tracked in Handler's loopWg.
-func (w *LiveKitRoomWorker) run(ctx context.Context) {
-	// pendingLookup: identities awaiting Phase-1 confirmation.
-	// active: identities that have passed Phase-1 (ParticipantLookupSuccessful sent).
-	pendingLookup := make(map[LiveKitIdentity]chan<- DelayedEventSignal)
-	active := make(map[LiveKitIdentity]chan<- DelayedEventSignal)
-
-	doCheck := func() {
-		if len(pendingLookup) == 0 && len(active) == 0 {
-			return
-		}
-		resp, err := LiveKitListParticipants(ctx, w.lkAuth, w.roomAlias)
-		if ctx.Err() != nil {
-			return
-		}
+		expBackOff := backoff.NewExponentialBackOff()
+		expBackOff.InitialInterval = 1 * time.Second
+		expBackOff.Multiplier = 1.5
+		expBackOff.RandomizationFactor = 0.5
+		expBackOff.MaxInterval = 60 * time.Second
+		_, err := backoff.Retry(
+			ctx,
+			func() (struct{}, error) {
+				return struct{}{}, LiveKitGetParticipant(ctx, lkAuth, lkRoom, lkId)
+			},
+			backoff.WithBackOff(expBackOff),
+			backoff.WithMaxElapsedTime(waitingDuration),
+		)
 		if err != nil {
-			slog.Debug("LiveKitRoomWorker: ListParticipants failed",
-				"room", w.roomAlias, "err", err)
+			if ctx.Err() == nil {
+				slog.Warn("participantLookup: Phase 1 failed", "room", lkRoom, "lkId", lkId, "err", err)
+			}
 			return
 		}
-		present := make(map[LiveKitIdentity]bool, len(resp.GetParticipants()))
-		for _, p := range resp.GetParticipants() {
-			present[LiveKitIdentity(p.GetIdentity())] = true
-		}
-		// Phase 1: promote any pending identity that is now present.
-		for identity, eventCh := range pendingLookup {
-			if present[identity] {
-				active[identity] = eventCh
-				delete(pendingLookup, identity)
-				slog.Debug("LiveKitRoomWorker: participant found (Phase 1)",
-					"room", w.roomAlias, "lkId", identity)
-				select {
-				case eventCh <- ParticipantLookupSuccessful:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-		// Phase 2: detect gone participants (only when sanity check is enabled).
-		if w.sanityInterval == 0 {
-			return
-		}
-		for identity, eventCh := range active {
-			if !present[identity] {
-				slog.Warn("LiveKitRoomWorker: sanity check: participant no longer on SFU",
-					"room", w.roomAlias, "lkId", identity)
-				select {
-				case eventCh <- SFUParticipantGone:
-				case <-ctx.Done():
-					return
-				}
-				delete(active, identity)
-			}
-		}
-	}
-
-	var tickerC <-chan time.Time
-	if w.sanityInterval > 0 {
-		ticker := time.NewTicker(w.sanityInterval)
-		defer ticker.Stop()
-		tickerC = ticker.C
-	}
-
-	for {
+		slog.Debug("participantLookup: Phase 1 succeeded", "room", lkRoom, "lkId", lkId)
 		select {
+		case job.EventChannel <- ParticipantLookupSuccessful:
 		case <-ctx.Done():
 			return
-		case reg := <-w.registerCh:
-			if reg.remove {
-				delete(pendingLookup, reg.identity)
-				delete(active, reg.identity)
-			} else {
-				pendingLookup[reg.identity] = reg.eventCh
-				doCheck()
-			}
-		case <-tickerC:
-			doCheck()
 		}
-	}
+
+		// Phase 2: periodic sanity checks (disabled when sanityInterval == 0).
+		if sanityInterval == 0 {
+			return
+		}
+		ticker := time.NewTicker(sanityInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := LiveKitGetParticipant(ctx, lkAuth, lkRoom, lkId); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					slog.Warn("participantLookup: Phase 2: participant no longer on SFU",
+						"room", lkRoom, "lkId", lkId)
+					select {
+					case job.EventChannel <- SFUParticipantGone:
+					case <-ctx.Done():
+					}
+					return
+				}
+			}
+		}
+	}()
 }
 
 // ── DelayedEventJob ──────────────────────────────────────────────────────────
@@ -379,18 +320,28 @@ type DelayedEventJob struct {
 	// done is closed by Loop() when it exits, allowing Close() to wait.
 	done chan struct{}
 
-	// resetWg tracks all background goroutines started by or for this job:
-	// ActionRestart goroutines, the ActionSend goroutine, and the participant
-	// lookup goroutine.  Loop() waits for them before returning so that Close()
-	// guarantees no goroutine still holds a reference to the
-	// ExecuteDelayedEventAction or LiveKitParticipantLookup function variables
+	// backgroundWg tracks all background goroutines started by or for this job:
+	// the participant-lookup goroutine, ActionRestart goroutines, and the
+	// ActionSend goroutine.  Loop() waits for them before returning so that
+	// Close() guarantees no goroutine still holds a reference to the
+	// ExecuteDelayedEventAction or LiveKitGetParticipant function variables
 	// after it returns.
-	resetWg sync.WaitGroup
+	backgroundWg sync.WaitGroup
+
+	// restartResultCh receives the new deadline from a successful ActionRestart
+	// goroutine.  Loop() reads it and updates restartDeadline without a mutex —
+	// Loop() is the sole owner of both fields.
+	restartResultCh chan time.Time
 
 	// ── FSM state — owned exclusively by Loop() ──────────────────────────
 	state                DelayEventState
 	fsmTimerWaitingState *time.Timer
-	fsmTimerDelayedEvent *delayedEventTimer
+	// fsmTimerRestart fires DelayedEventReset; re-armed by Loop() each time an
+	// ActionRestart goroutine reports success via restartResultCh.
+	fsmTimerRestart *time.Timer
+	// restartDeadline is the absolute time by which ActionSend must complete.
+	// Updated by Loop() on each successful restart (via restartResultCh).
+	restartDeadline time.Time
 }
 
 func NewDelayedEventJob(
@@ -415,6 +366,7 @@ func NewDelayedEventJob(
 		cancel:          cancel,
 		doneCh:          doneCh,
 		done:            make(chan struct{}),
+		restartResultCh: make(chan time.Time, 1),
 		state:           WaitingForInitialConnect,
 	}
 	return job, nil
@@ -445,7 +397,7 @@ func (job *DelayedEventJob) Loop() {
 			job.stopTimers()
 			// Wait for all background goroutines to finish.  They all use
 			// job.ctx which is now cancelled, so they will exit promptly.
-			job.resetWg.Wait()
+			job.backgroundWg.Wait()
 			slog.Debug("Job: Loop exiting", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
 			return
 
@@ -457,6 +409,15 @@ func (job *DelayedEventJob) Loop() {
 				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
 			if job.handleEvent(event) {
 				job.handleStateEntryAction(event)
+			}
+
+		case newDeadline := <-job.restartResultCh:
+			// ActionRestart succeeded: extend the deadline and re-arm the timer.
+			// Only apply when still Connected — ignore stale completions after a
+			// state transition.
+			if job.state == Connected && job.fsmTimerRestart != nil {
+				job.restartDeadline = newDeadline
+				job.fsmTimerRestart.Reset(job.delayRestartDuration())
 			}
 		}
 	}
@@ -503,8 +464,8 @@ func (job *DelayedEventJob) stopTimers() {
 	if job.fsmTimerWaitingState != nil {
 		job.fsmTimerWaitingState.Stop()
 	}
-	if job.fsmTimerDelayedEvent != nil {
-		job.fsmTimerDelayedEvent.stop()
+	if job.fsmTimerRestart != nil {
+		job.fsmTimerRestart.Stop()
 	}
 }
 
@@ -561,23 +522,22 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 			job.fsmTimerWaitingState.Stop()
 		}
 
-		// Set up fsmTimerDelayedEvent so that handleEventDelayedEventReset can
-		// call timer.reset() on subsequent restarts.  The AfterFunc fires
-		// DelayedEventReset into the FSM when the restart interval elapses.
-		// We stop it immediately and trigger the first reset manually so the
+		// Set up fsmTimerRestart so that handleEventDelayedEventReset fires
+		// after each restart interval.  The deadline tracks the absolute time by
+		// which ActionSend must complete; it is extended on each successful restart.
+		restartDuration := job.delayRestartDuration()
+		job.restartDeadline = time.Now().Add(job.DelayTimeout)
+		job.fsmTimerRestart = time.AfterFunc(restartDuration, func() {
+			select {
+			case job.EventChannel <- DelayedEventReset:
+			case <-job.ctx.Done():
+			}
+		})
+		// We stop the timer immediately and trigger the first reset manually so the
 		// homeserver timer is synced right away — we don't know how long elapsed
 		// between submitting the delayed event to the homeserver and handing over
 		// the delegation to this service.
-		job.fsmTimerDelayedEvent = newDelayedEventTimer(
-			job.delayRestartDuration(),
-			func() {
-				select {
-				case job.EventChannel <- DelayedEventReset:
-				case <-job.ctx.Done():
-				}
-			},
-		)
-		job.fsmTimerDelayedEvent.stop()
+		job.fsmTimerRestart.Stop()
 		select {
 		case job.EventChannel <- DelayedEventReset:
 		case <-job.ctx.Done():
@@ -585,8 +545,10 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 
 	case Disconnected:
 		remaining := time.Duration(0)
-		if job.fsmTimerDelayedEvent != nil {
-			remaining = job.fsmTimerDelayedEvent.timeRemaining()
+		if !job.restartDeadline.IsZero() {
+			if r := time.Until(job.restartDeadline); r > 0 {
+				remaining = r
+			}
 		}
 		job.stopTimers()
 		snapshotRemaining := remaining
@@ -604,10 +566,10 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 		//
 		// Teardown order:
 		//   ActionSend completes → doneCh notified → Handler calls job.Cancel()
-		//   → job.Close() → resetWg.Wait() → Loop() exits cleanly.
-		job.resetWg.Add(1)
+		//   → job.Close() → backgroundWg.Wait() → Loop() exits cleanly.
+		job.backgroundWg.Add(1)
 		go func() {
-			defer job.resetWg.Done()
+			defer job.backgroundWg.Done()
 
 			expBackOff := backoff.NewExponentialBackOff()
 			expBackOff.InitialInterval = 1000 * time.Millisecond
@@ -734,11 +696,14 @@ func (job *DelayedEventJob) handleEventDelayedEventNotFound() bool {
 
 func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 	if (job.state != Connected && job.state != WaitingForInitialConnect) ||
-		job.fsmTimerDelayedEvent == nil {
+		job.fsmTimerRestart == nil {
 		return false // no state change: no state-entry action
 	}
 
-	remaining := job.fsmTimerDelayedEvent.timeRemaining()
+	remaining := time.Duration(0)
+	if r := time.Until(job.restartDeadline); r > 0 {
+		remaining = r
+	}
 	if remaining <= 0 {
 		job.state = Disconnected
 		slog.Info("Job: → Disconnected (DelayedEventReset, remaining=0)",
@@ -748,19 +713,19 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 	}
 
 	// Issue the restart call in a background goroutine so Loop() stays
-	// responsive.  The goroutine must not touch any job state directly — it
-	// only sends back a signal on EventChannel.
-	timer := job.fsmTimerDelayedEvent
+	// responsive.  On success the goroutine sends the new deadline to
+	// restartResultCh; Loop() reads it and re-arms fsmTimerRestart without
+	// any mutex — Loop() is the sole owner of both fields.
 	timeout := job.DelayTimeout
-	nextReset := job.delayRestartDuration()
 	lkRm := job.LiveKitRoom
 	lkId := job.LiveKitIdentity
 	ch := job.EventChannel
+	resCh := job.restartResultCh
 	ctx := job.ctx
 
-	job.resetWg.Add(1)
+	job.backgroundWg.Add(1)
 	go func() {
-		defer job.resetWg.Done()
+		defer job.backgroundWg.Done()
 		expBackOff := backoff.NewExponentialBackOff()
 		expBackOff.InitialInterval = 1000 * time.Millisecond
 		expBackOff.Multiplier = 1.5
@@ -791,19 +756,15 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 				"room", lkRm, "lkId", lkId, "jobId", job.JobId)
 			signal = DelayedEventTimedOut
 		default:
-			// Only reschedule if the job context is still active.  If ctx is
-			// already done the timer callback would try to send on EventChannel
-			// which Loop() is no longer reading, causing resetWg.Done() to
-			// never be called and resetWg.Wait() to block forever.
-			select {
-			case <-ctx.Done():
-				// Job is shutting down — do not re-arm the timer.
-				return
-			default:
-			}
-			timer.reset(nextReset, timeout)
-			slog.Debug(fmt.Sprintf("Job: ActionRestart ok, next reset in %s", nextReset),
+			// Report success to Loop() via restartResultCh; Loop() will extend
+			// the deadline and re-arm fsmTimerRestart.
+			newDeadline := time.Now().Add(timeout)
+			slog.Debug(fmt.Sprintf("Job: ActionRestart ok, next reset in %s", job.delayRestartDuration()),
 				"room", lkRm, "lkId", lkId)
+			select {
+			case resCh <- newDeadline:
+			case <-ctx.Done():
+			}
 			return
 		}
 
@@ -838,51 +799,3 @@ func (job *DelayedEventJob) handleEventSFUParticipantGone() bool {
 	return false // no state change: no state-entry action
 }
 
-// ── delayedEventTimer ────────────────────────────────────────────────────────
-
-// delayedEventTimer is a thin wrapper around time.Timer that also tracks the
-// absolute deadline so that callers can query the remaining time.
-//
-// Thread-safe: reset() may be called from a background goroutine while
-// timeRemaining() is called from Loop().
-type delayedEventTimer struct {
-	mu       sync.Mutex
-	timer    *time.Timer
-	deadline time.Time
-}
-
-func newDelayedEventTimer(timeoutDuration time.Duration, f func()) *delayedEventTimer {
-	dt := &delayedEventTimer{
-		deadline: time.Now().Add(timeoutDuration),
-	}
-	dt.timer = time.AfterFunc(timeoutDuration, f)
-	return dt
-}
-
-func (dt *delayedEventTimer) reset(restartDuration, timeoutDuration time.Duration) bool {
-	dt.mu.Lock()
-	defer dt.mu.Unlock()
-	if dt.timer == nil {
-		return false
-	}
-	dt.deadline = time.Now().Add(timeoutDuration)
-	dt.timer.Reset(restartDuration)
-	return true
-}
-
-func (dt *delayedEventTimer) stop() bool {
-	if dt.timer != nil {
-		return dt.timer.Stop()
-	}
-	return false
-}
-
-func (dt *delayedEventTimer) timeRemaining() time.Duration {
-	dt.mu.Lock()
-	defer dt.mu.Unlock()
-	r := time.Until(dt.deadline)
-	if r < 0 {
-		return 0
-	}
-	return r
-}

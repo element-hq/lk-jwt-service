@@ -758,11 +758,11 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 	// LIFO cleanup order: register global restores FIRST (run last),
 	// handler.Close LAST (runs first) — ensures all goroutines exit before
 	// the globals are restored.
-	original := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = original }) // runs last
-	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	original := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = original }) // runs last
+	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -793,11 +793,11 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	// LIFO cleanup order: register global restores FIRST (run last),
 	// handler.Close LAST (runs first) — ensures all goroutines exit before
 	// the globals are restored.
-	original := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = original }) // runs last
-	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	original := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = original }) // runs last
+	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -1002,21 +1002,21 @@ func TestSfuEventFromWebhook_UnknownEvent(t *testing.T) {
 // ── Handler.loop() job lifecycle ─────────────────────────────────────────────
 
 // TestHandler_loop_AllJobsClosedOnShutdown verifies that handler.Close() waits
-// for ALL room worker goroutines to fully exit before returning.  This prevents
-// races on global function variables (e.g. LiveKitListParticipants) between
-// room worker goroutines and test cleanup.
+// for ALL participant-lookup goroutines to fully exit before returning.  This prevents
+// races on global function variables (e.g. LiveKitGetParticipant) between
+// lookup goroutines and test cleanup.
 func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 	var mu sync.Mutex
 	var exited []string
 
-	original := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = original })
-	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, room LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	original := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = original })
+	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, room LiveKitRoomAlias, _ LiveKitIdentity) error {
 		<-ctx.Done()
 		mu.Lock()
 		exited = append(exited, string(room))
 		mu.Unlock()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 
 	handler := NewHandler(
@@ -1054,11 +1054,11 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 // after a job finishes and signals doneCh, the job is removed from the map AND
 // its close goroutine completes before handler.Close() returns.
 func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
-	originalLookup := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = originalLookup })
-	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	originalLookup := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
+	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -1115,11 +1115,11 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 // deadlock.  A stale doneCh signal from the old job must be ignored (pointer
 // equality check in the doneCh case of loop()).
 func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
-	originalLookup := LiveKitListParticipants
-	t.Cleanup(func() { LiveKitListParticipants = originalLookup })
-	LiveKitListParticipants = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias) (*livekit.ListParticipantsResponse, error) {
+	originalLookup := LiveKitGetParticipant
+	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
+	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
