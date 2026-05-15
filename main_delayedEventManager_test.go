@@ -233,7 +233,7 @@ func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
 	job.EventChannel <- ParticipantConnected
 	time.Sleep(20 * time.Millisecond)
 	job.EventChannel <- DelayedEventTimedOut
-	job.Cancel() // unblocks any in-progress HTTP calls
+	job.Stop() // unblocks any in-progress HTTP calls
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -254,7 +254,7 @@ func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	job.EventChannel <- DelayedEventNotFound
 	time.Sleep(20 * time.Millisecond)
-	job.Cancel()
+	job.Stop()
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -282,7 +282,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	job.EventChannel <- ParticipantDisconnectedIntentionally
 	time.Sleep(20 * time.Millisecond)
 
-	job.Cancel()
+	job.Stop()
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -301,7 +301,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	job.EventChannel <- WaitingStateTimedOut
 	time.Sleep(20 * time.Millisecond)
 
-	job.Cancel()
+	job.Stop()
 	err = job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -352,7 +352,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	job.EventChannel <- SFUParticipantGone
 	time.Sleep(20 * time.Millisecond)
 
-	job.Cancel()
+	job.Stop()
 	err = job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -403,7 +403,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	job.EventChannel <- SFUParticipantGone
 	time.Sleep(20 * time.Millisecond)
 
-	job.Cancel()
+	job.Stop()
 	err = job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -456,7 +456,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	job.EventChannel <- SFUParticipantGone
 	time.Sleep(20 * time.Millisecond)
 
-	job.Cancel()
+	job.Stop()
 	err = job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -599,7 +599,7 @@ func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	// Now cancel and close — Loop() should exit promptly.
-	job.Cancel()
+	job.Stop()
 	done := make(chan struct{})
 	go func() {
 		err := job.Close()
@@ -651,7 +651,7 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 
 	// Even without the signal, Cancel() + Close() must complete cleanly.
 	go job.Loop() // start Loop() so it can drain and exit
-	job.Cancel()
+	job.Stop()
 	done := make(chan struct{})
 	go func() {
 		if err := job.Close(); err != nil {
@@ -708,7 +708,7 @@ func TestDelayedEventJob_SFUParticipantGone_WrongState(t *testing.T) {
 	job.EventChannel <- SFUParticipantGone // should be ignored in WaitingForInitialConnect
 	time.Sleep(20 * time.Millisecond)
 
-	job.Cancel()
+	job.Stop()
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -765,7 +765,7 @@ func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 		t.Fatal("timed out waiting for Phase 1 ListParticipants call")
 	}
 
-	job.Cancel()
+	job.Stop()
 	if err := job.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -873,13 +873,13 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 	select {
 	case <-phase1Done:
 	case <-time.After(5 * time.Second):
-		job.Cancel()
+		job.Stop()
 		t.Fatal("timed out waiting for Phase 1")
 	}
 
 	// Cancel the job and wait for Close() — this waits for backgroundWg which
 	// includes the lookup goroutine.  After this, callCount is safe to read.
-	job.Cancel()
+	job.Stop()
 	if err := job.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

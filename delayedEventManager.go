@@ -423,10 +423,10 @@ func (job *DelayedEventJob) Loop() {
 	}
 }
 
-// Cancel cancels the job context without waiting for Loop() to exit.
+// Stop cancels the job context without waiting for Loop() to exit.
 // Use this to unblock any goroutines that are sending on channels
 // before calling Close() in a separate goroutine.
-func (job *DelayedEventJob) Cancel() {
+func (job *DelayedEventJob) Stop() {
 	job.cancel()
 }
 
@@ -565,7 +565,7 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 		// sent — defeating the purpose of the delegation.
 		//
 		// Teardown order:
-		//   ActionSend completes → doneCh notified → Handler calls job.Cancel()
+		//   ActionSend completes → doneCh notified → Handler calls job.Stop()
 		//   → job.Close() → backgroundWg.Wait() → Loop() exits cleanly.
 		job.backgroundWg.Add(1)
 		go func() {

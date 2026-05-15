@@ -363,7 +363,7 @@ func (h *Handler) loop() {
 			// Cancel all job contexts first — unblocks goroutines waiting on
 			// jobDoneCh so they take the ctx.Done() path and exit promptly.
 			for _, job := range jobs {
-				job.Cancel()
+				job.Stop()
 			}
 		drainDone:	// Label the loop so we can break out of it from within the select block.
 			// Drain any buffered terminal signals so no goroutine stays blocked
@@ -401,7 +401,7 @@ func (h *Handler) loop() {
 				case existing.EventChannel <- JobReplaced:
 				default:
 				}
-				existing.Cancel()
+				existing.Stop()
 				// No Close() goroutine needed — existing.Loop() exits when its
 				// context is cancelled; loopWg.Wait() handles the rest.
 			}
@@ -459,7 +459,7 @@ func (h *Handler) loop() {
 			slog.Info("Handler: job done, cleaning up",
 				"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 			delete(jobs, key)
-			doneJob.Cancel()
+			doneJob.Stop()
 			// No Close() goroutine needed — doneJob.Loop() exits on its own;
 			// loopWg.Wait() handles cleanup at shutdown.
 		}
