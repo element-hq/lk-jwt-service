@@ -582,7 +582,7 @@ func TestParseConfig(t *testing.T) {
                 "LIVEKIT_SECRET": "test_secret",
                 "LIVEKIT_URL":    "wss://test.livekit.cloud",
             },
-            wantErrMsg: "LIVEKIT_FULL_ACCESS_HOMESERVERS environment variable must be set to the Matrix server name(s) of the homeserver(s) you intend to serve — see README for guidance",
+            wantErrMsg: "LIVEKIT_FULL_ACCESS_HOMESERVERS environment variable must be set to the homeserver(s) you intend to serve — see README for guidance",
         },
         {
             name: "Conflicting bind configuration",
