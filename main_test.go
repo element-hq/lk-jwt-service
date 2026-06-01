@@ -515,11 +515,12 @@ func TestParseConfig(t *testing.T) {
         wantErrMsg  string
     }{
         {
-            name: "Minimal valid config",
+            name: "Minimal valid config (explicit wildcard)",
             env: map[string]string{
-                "LIVEKIT_KEY":    "test_key",
-                "LIVEKIT_SECRET": "test_secret",
-                "LIVEKIT_URL":    "wss://test.livekit.cloud",
+                "LIVEKIT_KEY":                     "test_key",
+                "LIVEKIT_SECRET":                  "test_secret",
+                "LIVEKIT_URL":                     "wss://test.livekit.cloud",
+                "LIVEKIT_FULL_ACCESS_HOMESERVERS": "*",
             },
             wantConfig: &Config{
                 Key:                   "test_key",
@@ -552,10 +553,11 @@ func TestParseConfig(t *testing.T) {
         {
             name: "Legacy port configuration",
             env: map[string]string{
-                "LIVEKIT_KEY":      "test_key",
-                "LIVEKIT_SECRET":   "test_secret",
-                "LIVEKIT_URL":      "wss://test.livekit.cloud",
-                "LIVEKIT_JWT_PORT": "9090",
+                "LIVEKIT_KEY":                     "test_key",
+                "LIVEKIT_SECRET":                  "test_secret",
+                "LIVEKIT_URL":                     "wss://test.livekit.cloud",
+                "LIVEKIT_JWT_PORT":                "9090",
+                "LIVEKIT_FULL_ACCESS_HOMESERVERS": "*",
             },
             wantConfig: &Config{
                 Key:                   "test_key",
@@ -567,23 +569,6 @@ func TestParseConfig(t *testing.T) {
             },
         },
         {
-            name: "Legacy full-access homeservers configuration",
-            env: map[string]string{
-                "LIVEKIT_KEY":               "test_key",
-                "LIVEKIT_SECRET":            "test_secret",
-                "LIVEKIT_URL":               "wss://test.livekit.cloud",
-                "LIVEKIT_LOCAL_HOMESERVERS": "legacy.com",
-            },
-            wantConfig: &Config{
-                Key:                   "test_key",
-                Secret:                "test_secret",
-                LkUrl:                 "wss://test.livekit.cloud",
-                SkipVerifyTLS:         false,
-                FullAccessHomeservers: []string{"legacy.com"},
-                LkJwtBind:               ":8080",
-            },
-        },
-        {
             name: "Missing required config",
             env: map[string]string{
                 "LIVEKIT_KEY": "test_key",
@@ -591,13 +576,23 @@ func TestParseConfig(t *testing.T) {
             wantErrMsg: "LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL environment variables must be set",
         },
         {
-            name: "Conflicting bind configuration",
+            name: "Missing LIVEKIT_FULL_ACCESS_HOMESERVERS",
             env: map[string]string{
                 "LIVEKIT_KEY":    "test_key",
                 "LIVEKIT_SECRET": "test_secret",
                 "LIVEKIT_URL":    "wss://test.livekit.cloud",
-                "LIVEKIT_JWT_BIND": ":9090",
-                "LIVEKIT_JWT_PORT": "8080",
+            },
+            wantErrMsg: "LIVEKIT_FULL_ACCESS_HOMESERVERS environment variable must be set to the homeserver(s) you intend to serve — see README for guidance",
+        },
+        {
+            name: "Conflicting bind configuration",
+            env: map[string]string{
+                "LIVEKIT_KEY":                     "test_key",
+                "LIVEKIT_SECRET":                  "test_secret",
+                "LIVEKIT_URL":                     "wss://test.livekit.cloud",
+                "LIVEKIT_JWT_BIND":                ":9090",
+                "LIVEKIT_JWT_PORT":                "8080",
+                "LIVEKIT_FULL_ACCESS_HOMESERVERS": "*",
             },
             wantErrMsg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT environment variables MUST NOT be set together",
         },
