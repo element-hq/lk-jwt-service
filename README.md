@@ -124,20 +124,23 @@ Set environment variables to configure the service:
 | `LIVEKIT_KEY_FILE`                            | File path with `APIkey: secret` format                        | ⚠️ mutually exclusive with <code>LIVEKIT_{KEY&#124;SECRET}</code>    |         |
 | `LIVEKIT_JWT_BIND`                            | Address to bind the server to                                 | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_PORT` | `:8080` |
 | `LIVEKIT_JWT_PORT`                            | ⚠️ Deprecated Port to bind the server to                      | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_BIND` |         |
-| `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all) | ❌ No                                                | `*`     |
+| `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all — see security note below) | ✅ Yes                                               |         |
 
-> [!IMPORTANT]
-> By default, the LiveKit SFU auto-creates rooms for all users. To ensure proper
-> access control, update your LiveKit
-> [config.yaml](https://github.com/livekit/livekit/blob/7350e9933107ecdea4ada8f8bcb0d6ca78b3f8f7/config-sample.yaml#L170)
-> to **disable automatic room creation**.
-
-**LiveKit SFU config should include:**
-
-```yaml
-room:
-  auto_create: false
-```
+> [!WARNING]
+> **Restricting room creation** requires two pieces working together:
+>
+> 1. `LIVEKIT_FULL_ACCESS_HOMESERVERS` is matched against the requesting
+>    user's Matrix server name (origin). Listed origins may trigger
+>    LiveKit room creation on your SFU. `*` grants this to *any* user
+>    whose homeserver can reach this service; list the Matrix server
+>    name(s) of the homeserver(s) you intend to serve.
+> 2. LiveKit SFU [config.yaml](https://github.com/livekit/livekit/blob/7350e9933107ecdea4ada8f8bcb0d6ca78b3f8f7/config-sample.yaml#L170)
+>    must **disable auto-create**, otherwise LiveKit SFU will create rooms
+>    for any user regardless of what this service decides:
+>    ```yaml
+>    room:
+>      auto_create: false
+>    ```
 
 ## 🔒 Transport Layer Security (TLS) Setup Using a Reverse Proxy
 
@@ -259,4 +262,13 @@ LIVEKIT_SECRET=secret \
 LIVEKIT_JWT_PORT=6080 \
 LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse.m.localhost \
 ./lk-jwt-service
+```
+
+#### Develop inside container (docker, podman)
+
+```sh
+docker run --rm -it -w /proj -v .:/proj docker.io/golang:${GO_VERSION:-1}-alpine sh
+go build -o lk-jwt-service
+# For healthcheck run following:
+go build -o lk-jwt-service-healthcheck ./healthcheck
 ```
