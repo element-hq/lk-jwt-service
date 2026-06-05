@@ -281,11 +281,11 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 // channels:
 //
 //   - addJobCh:   deliver a new DelayedEventRequest to loop(), which creates a
-//                 DelayedEventJob and starts its participant-lookup goroutine.
+//     DelayedEventJob and starts its participant-lookup goroutine.
 //   - sfuEventCh: deliver an SFU webhook event to loop(), which routes it
-//                 directly to the correct job by (room, identity) key.
+//     directly to the correct job by (room, identity) key.
 //   - jobDoneCh:  jobs signal loop() when they enter a terminal state so loop()
-//                 can cancel and clean them up.
+//     can cancel and clean them up.
 //
 // Because all map mutations happen in a single goroutine there are no data
 // races and no mutex is required.
@@ -365,7 +365,7 @@ func (h *Handler) loop() {
 			for _, job := range jobs {
 				job.Stop()
 			}
-		drainDone:	// Label the loop so we can break out of it from within the select block.
+		drainDone: // Label the loop so we can break out of it from within the select block.
 			// Drain any buffered terminal signals so no goroutine stays blocked
 			// trying to send on the now-dead loop.
 			for {
@@ -414,14 +414,14 @@ func (h *Handler) loop() {
 			}()
 			// Pull-based lookup (additionally to SFU webhook)
 			// Phase 1:
-			// - required for `handleMembershipLeaveDelegation` as no SFU webhook is 
+			// - required for `handleMembershipLeaveDelegation` as no SFU webhook is
 			//   expected for this code path
 			// - safeguard in case of `processLegacySFURequest` and `processSFURequest`
 			//   to minimize impact of transient SFU webhook failures
 			//
 			// Phase 2 (if enabled: sanityCheckInterval > 0 seconds):
-			// - Adds periodic lookups to ensure the participant is still present on the SFU, 
-			//   and cancels the job if not. 
+			// - Adds periodic lookups to ensure the participant is still present on the SFU,
+			//   and cancels the job if not.
 			// - Mitigates the risk of "zombie" jobs that never receive the SFU disconnect webhook
 			//   (e.g. due transient SFU webhook failures)
 			startParticipantLookup(job, h.liveKitAuth, h.sanityCheckInterval)
@@ -675,9 +675,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 //   - Does NOT call CreateLiveKitRoom (the room already exists).
 //   - Requires all three delayed-event parameters (they are mandatory here).
 //
-// The participant is assumed to be already present on the SFU. As the 
+// The participant is assumed to be already present on the SFU. As the
 // ParticipantConnected SFU webhook has already happened, the participant-lookup
-// goroutine (startParticipantLookup) will use its 
+// goroutine (startParticipantLookup) will use its
 // backoff to confirm presence.
 func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *MembershipLeaveDelegationRequest) error {
 	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
@@ -1035,14 +1035,7 @@ func parseConfig() (*Config, error) {
 
 	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
 	if len(fullAccessHomeservers) == 0 {
-		localHomeservers := os.Getenv("LIVEKIT_LOCAL_HOMESERVERS")
-		if len(localHomeservers) > 0 {
-			slog.Warn("!!! LIVEKIT_LOCAL_HOMESERVERS is deprecated, use LIVEKIT_FULL_ACCESS_HOMESERVERS !!!")
-			fullAccessHomeservers = localHomeservers
-		} else {
-			slog.Warn("LIVEKIT_FULL_ACCESS_HOMESERVERS not set, defaulting to wildcard (*)")
-			fullAccessHomeservers = "*"
-		}
+		return nil, fmt.Errorf("LIVEKIT_FULL_ACCESS_HOMESERVERS environment variable must be set to the homeserver(s) you intend to serve — see README for guidance")
 	}
 
 	lkJwtBind := os.Getenv("LIVEKIT_JWT_BIND")
