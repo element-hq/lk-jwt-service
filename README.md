@@ -263,3 +263,12 @@ LIVEKIT_JWT_PORT=6080 \
 LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse.m.localhost \
 ./lk-jwt-service
 ```
+
+#### Develop inside container (docker, podman)
+
+```sh
+docker run --rm -it -w /proj -v .:/proj docker.io/golang:${GO_VERSION:-1}-alpine sh
+go build -o lk-jwt-service
+# For healthcheck run following:
+go build -o lk-jwt-service-healthcheck ./healthcheck
+```
