@@ -127,12 +127,13 @@ type jobKey struct {
 // startParticipantLookup spawns a goroutine (tracked by job.backgroundWg) that
 // performs Phase-1 and Phase-2 participant checks for the given job.
 //
-//   - Phase 1: calls LiveKitGetParticipant with exponential backoff until the
-//     identity is present (nil error) or job.DelayTimeout elapses.  On success
-//     sends ParticipantLookupSuccessful to job.EventChannel.
-//   - Phase 2: at every sanityInterval tick, calls LiveKitGetParticipant; if
-//     the identity is no longer present, sends SFUParticipantGone.  Disabled
-//     when sanityInterval == 0.
+//   - Phase 1: calls LiveKitParticipantExists with exponential backoff until
+//     the identity is present or job.DelayTimeout elapses.  On success sends
+//     ParticipantLookupSuccessful to job.EventChannel.
+//   - Phase 2: at every sanityInterval tick, calls LiveKitParticipantExists;
+//     if the identity is confirmed absent (SFU returned NotFound), sends
+//     SFUParticipantGone.  Transport errors are logged and ignored.
+//     Disabled when sanityInterval == 0.
 //
 // Communication is identical to SFU webhooks — signals are sent on
 // job.EventChannel — so no new concurrency primitives are needed.
@@ -158,7 +159,15 @@ func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInte
 		_, err := backoff.Retry(
 			ctx,
 			func() (struct{}, error) {
-				return struct{}{}, LiveKitGetParticipant(ctx, lkAuth, lkRoom, lkId)
+				ok, err := LiveKitParticipantExists(ctx, lkAuth, lkRoom, lkId)
+				switch {
+				case err != nil:
+					return struct{}{}, err // transport error — retry
+				case !ok:
+					return struct{}{}, errParticipantAbsent // confirmed absent — retry
+				default:
+					return struct{}{}, nil // present — success
+				}
 			},
 			backoff.WithBackOff(expBackOff),
 			backoff.WithMaxElapsedTime(waitingDuration),
@@ -177,6 +186,11 @@ func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInte
 		}
 
 		// Phase 2: periodic sanity checks (disabled when sanityInterval == 0).
+		//
+		// Only emit SFUParticipantGone when the SFU confirms absence
+		// ((false, nil) from LiveKitParticipantExists).  Transport errors
+		// are logged and ignored — a transient blip should not tear the
+		// job down prematurely.
 		if sanityInterval == 0 {
 			return
 		}
@@ -187,10 +201,16 @@ func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInte
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := LiveKitGetParticipant(ctx, lkAuth, lkRoom, lkId); err != nil {
+				ok, err := LiveKitParticipantExists(ctx, lkAuth, lkRoom, lkId)
+				if err != nil {
 					if ctx.Err() != nil {
 						return
 					}
+					slog.Warn("participantLookup: Phase 2: transport error (ignored)",
+						"room", lkRoom, "lkId", lkId, "err", err)
+					continue
+				}
+				if !ok {
 					slog.Warn("participantLookup: Phase 2: participant no longer on SFU",
 						"room", lkRoom, "lkId", lkId)
 					select {
@@ -329,7 +349,7 @@ type DelayedEventJob struct {
 	// the participant-lookup goroutine, ActionRestart goroutines, and the
 	// ActionSend goroutine.  loop() waits for them before returning so that
 	// Close() guarantees no goroutine still holds a reference to the
-	// ExecuteDelayedEventAction or LiveKitGetParticipant function variables
+	// ExecuteDelayedEventAction or LiveKitParticipantExists function variables
 	// after it returns.
 	backgroundWg sync.WaitGroup
 

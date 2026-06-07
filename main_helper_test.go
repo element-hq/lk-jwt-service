@@ -90,32 +90,32 @@ func TestNewUniqueIDStringConversion(t *testing.T) {
 	}
 }
 
-// ── CreateLiveKitRoomAlias ────────────────────────────────────────────────────
+// ── LiveKitRoomAliasFor ────────────────────────────────────────────────────
 
-// TestCreateLiveKitRoomAlias_TestVector verifies against the test vector from the
+// TestLiveKitRoomAliasFor_TestVector verifies against the test vector from the
 // spec proposal to ensure compliance with the expected hashing and encoding scheme.
 // https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
-func TestCreateLiveKitRoomAlias_TestVector(t *testing.T) {
-	id := string(CreateLiveKitRoomAlias("!roomid:example.com", "slot123"))
+func TestLiveKitRoomAliasFor_TestVector(t *testing.T) {
+	id := string(LiveKitRoomAliasFor("!roomid:example.com", "slot123"))
 	wantId := "AUDmNDQiVHmWYRE+rKBvieWX8AUSzepenuj6u+d/n9c"
 	if id != wantId {
-		t.Errorf("CreateLiveKitRoomAlias test vector mismatch: got %s, want %s", id, wantId)
+		t.Errorf("LiveKitRoomAliasFor test vector mismatch: got %s, want %s", id, wantId)
 	}
 }
 
-// TestCreateLiveKitRoomAlias_Deterministic verifies that the same inputs always
+// TestLiveKitRoomAliasFor_Deterministic verifies that the same inputs always
 // produce the same alias.
-func TestCreateLiveKitRoomAlias_Deterministic(t *testing.T) {
-	a1 := CreateLiveKitRoomAlias("!room:example.com", "m.call#ROOM")
-	a2 := CreateLiveKitRoomAlias("!room:example.com", "m.call#ROOM")
+func TestLiveKitRoomAliasFor_Deterministic(t *testing.T) {
+	a1 := LiveKitRoomAliasFor("!room:example.com", "m.call#ROOM")
+	a2 := LiveKitRoomAliasFor("!room:example.com", "m.call#ROOM")
 	if a1 != a2 {
 		t.Errorf("same inputs produced different aliases: %s vs %s", a1, a2)
 	}
 }
 
-// TestCreateLiveKitRoomAlias_SampleInputsDistinct verifies that different
+// TestLiveKitRoomAliasFor_SampleInputsDistinct verifies that different
 // inputs produce different aliases.
-func TestCreateLiveKitRoomAlias_SampleInputsDistinct(t *testing.T) {
+func TestLiveKitRoomAliasFor_SampleInputsDistinct(t *testing.T) {
 	cases := [][2]string{
 		{"!room1:example.com", "m.call#ROOM"},
 		{"!room2:example.com", "m.call#ROOM"},
@@ -124,7 +124,7 @@ func TestCreateLiveKitRoomAlias_SampleInputsDistinct(t *testing.T) {
 	}
 	seen := make(map[LiveKitRoomAlias][2]string)
 	for _, c := range cases {
-		alias := CreateLiveKitRoomAlias(c[0], c[1])
+		alias := LiveKitRoomAliasFor(c[0], c[1])
 		for prev, prevKey := range seen {
 			if alias == prev {
 				t.Errorf("collision: (%v) and (%v) produced the same alias %s",
@@ -135,10 +135,10 @@ func TestCreateLiveKitRoomAlias_SampleInputsDistinct(t *testing.T) {
 	}
 }
 
-// TestCreateLiveKitRoomAlias_Format verifies that the alias is a non-empty
+// TestLiveKitRoomAliasFor_Format verifies that the alias is a non-empty
 // unpadded Base64 string (no trailing '=').
-func TestCreateLiveKitRoomAlias_Format(t *testing.T) {
-	alias := CreateLiveKitRoomAlias("!room:example.com", "m.call#ROOM")
+func TestLiveKitRoomAliasFor_Format(t *testing.T) {
+	alias := LiveKitRoomAliasFor("!room:example.com", "m.call#ROOM")
 	if len(alias) == 0 {
 		t.Error("alias is empty")
 	}
@@ -147,32 +147,32 @@ func TestCreateLiveKitRoomAlias_Format(t *testing.T) {
 	}
 }
 
-// ── CreateLiveKitIdentity ─────────────────────────────────────────────────────
+// ── LiveKitIdentityFor ─────────────────────────────────────────────────────
 
-// TestCreateLiveKitIdentity_TestVector verifies against the test vector from the
+// TestLiveKitIdentityFor_TestVector verifies against the test vector from the
 // spec proposal to ensure compliance with the expected hashing and encoding scheme.
 // https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
-func TestCreateLiveKitIdentity_TestVector(t *testing.T) {
-	id := string(CreateLiveKitIdentity("@alice:example.com", "DEVICE123", "memberABC"))
+func TestLiveKitIdentityFor_TestVector(t *testing.T) {
+	id := string(LiveKitIdentityFor("@alice:example.com", "DEVICE123", "memberABC"))
 	wantId := "J+T45tGruxc+HrUOqJJlyQSV33m728Cme4+vt8/SWrU"
 	if id != wantId {
-		t.Errorf("CreateLiveKitIdentity test vector mismatch: got %s, want %s", id, wantId)
+		t.Errorf("LiveKitIdentityFor test vector mismatch: got %s, want %s", id, wantId)
 	}
 }
 
-// TestCreateLiveKitIdentity_Deterministic verifies that the same inputs always
+// TestLiveKitIdentityFor_Deterministic verifies that the same inputs always
 // produce the same identity.
-func TestCreateLiveKitIdentity_Deterministic(t *testing.T) {
-	id1 := CreateLiveKitIdentity("@user:example.com", "DEVICEID", "memberID")
-	id2 := CreateLiveKitIdentity("@user:example.com", "DEVICEID", "memberID")
+func TestLiveKitIdentityFor_Deterministic(t *testing.T) {
+	id1 := LiveKitIdentityFor("@user:example.com", "DEVICEID", "memberID")
+	id2 := LiveKitIdentityFor("@user:example.com", "DEVICEID", "memberID")
 	if id1 != id2 {
 		t.Errorf("same inputs produced different identities: %s vs %s", id1, id2)
 	}
 }
 
-// TestCreateLiveKitIdentity_SampleInputsDistinct verifies that different inputs 
+// TestLiveKitIdentityFor_SampleInputsDistinct verifies that different inputs 
 // produce different identities.
-func TestCreateLiveKitIdentity_SampleInputsDistinct(t *testing.T) {
+func TestLiveKitIdentityFor_SampleInputsDistinct(t *testing.T) {
 	cases := [][3]string{
 		{"@alice:example.com", "DEV1", "mem1"},
 		{"@bob:example.com", "DEV1", "mem1"},
@@ -181,7 +181,7 @@ func TestCreateLiveKitIdentity_SampleInputsDistinct(t *testing.T) {
 	}
 	seen := make(map[LiveKitIdentity][3]string)
 	for _, c := range cases {
-		id := CreateLiveKitIdentity(c[0], c[1], c[2])
+		id := LiveKitIdentityFor(c[0], c[1], c[2])
 		for prev, prevInputs := range seen {
 			if id == prev {
 				t.Errorf("collision: %v and %v produced the same identity %s",
@@ -192,10 +192,10 @@ func TestCreateLiveKitIdentity_SampleInputsDistinct(t *testing.T) {
 	}
 }
 
-// TestCreateLiveKitIdentity_Format verifies that the identity is a non-empty
+// TestLiveKitIdentityFor_Format verifies that the identity is a non-empty
 // unpadded Base64 string.
-func TestCreateLiveKitIdentity_Format(t *testing.T) {
-	id := CreateLiveKitIdentity("@user:example.com", "DEVICEID", "memberID")
+func TestLiveKitIdentityFor_Format(t *testing.T) {
+	id := LiveKitIdentityFor("@user:example.com", "DEVICEID", "memberID")
 	if len(id) == 0 {
 		t.Error("identity is empty")
 	}

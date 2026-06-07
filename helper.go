@@ -4,6 +4,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
+// helper.go: cross-cutting helpers shared by request handlers and the
+// delayed-event manager — ID generation, LiveKit SDK wrappers, Matrix
+// CS-API calls.  The exported `var X = func(...)` patterns exist so
+// tests can swap them; this is slated to move to interface-based
+// injection in a later step.
+
 package main
 
 import (
@@ -28,7 +34,13 @@ import (
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/matrix-org/gomatrixserverlib/fclient"
 	"github.com/matrix-org/gomatrixserverlib/spec"
+	"github.com/twitchtv/twirp"
 )
+
+// errParticipantAbsent is returned to backoff.Retry from
+// startParticipantLookup's Phase-1 loop so it keeps polling while the SFU
+// confirms the participant is not present yet.  Not a transport failure.
+var errParticipantAbsent = errors.New("livekit: participant not currently present")
 
 type UniqueID string
 
@@ -93,16 +105,16 @@ var newRoomServiceClient = func(url, key, secret string) RoomClient {
 	return lksdk.NewRoomServiceClient(url, key, secret)
 }
 
-func CreateLiveKitRoomAlias(matrixRoom string, matrixRtcSlot string) LiveKitRoomAlias {
-	// Create a deterministic LiveKit room alias based on Matrix room ID and slot ID
-	// to ensure uniqueness and avoid collisions.
+// LiveKitRoomAliasFor returns the deterministic LiveKit room alias for a
+// given (Matrix room ID, MatrixRTC slot) pair.
+func LiveKitRoomAliasFor(matrixRoom string, matrixRtcSlot string) LiveKitRoomAlias {
 	hash := sha256.Sum256(marshalStrings([]string{matrixRoom, matrixRtcSlot}))
 	return LiveKitRoomAlias(unpaddedBase64.EncodeToString(hash[:]))
 }
 
-func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) LiveKitIdentity {
-	// Create a deterministic LiveKit identity based on user ID and device ID
-	// to ensure uniqueness and avoid collisions.
+// LiveKitIdentityFor returns the deterministic LiveKit identity for a given
+// (Matrix user ID, device ID, MatrixRTC member ID) tuple.
+func LiveKitIdentityFor(matrixID string, deviceId string, memberID string) LiveKitIdentity {
 	hash := sha256.Sum256(marshalStrings([]string{matrixID, deviceId, memberID}))
 	return LiveKitIdentity(unpaddedBase64.EncodeToString(hash[:]))
 }
@@ -149,22 +161,34 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 	return nil
 }
 
-// LiveKitGetParticipant checks whether the given identity is currently present
-// in the given LiveKit room.  Returns nil if the participant is present, an
-// error otherwise (including "not found").  Used by startParticipantLookup
-// for both Phase-1 (initial lookup) and Phase-2 (periodic sanity check).
-var LiveKitGetParticipant = func(
+// LiveKitParticipantExists reports whether the given identity is currently
+// present in the given LiveKit room.
+//
+//   - (true, nil)   participant present.
+//   - (false, nil)  participant confirmed absent (SFU returned NotFound).
+//   - (false, err)  transport / auth / server error — presence unknown.
+//
+// Used by startParticipantLookup for both Phase-1 (initial lookup) and
+// Phase-2 (periodic sanity check).
+var LiveKitParticipantExists = func(
 	ctx context.Context,
 	lkAuth LiveKitAuth,
 	room LiveKitRoomAlias,
 	identity LiveKitIdentity,
-) error {
+) (bool, error) {
 	roomClient := newRoomServiceClient(lkAuth.lkUrl, lkAuth.key, lkAuth.secret)
 	_, err := roomClient.GetParticipant(ctx, &livekit.RoomParticipantIdentity{
 		Room:     string(room),
 		Identity: string(identity),
 	})
-	return err
+	if err == nil {
+		return true, nil
+	}
+	var twirpErr twirp.Error
+	if errors.As(err, &twirpErr) && twirpErr.Code() == twirp.NotFound {
+		return false, nil
+	}
+	return false, err
 }
 
 // ExecuteDelayedEventAction POSTs the given action (restart/send) to the Matrix

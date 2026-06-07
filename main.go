@@ -538,7 +538,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
 	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
 	slotId := "m.call#ROOM"
-	lkRoomAlias := CreateLiveKitRoomAlias(req.Room, slotId)
+	lkRoomAlias := LiveKitRoomAliasFor(req.Room, slotId)
 
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
@@ -619,8 +619,8 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		"userInfo.Sub", userInfo.Sub,
 		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser])
 
-	lkIdentity := CreateLiveKitIdentity(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
-	lkRoomAlias := CreateLiveKitRoomAlias(req.RoomID, req.SlotID)
+	lkIdentity := LiveKitIdentityFor(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
+	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
@@ -708,8 +708,8 @@ func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *Members
 		}
 	}
 
-	lkIdentity := CreateLiveKitIdentity(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
-	lkRoomAlias := CreateLiveKitRoomAlias(req.RoomID, req.SlotID)
+	lkIdentity := LiveKitIdentityFor(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
+	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
 	slog.Info("Handler: scheduling delayed event job (membership_leave_delegation)",
 		"room", lkRoomAlias, "lkId", lkIdentity,

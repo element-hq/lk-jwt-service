@@ -12,7 +12,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -720,22 +719,22 @@ func TestDelayedEventJob_SFUParticipantGone_WrongState(t *testing.T) {
 // ── startParticipantLookup ────────────────────────────────────────────────────
 
 // TestParticipantLookup_Phase1_FindsParticipant verifies that startParticipantLookup
-// immediately calls LiveKitGetParticipant and delivers ParticipantLookupSuccessful
+// immediately calls LiveKitParticipantExists and delivers ParticipantLookupSuccessful
 // to the job when the participant is present (sanityInterval == 0: one attempt only).
 func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 	const identity LiveKitIdentity = "@alice:example.com"
 	const room LiveKitRoomAlias = "phase1-room"
 
 	phase1Done := make(chan struct{})
-	original := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = original })
-	LiveKitGetParticipant = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	original := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = original })
+	LiveKitParticipantExists = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		select {
 		case <-phase1Done:
 		default:
 			close(phase1Done)
 		}
-		return nil // participant present
+		return true, nil // participant present
 	}
 
 	mockExecOK(t)
@@ -780,14 +779,14 @@ func TestParticipantLookup_Phase2_DetectsGoneParticipant(t *testing.T) {
 	const room LiveKitRoomAlias = "phase2-room"
 
 	callCount := 0
-	original := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = original })
-	LiveKitGetParticipant = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	original := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = original })
+	LiveKitParticipantExists = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		callCount++
 		if callCount == 1 {
-			return nil // Phase 1: participant present.
+			return true, nil // Phase 1: participant present.
 		}
-		return errors.New("not found") // Phase 2: participant gone.
+		return false, nil // Phase 2: participant confirmed absent.
 	}
 
 	mockExecOK(t)
@@ -836,16 +835,16 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 	// has exited (backgroundWg.Wait()), so there is no concurrent access.
 	phase1Done := make(chan struct{})
 	callCount := 0
-	original := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = original })
-	LiveKitGetParticipant = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	original := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = original })
+	LiveKitParticipantExists = func(_ context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		callCount++
 		select {
 		case <-phase1Done:
 		default:
 			close(phase1Done)
 		}
-		return nil // participant present
+		return true, nil // participant present
 	}
 
 	mockExecOK(t)

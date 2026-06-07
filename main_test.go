@@ -306,7 +306,7 @@ func TestLegacyHandlePost(t *testing.T) {
 	if claims["sub"] != "@user:"+matrixServerName+":testDevice" {
 		t.Errorf("unexpected sub: got %v", claims["sub"])
 	}
-	if claims["video"].(map[string]interface{})["room"] != string(CreateLiveKitRoomAlias(matrixRoom, "m.call#ROOM")) {
+	if claims["video"].(map[string]interface{})["room"] != string(LiveKitRoomAliasFor(matrixRoom, "m.call#ROOM")) {
 		t.Errorf("unexpected room: got %v", claims["video"].(map[string]interface{})["room"])
 	}
 }
@@ -621,11 +621,11 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 	// LIFO cleanup order: register global restores FIRST (run last),
 	// handler.Close LAST (runs first) — ensures all goroutines exit before
 	// the globals are restored.
-	original := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = original }) // runs last
-	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	original := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = original }) // runs last
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		<-ctx.Done()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -656,11 +656,11 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	// LIFO cleanup order: register global restores FIRST (run last),
 	// handler.Close LAST (runs first) — ensures all goroutines exit before
 	// the globals are restored.
-	original := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = original }) // runs last
-	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	original := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = original }) // runs last
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		<-ctx.Done()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -866,20 +866,20 @@ func TestSfuEventFromWebhook_UnknownEvent(t *testing.T) {
 
 // TestHandler_loop_AllJobsClosedOnShutdown verifies that handler.Close() waits
 // for ALL participant-lookup goroutines to fully exit before returning.  This prevents
-// races on global function variables (e.g. LiveKitGetParticipant) between
+// races on global function variables (e.g. LiveKitParticipantExists) between
 // lookup goroutines and test cleanup.
 func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 	var mu sync.Mutex
 	var exited []string
 
-	original := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = original })
-	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, room LiveKitRoomAlias, _ LiveKitIdentity) error {
+	original := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = original })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, room LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		<-ctx.Done()
 		mu.Lock()
 		exited = append(exited, string(room))
 		mu.Unlock()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	handler := NewHandler(
@@ -917,11 +917,11 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 // after a job finishes and signals doneCh, the job is removed from the map AND
 // its close goroutine completes before handler.Close() returns.
 func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
-	originalLookup := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
-	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		<-ctx.Done()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction
@@ -978,11 +978,11 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 // deadlock.  A stale doneCh signal from the old job must be ignored (pointer
 // equality check in the doneCh case of loop()).
 func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
-	originalLookup := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
-	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		<-ctx.Done()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	originalExec := ExecuteDelayedEventAction

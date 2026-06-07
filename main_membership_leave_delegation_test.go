@@ -203,11 +203,11 @@ func TestHandleMembershipLeaveDelegation_Success(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
 
-	originalLookup := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
-	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		<-ctx.Done()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
@@ -235,11 +235,11 @@ func TestHandleMembershipLeaveDelegation_NoJWT(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
 
-	originalLookup := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
-	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		<-ctx.Done()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
@@ -285,11 +285,11 @@ func TestProcessMembershipLeaveDelegation_CreatesJob(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
 
-	originalLookup := LiveKitGetParticipant
-	t.Cleanup(func() { LiveKitGetParticipant = originalLookup })
-	LiveKitGetParticipant = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) error {
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
 		<-ctx.Done()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
