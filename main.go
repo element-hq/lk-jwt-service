@@ -798,27 +798,8 @@ func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// TODO: deprecated
-func mapSFURequest(data *[]byte) (any, error) {
-	requestTypes := []ValidatableSFURequest{&LegacySFURequest{}, &SFURequest{}}
-	for _, req := range requestTypes {
-		decoder := json.NewDecoder(strings.NewReader(string(*data)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(req); err == nil {
-			if err := req.Validate(); err != nil {
-				return nil, err
-			}
-			return req, nil
-		}
-	}
-	return nil, &MatrixErrorResponse{
-		Status:  http.StatusBadRequest,
-		ErrCode: "M_BAD_JSON",
-		Err:     "The request body was malformed, missing required fields, or contained invalid values.",
-	}
-}
-
-// TODO: deprecated
+// Deprecated: handle_legacy serves the pre-Matrix-2.0 /sfu/get endpoint.
+// Remove once all in-the-wild clients have migrated to /get_token.
 func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Handler (legacy): new request",
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
@@ -833,16 +814,17 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	case "POST":
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
+		var req LegacySFURequest
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
 			slog.Error("Handler (legacy): error reading body",
 				"RemoteAddr", r.RemoteAddr, "err", err)
 			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
 			return
 		}
 
-		sfuAccessRequest, err := mapSFURequest(&body)
-		if err != nil {
+		if err := req.Validate(); err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {
 				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
@@ -850,14 +832,7 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var sfuAccessResponse *SFUResponse
-		switch sfuReq := sfuAccessRequest.(type) {
-		case *SFURequest:
-			sfuAccessResponse, err = h.processSFURequest(r, sfuReq)
-		case *LegacySFURequest:
-			sfuAccessResponse, err = h.processLegacySFURequest(r, sfuReq)
-		}
-
+		sfuAccessResponse, err := h.processLegacySFURequest(r, &req)
 		if err != nil {
 			matrixErr := &MatrixErrorResponse{}
 			if errors.As(err, &matrixErr) {

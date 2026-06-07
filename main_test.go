@@ -14,13 +14,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -403,113 +400,6 @@ func TestMatrixErrorResponse_Error(t *testing.T) {
 
 // ── SFURequest / LegacySFURequest validation ──────────────────────────────────
 
-func TestMapSFURequest(t *testing.T) {
-	testCases := []struct {
-		name        string
-		input       string
-		want        any
-		wantErrCode string
-	}{
-		{
-			name: "Valid legacy request",
-			input: `{"room":"testRoom",
-				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
-				"device_id":"testDevice"}`,
-			want: &LegacySFURequest{
-				Room:        "testRoom",
-				OpenIDToken: OpenIDTokenType{AccessToken: "test_token", TokenType: "Bearer", MatrixServerName: "example.com", ExpiresIn: 3600},
-				DeviceID:    "testDevice",
-			},
-		},
-		{
-			name: "Valid Matrix 2.0 request",
-			input: `{"room_id":"!testRoom:example.com","slot_id":"123",
-				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
-				"member":{"id":"test_id","claimed_user_id":"@test:example.com","claimed_device_id":"testDevice"}}`,
-			want: &SFURequest{
-				RoomID: "!testRoom:example.com", SlotID: "123",
-				OpenIDToken: OpenIDTokenType{AccessToken: "test_token", TokenType: "Bearer", MatrixServerName: "example.com", ExpiresIn: 3600},
-				Member:      MatrixRTCMemberType{ID: "test_id", ClaimedUserID: "@test:example.com", ClaimedDeviceID: "testDevice"},
-			},
-		},
-		{
-			name: "Valid Matrix 2.0 request with delayed events",
-			input: `{"room_id":"!testRoom:example.com","slot_id":"123",
-				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
-				"member":{"id":"test_id","claimed_user_id":"@test:example.com","claimed_device_id":"testDevice"},
-				"delay_id":"delayed123","delay_timeout":30,"delay_cs_api_url":"https://example.com/api"}`,
-			want: &SFURequest{
-				RoomID: "!testRoom:example.com", SlotID: "123",
-				OpenIDToken:   OpenIDTokenType{AccessToken: "test_token", TokenType: "Bearer", MatrixServerName: "example.com", ExpiresIn: 3600},
-				Member:        MatrixRTCMemberType{ID: "test_id", ClaimedUserID: "@test:example.com", ClaimedDeviceID: "testDevice"},
-				DelayId:       "delayed123",
-				DelayTimeout:  30,
-				DelayCsApiUrl: "https://example.com/api",
-			},
-		},
-		{
-			name: "Invalid delayed events — missing delay_cs_api_url",
-			input: `{"room_id":"!testRoom:example.com","slot_id":"123",
-				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
-				"member":{"id":"test_id","claimed_user_id":"@test:example.com","claimed_device_id":"testDevice"},
-				"delay_id":"delayed123","delay_timeout":30}`,
-			wantErrCode: "M_BAD_JSON",
-		},
-		{name: "Invalid JSON", input: `{"invalid": json}`, wantErrCode: "M_BAD_JSON"},
-		{name: "Empty request", input: `{}`, wantErrCode: "M_BAD_JSON"},
-		{
-			name: "Legacy request with extra field",
-			input: `{"room":"testRoom",
-				"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
-				"device_id":"testDevice","extra_field":"should_fail"}`,
-			wantErrCode: "M_BAD_JSON",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			input := []byte(tc.input)
-			got, err := mapSFURequest(&input)
-
-			if tc.wantErrCode != "" {
-				matrixErr := &MatrixErrorResponse{}
-				if !errors.As(err, &matrixErr) {
-					t.Errorf("expected MatrixErrorResponse, got %v", err)
-					return
-				}
-				if matrixErr.ErrCode != tc.wantErrCode {
-					t.Errorf("error code = %v, want %v", matrixErr.ErrCode, tc.wantErrCode)
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
-				return
-			}
-			switch expected := tc.want.(type) {
-			case *LegacySFURequest:
-				actual, ok := got.(*LegacySFURequest)
-				if !ok {
-					t.Errorf("got %T, want *LegacySFURequest", got)
-					return
-				}
-				if !reflect.DeepEqual(actual, expected) {
-					t.Errorf("got %+v, want %+v", actual, expected)
-				}
-			case *SFURequest:
-				actual, ok := got.(*SFURequest)
-				if !ok {
-					t.Errorf("got %T, want *SFURequest", got)
-					return
-				}
-				if !reflect.DeepEqual(actual, expected) {
-					t.Errorf("got %+v, want %+v", actual, expected)
-				}
-			}
-		})
-	}
-}
-
 // TestLegacySFURequest_Validate_DelayedEventPartialParams verifies that providing
 // only some delayed-event parameters returns M_BAD_JSON.
 func TestLegacySFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
@@ -566,33 +456,6 @@ func TestSFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
 				t.Error("expected validation error for partial delayed-event params, got nil")
 			}
 		})
-	}
-}
-
-func TestMapSFURequestMemoryLeak(t *testing.T) {
-	const iterations = 100000
-	input := []byte(`{"room_id":"!testRoom:example.com","slot_id":"123",
-		"openid_token":{"access_token":"test_token","token_type":"Bearer","matrix_server_name":"example.com","expires_in":3600},
-		"member":{"id":"test_id","claimed_user_id":"@test:example.com","claimed_device_id":"testDevice"}}`)
-
-	var mStart, mEnd runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&mStart)
-	for i := 0; i < iterations; i++ {
-		if _, err := mapSFURequest(&input); err != nil {
-			t.Fatalf("unexpected error at iteration %d: %v", i, err)
-		}
-	}
-	runtime.GC()
-	runtime.ReadMemStats(&mEnd)
-
-	t.Logf("Start Alloc: %d bytes, End Alloc: %d bytes", mStart.Alloc, mEnd.Alloc)
-	if mEnd.Alloc > mStart.Alloc {
-		diff := mEnd.Alloc - mStart.Alloc
-		const threshold uint64 = 100 * 1024
-		if diff > threshold {
-			t.Errorf("potential memory leak: heap grew %d bytes (> %d)", diff, threshold)
-		}
 	}
 }
 
