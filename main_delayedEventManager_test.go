@@ -28,8 +28,8 @@ func newTestJob(t *testing.T, timeout time.Duration) *DelayedEventJob {
 	}
 	job, err := NewDelayedEventJob(
 		context.Background(),
-		&DelayedEventRequest{
-			DelayCsApiUrl:   "https://matrix.example.com",
+		DelayedEventJobParams{
+			CsApiUrl:   "https://matrix.example.com",
 			DelayId:         "test-delay-id",
 			DelayTimeout:    timeout,
 			LiveKitRoom:     LiveKitRoomAlias("test-room"),
@@ -64,8 +64,8 @@ func newJobWithDoneCh(timeout time.Duration) (*DelayedEventJob, chan *DelayedEve
 	doneCh := make(chan *DelayedEventJob, 5)
 	job, _ := NewDelayedEventJob(
 		context.Background(),
-		&DelayedEventRequest{
-			DelayCsApiUrl:   "https://example.com",
+		DelayedEventJobParams{
+			CsApiUrl:   "https://example.com",
 			DelayId:         "id",
 			DelayTimeout:    timeout,
 			LiveKitRoom:     "room",
@@ -93,8 +93,8 @@ func mockExecOK(t *testing.T) {
 func TestDelayedEventJob_InvalidTimeout(t *testing.T) {
 	_, err := NewDelayedEventJob(
 		context.Background(),
-		&DelayedEventRequest{
-			DelayCsApiUrl: "https://example.com", DelayId: "id",
+		DelayedEventJobParams{
+			CsApiUrl: "https://example.com", DelayId: "id",
 			DelayTimeout: 0, LiveKitRoom: "room", LiveKitIdentity: "identity",
 		},
 		make(chan *DelayedEventJob, 1),
@@ -742,8 +742,8 @@ func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 	doneCh := make(chan *DelayedEventJob, 5)
 	job, err := NewDelayedEventJob(
 		context.Background(),
-		&DelayedEventRequest{
-			DelayCsApiUrl:   "https://example.com",
+		DelayedEventJobParams{
+			CsApiUrl:   "https://example.com",
 			DelayId:         "phase1-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
@@ -795,8 +795,8 @@ func TestParticipantLookup_Phase2_DetectsGoneParticipant(t *testing.T) {
 	doneCh := make(chan *DelayedEventJob, 5)
 	job, err := NewDelayedEventJob(
 		context.Background(),
-		&DelayedEventRequest{
-			DelayCsApiUrl:   "https://example.com",
+		DelayedEventJobParams{
+			CsApiUrl:   "https://example.com",
 			DelayId:         "phase2-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
@@ -852,8 +852,8 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 	doneCh := make(chan *DelayedEventJob, 5)
 	job, err := NewDelayedEventJob(
 		context.Background(),
-		&DelayedEventRequest{
-			DelayCsApiUrl:   "https://example.com",
+		DelayedEventJobParams{
+			CsApiUrl:   "https://example.com",
 			DelayId:         "disabled-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,

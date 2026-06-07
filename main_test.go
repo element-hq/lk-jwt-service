@@ -641,8 +641,8 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
-	handler.addDelayedEventJob(&DelayedEventRequest{
-		DelayCsApiUrl:   "https://matrix.example.com",
+	handler.addDelayedEventJob(DelayedEventJobParams{
+		CsApiUrl:   "https://matrix.example.com",
 		DelayId:         "delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     LiveKitRoomAlias("test-room"),
@@ -679,8 +679,8 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	room := LiveKitRoomAlias("loop-test-room")
 	identity := LiveKitIdentity("@loopuser:example.com")
 
-	handler.addDelayedEventJob(&DelayedEventRequest{
-		DelayCsApiUrl:   "https://matrix.example.com",
+	handler.addDelayedEventJob(DelayedEventJobParams{
+		CsApiUrl:   "https://matrix.example.com",
 		DelayId:         "loop-delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     room,
@@ -757,8 +757,8 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 	// Should return without blocking even though loop() is gone.
 	done := make(chan struct{})
 	go func() {
-		handler.addDelayedEventJob(&DelayedEventRequest{
-			DelayCsApiUrl:   "https://example.com",
+		handler.addDelayedEventJob(DelayedEventJobParams{
+			CsApiUrl:   "https://example.com",
 			DelayId:         "id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     "room",
@@ -891,8 +891,8 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 	// Start three jobs in three different rooms — each spawns a room worker goroutine.
 	rooms := []LiveKitRoomAlias{"room-alpha", "room-beta", "room-gamma"}
 	for _, room := range rooms {
-		handler.addDelayedEventJob(&DelayedEventRequest{
-			DelayCsApiUrl:   "https://matrix.example.com",
+		handler.addDelayedEventJob(DelayedEventJobParams{
+			CsApiUrl:   "https://matrix.example.com",
 			DelayId:         "delay-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
@@ -939,8 +939,8 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 	room := LiveKitRoomAlias("donech-shutdown-room")
 	identity := LiveKitIdentity("@user:example.com")
 
-	handler.addDelayedEventJob(&DelayedEventRequest{
-		DelayCsApiUrl:   "https://matrix.example.com",
+	handler.addDelayedEventJob(DelayedEventJobParams{
+		CsApiUrl:   "https://matrix.example.com",
 		DelayId:         "delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     room,
@@ -1001,15 +1001,15 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 	identity := LiveKitIdentity("@same-user:example.com")
 
 	// Create first job.
-	handler.addDelayedEventJob(&DelayedEventRequest{
-		DelayCsApiUrl: "https://matrix.example.com", DelayId: "delay-1",
+	handler.addDelayedEventJob(DelayedEventJobParams{
+		CsApiUrl: "https://matrix.example.com", DelayId: "delay-1",
 		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity,
 	})
 	time.Sleep(20 * time.Millisecond)
 
 	// Replace with second job for the same identity — first job gets JobReplaced.
-	handler.addDelayedEventJob(&DelayedEventRequest{
-		DelayCsApiUrl: "https://matrix.example.com", DelayId: "delay-2",
+	handler.addDelayedEventJob(DelayedEventJobParams{
+		CsApiUrl: "https://matrix.example.com", DelayId: "delay-2",
 		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity,
 	})
 	time.Sleep(100 * time.Millisecond)

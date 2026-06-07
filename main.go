@@ -77,14 +77,6 @@ type LegacySFURequest struct {
 	DelayCsApiUrl string          `json:"delay_cs_api_url,omitempty"`
 }
 
-type DelayedEventRequest struct {
-	DelayId         string
-	DelayTimeout    time.Duration
-	DelayCsApiUrl   string
-	LiveKitRoom     LiveKitRoomAlias
-	LiveKitIdentity LiveKitIdentity
-}
-
 type SFURequest struct {
 	RoomID        string              `json:"room_id"`
 	SlotID        string              `json:"slot_id"`
@@ -278,7 +270,7 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 // needed.  HTTP handler goroutines communicate with loop() exclusively through
 // channels:
 //
-//   - addJobCh:   deliver a new DelayedEventRequest to loop(), which creates a
+//   - addJobCh:   deliver new DelayedEventJobParams to loop(), which creates a
 //     DelayedEventJob and starts its participant-lookup goroutine.
 //   - sfuEventCh: deliver an SFU webhook event to loop(), which routes it
 //     directly to the correct job by (room, identity) key.
@@ -305,7 +297,7 @@ type Handler struct {
 
 // addJobRequest is sent by HTTP handlers to loop() to add a delayed-event job.
 type addJobRequest struct {
-	jobRequest *DelayedEventRequest
+	params DelayedEventJobParams
 	// result receives the outcome; buffered so loop() never blocks.
 	result chan addJobResult
 }
@@ -380,13 +372,13 @@ func (h *Handler) loop() {
 
 		// ── add job ──────────────────────────────────────────────────────────
 		case req := <-h.addJobCh:
-			key := jobKey{Room: req.jobRequest.LiveKitRoom, Identity: req.jobRequest.LiveKitIdentity}
+			key := jobKey{Room: req.params.LiveKitRoom, Identity: req.params.LiveKitIdentity}
 
-			job, err := NewDelayedEventJob(h.ctx, req.jobRequest, h.jobDoneCh)
+			job, err := NewDelayedEventJob(h.ctx, req.params, h.jobDoneCh)
 			if err != nil {
 				slog.Error("Handler: failed to create delayed event job",
-					"room", req.jobRequest.LiveKitRoom,
-					"lkId", req.jobRequest.LiveKitIdentity, "err", err)
+					"room", req.params.LiveKitRoom,
+					"lkId", req.params.LiveKitIdentity, "err", err)
 				req.result <- addJobResult{ok: false}
 				continue
 			}
@@ -474,27 +466,27 @@ func (h *Handler) Close() {
 	}
 }
 
-// addDelayedEventJob sends a job request to loop() and waits for the result.
+// addDelayedEventJob sends a set of job params to loop() and waits for the result.
 // loop() performs the monitor lookup and HandoverJob atomically.
-func (h *Handler) addDelayedEventJob(jobRequest *DelayedEventRequest) {
+func (h *Handler) addDelayedEventJob(p DelayedEventJobParams) {
 	slog.Debug("Handler: adding delayed event job",
-		"room", jobRequest.LiveKitRoom,
-		"lkId", jobRequest.LiveKitIdentity,
-		"DelayId", jobRequest.DelayId)
+		"room", p.LiveKitRoom,
+		"lkId", p.LiveKitIdentity,
+		"DelayId", p.DelayId)
 
 	result := make(chan addJobResult, 1)
 	select {
-	case h.addJobCh <- addJobRequest{jobRequest: jobRequest, result: result}:
+	case h.addJobCh <- addJobRequest{params: p, result: result}:
 	case <-h.ctx.Done():
 		slog.Warn("Handler: addDelayedEventJob called after shutdown",
-			"room", jobRequest.LiveKitRoom)
+			"room", p.LiveKitRoom)
 		return
 	}
 	res := <-result
 	if !res.ok {
 		slog.Error("Handler: job handover failed",
-			"room", jobRequest.LiveKitRoom,
-			"lkId", jobRequest.LiveKitIdentity,
+			"room", p.LiveKitRoom,
+			"lkId", p.LiveKitIdentity,
 			"jobId", res.jobId)
 	}
 }
@@ -561,8 +553,8 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
 				"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
-			h.addDelayedEventJob(&DelayedEventRequest{
-				DelayCsApiUrl:   req.DelayCsApiUrl,
+			h.addDelayedEventJob(DelayedEventJobParams{
+				CsApiUrl:   req.DelayCsApiUrl,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
@@ -645,8 +637,8 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
 				"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
-			h.addDelayedEventJob(&DelayedEventRequest{
-				DelayCsApiUrl:   req.DelayCsApiUrl,
+			h.addDelayedEventJob(DelayedEventJobParams{
+				CsApiUrl:   req.DelayCsApiUrl,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
@@ -716,8 +708,8 @@ func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *Members
 		"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
-	h.addDelayedEventJob(&DelayedEventRequest{
-		DelayCsApiUrl:   req.DelayCsApiUrl,
+	h.addDelayedEventJob(DelayedEventJobParams{
+		CsApiUrl:   req.DelayCsApiUrl,
 		DelayId:         req.DelayId,
 		DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 		LiveKitRoom:     lkRoomAlias,

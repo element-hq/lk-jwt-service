@@ -226,6 +226,19 @@ func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInte
 
 // ── DelayedEventJob ──────────────────────────────────────────────────────────
 
+// DelayedEventJobParams is the immutable bundle of inputs needed to construct
+// a DelayedEventJob.  Built by request handlers in main.go and handed to
+// Handler.addDelayedEventJob, which forwards it to Handler.loop() and
+// NewDelayedEventJob.  Embedded into DelayedEventJob so its fields are
+// promoted (job.LiveKitRoom etc. resolve here without going through .Params).
+type DelayedEventJobParams struct {
+	DelayId         string
+	CsApiUrl        string
+	DelayTimeout    time.Duration
+	LiveKitRoom     LiveKitRoomAlias
+	LiveKitIdentity LiveKitIdentity
+}
+
 // DelayedEventJob models the complete lifecycle of a MatrixRTC cancellable
 // delayed disconnect event for a single participant in a LiveKit room.
 //
@@ -321,13 +334,12 @@ func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInte
 //	               |
 //	   (from Active / Fired state)
 type DelayedEventJob struct {
-	// Immutable after construction — safe to read without a lock.
-	JobId           UniqueID
-	CsApiUrl        string
-	DelayId         string
-	DelayTimeout    time.Duration
-	LiveKitRoom     LiveKitRoomAlias
-	LiveKitIdentity LiveKitIdentity
+	// Immutable after construction — safe to read without a lock.  The
+	// embedded DelayedEventJobParams promotes DelayId, CsApiUrl, DelayTimeout,
+	// LiveKitRoom and LiveKitIdentity onto DelayedEventJob, so callers can
+	// keep using job.LiveKitRoom etc. without reaching through .Params.
+	JobId UniqueID
+	DelayedEventJobParams
 
 	// EventChannel is the only way to send input to the job from the outside.
 	// It is buffered so that senders are unlikely to block.
@@ -373,28 +385,24 @@ type DelayedEventJob struct {
 
 func NewDelayedEventJob(
 	parentCtx context.Context,
-	jobRequest *DelayedEventRequest,
+	p DelayedEventJobParams,
 	doneCh chan<- *DelayedEventJob,
 ) (*DelayedEventJob, error) {
-	if jobRequest.DelayTimeout <= 0 {
-		return nil, fmt.Errorf("invalid delay timeout for delayed event job: %v", jobRequest.DelayTimeout)
+	if p.DelayTimeout <= 0 {
+		return nil, fmt.Errorf("invalid delay timeout for delayed event job: %v", p.DelayTimeout)
 	}
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	job := &DelayedEventJob{
-		JobId:           NewUniqueID(),
-		CsApiUrl:        jobRequest.DelayCsApiUrl,
-		DelayId:         jobRequest.DelayId,
-		DelayTimeout:    jobRequest.DelayTimeout,
-		LiveKitRoom:     jobRequest.LiveKitRoom,
-		LiveKitIdentity: jobRequest.LiveKitIdentity,
-		EventChannel:    make(chan DelayedEventSignal, 10),
-		ctx:             ctx,
-		cancel:          cancel,
-		doneCh:          doneCh,
-		done:            make(chan struct{}),
-		restartResultCh: make(chan time.Time, 1),
-		state:           WaitingForInitialConnect,
+		JobId:                 NewUniqueID(),
+		DelayedEventJobParams: p,
+		EventChannel:          make(chan DelayedEventSignal, 10),
+		ctx:                   ctx,
+		cancel:                cancel,
+		doneCh:                doneCh,
+		done:                  make(chan struct{}),
+		restartResultCh:       make(chan time.Time, 1),
+		state:                 WaitingForInitialConnect,
 	}
 	return job, nil
 }
