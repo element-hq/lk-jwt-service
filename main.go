@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -156,10 +155,6 @@ type MatrixErrorResponse struct {
 	Status  int
 	ErrCode string
 	Err     string
-}
-
-type ValidatableSFURequest interface {
-	Validate() error
 }
 
 func (e *MatrixErrorResponse) Error() string {
@@ -350,12 +345,12 @@ func (h *Handler) loop() {
 
 	jobs := make(map[jobKey]*DelayedEventJob)
 
-	// loopWg tracks all job.Loop() goroutines spawned by loop().
+	// loopWg tracks all job.loop() goroutines spawned by loop().
 	// loopWg.Wait() in the ctx.Done() teardown path ensures no goroutine still
 	// references global function variables (e.g. LiveKitListParticipants,
 	// ExecuteDelayedEventAction) after Handler.Close() returns, which is
 	// required for test safety.  Participant-lookup goroutines are tracked by
-	// job.backgroundWg and are therefore also waited on (Loop() calls backgroundWg.Wait()
+	// job.backgroundWg and are therefore also waited on (loop() calls backgroundWg.Wait()
 	// before it returns).
 	var loopWg sync.WaitGroup
 
@@ -379,7 +374,7 @@ func (h *Handler) loop() {
 					break drainDone
 				}
 			}
-			// Wait for all job Loop() goroutines to exit before returning.
+			// Wait for all job loop() goroutines to exit before returning.
 			loopWg.Wait()
 			return
 
@@ -405,7 +400,7 @@ func (h *Handler) loop() {
 				default:
 				}
 				existing.Stop()
-				// No Close() goroutine needed — existing.Loop() exits when its
+				// No Close() goroutine needed — existing.loop() exits when its
 				// context is cancelled; loopWg.Wait() handles the rest.
 			}
 
@@ -413,7 +408,7 @@ func (h *Handler) loop() {
 			loopWg.Add(1)
 			go func() {
 				defer loopWg.Done()
-				job.Loop()
+				job.loop()
 			}()
 			// Pull-based lookup (additionally to SFU webhook)
 			// Phase 1:
@@ -463,7 +458,7 @@ func (h *Handler) loop() {
 				"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 			delete(jobs, key)
 			doneJob.Stop()
-			// No Close() goroutine needed — doneJob.Loop() exits on its own;
+			// No Close() goroutine needed — doneJob.loop() exits on its own;
 			// loopWg.Wait() handles cleanup at shutdown.
 		}
 	}

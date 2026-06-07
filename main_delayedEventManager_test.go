@@ -44,11 +44,11 @@ func newTestJob(t *testing.T, timeout time.Duration) *DelayedEventJob {
 	return job
 }
 
-// driveJobEvents starts Loop() and sends events sequentially, pausing briefly
-// between each so Loop() has time to process them.
+// driveJobEvents starts loop() and sends events sequentially, pausing briefly
+// between each so loop() has time to process them.
 func driveJobEvents(t *testing.T, job *DelayedEventJob, events ...DelayedEventSignal) {
 	t.Helper()
-	go job.Loop()
+	go job.loop()
 	for _, ev := range events {
 		select {
 		case job.EventChannel <- ev:
@@ -155,7 +155,7 @@ func TestDelayedEventJob_ParticipantLookupSuccessful(t *testing.T) {
 // and that the done channel receives the job pointer.
 func TestDelayedEventJob_ConnectionAborted(t *testing.T) {
 	job, doneCh := newJobWithDoneCh(10 * time.Second)
-	go job.Loop()
+	go job.loop()
 
 	job.EventChannel <- ParticipantConnectionAborted
 
@@ -179,7 +179,7 @@ func TestDelayedEventJob_ConnectionAborted(t *testing.T) {
 func TestDelayedEventJob_WaitingStateTimedOut(t *testing.T) {
 	mockExecOK(t)
 	job, doneCh := newJobWithDoneCh(50 * time.Millisecond) // fires quickly
-	go job.Loop()
+	go job.loop()
 
 	select {
 	case doneJob := <-doneCh:
@@ -203,7 +203,7 @@ func TestDelayedEventJob_WaitingStateTimedOut(t *testing.T) {
 func TestDelayedEventJob_ParticipantDisconnected(t *testing.T) {
 	mockExecOK(t)
 	job, doneCh := newJobWithDoneCh(10 * time.Second)
-	go job.Loop()
+	go job.loop()
 
 	job.EventChannel <- ParticipantConnected
 	time.Sleep(20 * time.Millisecond)
@@ -228,7 +228,7 @@ func TestDelayedEventJob_ParticipantDisconnected(t *testing.T) {
 func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
 	mockExecOK(t)
 	job := newTestJob(t, 10*time.Millisecond)
-	go job.Loop()
+	go job.loop()
 
 	job.EventChannel <- ParticipantConnected
 	time.Sleep(20 * time.Millisecond)
@@ -248,7 +248,7 @@ func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
 func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 	mockExecOK(t)
 	job := newTestJob(t, 10*time.Second)
-	go job.Loop()
+	go job.loop()
 
 	job.EventChannel <- ParticipantConnected
 	time.Sleep(20 * time.Millisecond)
@@ -273,7 +273,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 
 	// Test WaitingForInitialConnect state
 	job := newTestJob(t, 10*time.Second)
-	go job.Loop()
+	go job.loop()
 
 	// SFUParticipantGone in WaitingForInitialConnect → no-op.
 	job.EventChannel <- SFUParticipantGone
@@ -293,7 +293,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 
 	// Test Connected state
 	job = newTestJob(t, 10*time.Second)
-	go job.Loop()
+	go job.loop()
 	job.EventChannel <- ParticipantConnected // Transitioning to Connected
 	time.Sleep(20 * time.Millisecond)
 
@@ -312,7 +312,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 
 	// Test Completed state
 	job = newTestJob(t, 10*time.Second)
-	go job.Loop()
+	go job.loop()
 	job.EventChannel <- ParticipantConnectionAborted // Transitioning to Completed
 	time.Sleep(20 * time.Millisecond)
 
@@ -363,7 +363,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 
 	// Test Replaced state
 	job = newTestJob(t, 10*time.Second)
-	go job.Loop()
+	go job.loop()
 	job.EventChannel <- JobReplaced // Transitioning to Replaced
 	time.Sleep(20 * time.Millisecond)
 
@@ -414,7 +414,7 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 
 	// Test Disconnected state
 	job = newTestJob(t, 10*time.Second)
-	go job.Loop()
+	go job.loop()
 	job.EventChannel <- ParticipantConnected // Transitioning to Connected
 	time.Sleep(20 * time.Millisecond)
 	job.EventChannel <- ParticipantConnectionAborted // Transitioning to Disconnected
@@ -482,7 +482,7 @@ func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	t.Cleanup(func() { ExecuteDelayedEventAction = original })
 
 	job, doneCh := newJobWithDoneCh(10 * time.Second)
-	go job.Loop()
+	go job.loop()
 
 	// Connected triggers an immediate DelayedEventReset.
 	// Reset goroutine gets 404 → DelayedEventNotFound → Disconnected.
@@ -517,7 +517,7 @@ func TestDelayedEventJob_ActionRestart_Error(t *testing.T) {
 
 	// Short timeout so backoff gives up quickly after the error.
 	job, doneCh := newJobWithDoneCh(200 * time.Millisecond)
-	go job.Loop()
+	go job.loop()
 
 	job.EventChannel <- ParticipantConnected
 
@@ -582,23 +582,23 @@ func TestDelayedEventSignal_String(t *testing.T) {
 // ── JobReplaced signal ────────────────────────────────────────────────────────
 
 // TestDelayedEventJob_JobReplaced_SignalReceived verifies the normal path:
-// when JobReplaced is sent on EventChannel while Loop() is running, the job
+// when JobReplaced is sent on EventChannel while loop() is running, the job
 // transitions to Replaced state and then exits cleanly via Cancel().
 func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
 	job := newTestJob(t, 10*time.Second)
-	go job.Loop()
+	go job.loop()
 
-	// Send JobReplaced — Loop() processes it and sets state = Replaced.
+	// Send JobReplaced — loop() processes it and sets state = Replaced.
 	select {
 	case job.EventChannel <- JobReplaced:
 	case <-time.After(time.Second):
 		t.Fatal("timed out sending JobReplaced")
 	}
 
-	// Small delay so Loop() can process the signal before we check the state.
+	// Small delay so loop() can process the signal before we check the state.
 	time.Sleep(20 * time.Millisecond)
 
-	// Now cancel and close — Loop() should exit promptly.
+	// Now cancel and close — loop() should exit promptly.
 	job.Stop()
 	done := make(chan struct{})
 	go func() {
@@ -629,7 +629,7 @@ func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
 // When EventChannel is full the signal is dropped, but the job must still be
 // cancelled and closed cleanly — no deadlock, no goroutine leak.
 func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
-	// Create a job but do NOT start Loop() yet, so the EventChannel fills up.
+	// Create a job but do NOT start loop() yet, so the EventChannel fills up.
 	job := newTestJob(t, 10*time.Second)
 
 	// Fill EventChannel to capacity (buffer = 10) with no-op signals.
@@ -650,7 +650,7 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 	}
 
 	// Even without the signal, Cancel() + Close() must complete cleanly.
-	go job.Loop() // start Loop() so it can drain and exit
+	go job.loop() // start loop() so it can drain and exit
 	job.Stop()
 	done := make(chan struct{})
 	go func() {
@@ -665,7 +665,7 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 		t.Fatal("job did not close cleanly after full-channel JobReplaced drop")
 	}
 	// We are still in state WaitingForInitialConnect because the JobReplaced signal was dropped,
-	// but that's fine — the key is that we didn't deadlock and Loop() exited cleanly.
+	// but that's fine — the key is that we didn't deadlock and loop() exited cleanly.
 	if job.state != DelayEventState(WaitingForInitialConnect) {
 		t.Errorf("expected state %v, got %v", DelayEventState(WaitingForInitialConnect), job.state)
 	}
@@ -678,7 +678,7 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 func TestDelayedEventJob_SFUParticipantGone_Connected(t *testing.T) {
 	mockExecOK(t)
 	job, doneCh := newJobWithDoneCh(10 * time.Second)
-	go job.Loop()
+	go job.loop()
 
 	job.EventChannel <- ParticipantConnected
 	time.Sleep(20 * time.Millisecond)
@@ -703,7 +703,7 @@ func TestDelayedEventJob_SFUParticipantGone_Connected(t *testing.T) {
 func TestDelayedEventJob_SFUParticipantGone_WrongState(t *testing.T) {
 	mockExecOK(t)
 	job := newTestJob(t, 10*time.Second)
-	go job.Loop()
+	go job.loop()
 
 	job.EventChannel <- SFUParticipantGone // should be ignored in WaitingForInitialConnect
 	time.Sleep(20 * time.Millisecond)
@@ -755,7 +755,7 @@ func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
-	go job.Loop()
+	go job.loop()
 	// sanityInterval == 0: one attempt only, no Phase 2.
 	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
 
@@ -808,7 +808,7 @@ func TestParticipantLookup_Phase2_DetectsGoneParticipant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
-	go job.Loop()
+	go job.loop()
 	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, sanityInterval)
 
 	select {
@@ -865,7 +865,7 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
-	go job.Loop()
+	go job.loop()
 	// sanityInterval == 0 disables Phase 2.
 	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
 

@@ -211,21 +211,21 @@ func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInte
 //
 // # Actor model
 //
-// A single goroutine — started via Loop() — is the sole owner of all mutable
+// A single goroutine — started via loop() — is the sole owner of all mutable
 // state (current FSM state, timers, …).  No mutex is needed for that state
 // because nothing outside that goroutine touches it.
 //
 // External callers communicate with the job exclusively through its
-// EventChannel (write-only from the outside).  Loop() reads from that channel
+// EventChannel (write-only from the outside).  loop() reads from that channel
 // and drives the FSM.
 //
 // # Lifecycle
 //
 //  1. Created by Handler.loop() when a new delayed-event request arrives.
-//  2. Caller starts Loop() — typically in a goroutine: go job.Loop().
+//  2. Caller starts loop() — typically in a goroutine: go job.loop().
 //  3. Events arrive via EventChannel (SFU webhooks, internal FSM timers).
-//  4. Loop() exits when ctx is cancelled (via Close() or parent cancellation).
-//  5. Close() cancels the context and blocks until Loop() has returned.
+//  4. loop() exits when ctx is cancelled (via Close() or parent cancellation).
+//  5. Close() cancels the context and blocks until loop() has returned.
 //
 // # Finite State Machine (FSM) — Main Job Lifecycle
 //
@@ -322,30 +322,32 @@ type DelayedEventJob struct {
 	// for this (room, identity) before cancelling and cleaning it up.
 	doneCh chan<- *DelayedEventJob
 
-	// done is closed by Loop() when it exits, allowing Close() to wait.
+	// done is closed by loop() when it exits, allowing Close() to wait.
 	done chan struct{}
 
 	// backgroundWg tracks all background goroutines started by or for this job:
 	// the participant-lookup goroutine, ActionRestart goroutines, and the
-	// ActionSend goroutine.  Loop() waits for them before returning so that
+	// ActionSend goroutine.  loop() waits for them before returning so that
 	// Close() guarantees no goroutine still holds a reference to the
 	// ExecuteDelayedEventAction or LiveKitGetParticipant function variables
 	// after it returns.
 	backgroundWg sync.WaitGroup
 
-	// restartResultCh receives the new deadline from a successful ActionRestart
-	// goroutine.  Loop() reads it and updates restartDeadline without a mutex —
-	// Loop() is the sole owner of both fields.
+	// restartResultCh carries the new deadline back to loop() (sized 1 so the
+	// producer never blocks).  The deadline is captured at the moment
+	// ActionRestart's HTTP success returns — not when loop() reads the signal —
+	// so scheduler latency in loop() cannot shrink the remaining ActionSend
+	// window.  Owner: loop().
 	restartResultCh chan time.Time
 
-	// ── FSM state — owned exclusively by Loop() ──────────────────────────
+	// ── FSM state — owned exclusively by loop() ──────────────────────────
 	state                DelayEventState
 	fsmTimerWaitingState *time.Timer
-	// fsmTimerRestart fires DelayedEventReset; re-armed by Loop() each time an
+	// fsmTimerRestart fires DelayedEventReset; re-armed by loop() each time an
 	// ActionRestart goroutine reports success via restartResultCh.
 	fsmTimerRestart *time.Timer
 	// restartDeadline is the absolute time by which ActionSend must complete.
-	// Updated by Loop() on each successful restart (via restartResultCh).
+	// Updated by loop() on each successful restart (via restartResultCh).
 	restartDeadline time.Time
 }
 
@@ -377,10 +379,14 @@ func NewDelayedEventJob(
 	return job, nil
 }
 
-// Loop is the single goroutine that owns all mutable job state.
-// Start it exactly once: go job.Loop()
+// loop is the single goroutine that owns all mutable job state.
+// Started exactly once by NewDelayedEventJob's caller: go job.loop().
 // It returns when the job's context is cancelled.
-func (job *DelayedEventJob) Loop() {
+//
+// Unexported: callers outside this package must never invoke loop directly;
+// it has strict preconditions (run exactly once, in a goroutine, on a
+// freshly constructed job).
+func (job *DelayedEventJob) loop() {
 	defer close(job.done)
 
 	// waitingDuration is bounded to at most one hour (sticky-event timeout).
@@ -428,21 +434,29 @@ func (job *DelayedEventJob) Loop() {
 	}
 }
 
-// Stop cancels the job context without waiting for Loop() to exit.
-// Use this to unblock any goroutines that are sending on channels
-// before calling Close() in a separate goroutine.
+// Stop cancels the job's context.  Non-blocking.
+//
+// Use Stop when signalling teardown to many jobs in parallel; afterwards wait
+// on the parent WaitGroup (e.g. loopWg in Handler.loop) for all loop()
+// goroutines to drain.  For a single-job synchronous teardown — typically
+// tests — use Close instead.  Safe to call concurrently and idempotent.
 func (job *DelayedEventJob) Stop() {
 	job.cancel()
 }
 
-// Close cancels the job context and waits until Loop() has exited.
-// It is safe to call from any goroutine.
+// Close cancels the job's context and waits for loop() to exit (bounded by a
+// 10-second safety timeout that logs a warning on overrun).  Idempotent and
+// safe to call from any goroutine.
+//
+// The error return exists for io.Closer compatibility; this implementation
+// always returns nil.  Prefer Stop + a shared WaitGroup when tearing down
+// many jobs — N concurrent Closes serialize on their own 10-second timeouts.
 func (job *DelayedEventJob) Close() error {
 	job.cancel()
 	select {
 	case <-job.done:
 	case <-time.After(10 * time.Second):
-		slog.Warn("Job: Close() timed out waiting for Loop() to exit",
+		slog.Warn("Job: Close() timed out waiting for loop() to exit",
 			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
 	}
 	slog.Debug("Job: closed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
@@ -458,13 +472,13 @@ func (job *DelayedEventJob) String() string {
 }
 
 // delayRestartDuration returns 80 % of the original timeout.
-// Called only from Loop().
+// Called only from loop().
 func (job *DelayedEventJob) delayRestartDuration() time.Duration {
 	return job.DelayTimeout * 8 / 10
 }
 
 // stopTimers stops both internal timers.
-// MUST only be called from Loop().
+// MUST only be called from loop().
 func (job *DelayedEventJob) stopTimers() {
 	if job.fsmTimerWaitingState != nil {
 		job.fsmTimerWaitingState.Stop()
@@ -475,7 +489,7 @@ func (job *DelayedEventJob) stopTimers() {
 }
 
 // ── FSM ──────────────────────────────────────────────────────────────────────
-// All methods below are called exclusively from Loop() and therefore need no
+// All methods below are called exclusively from loop() and therefore need no
 // additional synchronisation.
 
 func (job *DelayedEventJob) handleEvent(event DelayedEventSignal) (stateChanged bool) {
@@ -559,7 +573,7 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 		snapshotRemaining := remaining
 		snapshotEvent := event
 
-		// ActionSend runs in a background goroutine so Loop() stays responsive.
+		// ActionSend runs in a background goroutine so loop() stays responsive.
 		// It retries with exponential backoff until snapshotRemaining elapses —
 		// this is the core of the delegation: we keep trying to send the leave
 		// event until the original delayed-event timeout would have fired anyway.
@@ -571,7 +585,7 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 		//
 		// Teardown order:
 		//   ActionSend completes → doneCh notified → Handler calls job.Stop()
-		//   → job.Close() → backgroundWg.Wait() → Loop() exits cleanly.
+		//   → job.Close() → backgroundWg.Wait() → loop() exits cleanly.
 		job.backgroundWg.Add(1)
 		go func() {
 			defer job.backgroundWg.Done()
@@ -718,10 +732,10 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 		return true // new state: trigger state-entry action
 	}
 
-	// Issue the restart call in a background goroutine so Loop() stays
+	// Issue the restart call in a background goroutine so loop() stays
 	// responsive.  On success the goroutine sends the new deadline to
-	// restartResultCh; Loop() reads it and re-arms fsmTimerRestart without
-	// any mutex — Loop() is the sole owner of both fields.
+	// restartResultCh; loop() reads it and re-arms fsmTimerRestart without
+	// any mutex — loop() is the sole owner of both fields.
 	timeout := job.DelayTimeout
 	lkRm := job.LiveKitRoom
 	lkId := job.LiveKitIdentity
@@ -762,7 +776,7 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 				"room", lkRm, "lkId", lkId, "jobId", job.JobId, "status", status)
 			signal = DelayedEventTimedOut
 		default:
-			// Report success to Loop() via restartResultCh; Loop() will extend
+			// Report success to loop() via restartResultCh; loop() will extend
 			// the deadline and re-arm fsmTimerRestart.
 			newDeadline := time.Now().Add(timeout)
 			slog.Debug(fmt.Sprintf("Job: ActionRestart ok, next reset in %s", job.delayRestartDuration()),
