@@ -1117,8 +1117,6 @@ func main() {
 		"LIVEKIT_JWT_BIND", config.LkJwtBind,
 		"LIVEKIT_FULL_ACCESS_HOMESERVERS", config.FullAccessHomeservers,
 		"SkipVerifyTLS", config.SkipVerifyTLS,
-		"LiveKit key", config.Key,
-		"LiveKit secret", config.Secret,
 		"SanityCheckInterval", config.SanityCheckInterval,
 	)
 
