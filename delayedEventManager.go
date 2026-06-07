@@ -598,13 +598,11 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 			}
 		}
 		job.stopTimers()
-		snapshotRemaining := remaining
-		snapshotEvent := event
 
 		// ActionSend runs in a background goroutine so loop() stays responsive.
-		// It retries with exponential backoff until snapshotRemaining elapses —
-		// this is the core of the delegation: we keep trying to send the leave
-		// event until the original delayed-event timeout would have fired anyway.
+		// It retries with exponential backoff until remaining elapses — this is
+		// the core of the delegation: we keep trying to send the leave event
+		// until the original delayed-event timeout would have fired anyway.
 		//
 		// The handler is notified AFTER ActionSend completes (or times out) so
 		// that job.ctx is NOT cancelled prematurely by handler teardown.
@@ -630,21 +628,21 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 					return ExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionSend)
 				},
 				backoff.WithBackOff(expBackOff),
-				backoff.WithMaxElapsedTime(snapshotRemaining),
+				backoff.WithMaxElapsedTime(remaining),
 			)
 			if err != nil {
 				slog.Warn("Job: ActionSend failed",
-					"state", Disconnected, "event", snapshotEvent,
+					"state", Disconnected, "event", event,
 					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
 					"err", err)
 			} else if status < 200 || (status >= 300 && status != 404) {
 				slog.Warn("Job: ActionSend unexpected status",
-					"state", Disconnected, "event", snapshotEvent,
+					"state", Disconnected, "event", event,
 					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
 					"status", status)
 			} else if status == 404 {
 				slog.Info("Job: ActionSend — delayed event already sent or cancelled",
-					"state", Disconnected, "event", snapshotEvent,
+					"state", Disconnected, "event", event,
 					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
 			}
 
@@ -764,13 +762,6 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 	// responsive.  On success the goroutine sends the new deadline to
 	// restartResultCh; loop() reads it and re-arms fsmTimerRestart without
 	// any mutex — loop() is the sole owner of both fields.
-	timeout := job.DelayTimeout
-	lkRm := job.LiveKitRoom
-	lkId := job.LiveKitIdentity
-	ch := job.EventChannel
-	resCh := job.restartResultCh
-	ctx := job.ctx
-
 	job.backgroundWg.Add(1)
 	go func() {
 		defer job.backgroundWg.Done()
@@ -781,7 +772,7 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 		expBackOff.MaxInterval = 60 * time.Second
 
 		status, err := backoff.Retry(
-			ctx,
+			job.ctx,
 			func() (int, error) {
 				return ExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionRestart)
 			},
@@ -793,32 +784,32 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 		switch {
 		case err != nil:
 			slog.Warn("Job: ActionRestart failed — emitting DelayedEventTimedOut",
-				"room", lkRm, "lkId", lkId, "jobId", job.JobId, "err", err)
+				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId, "err", err)
 			signal = DelayedEventTimedOut
 		case status == 404:
 			slog.Warn("Job: ActionRestart not found — emitting DelayedEventNotFound",
-				"room", lkRm, "lkId", lkId, "jobId", job.JobId)
+				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
 			signal = DelayedEventNotFound
 		case status < 200 || status >= 300:
 			slog.Warn("Job: ActionRestart bad status — emitting DelayedEventTimedOut",
-				"room", lkRm, "lkId", lkId, "jobId", job.JobId, "status", status)
+				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId, "status", status)
 			signal = DelayedEventTimedOut
 		default:
 			// Report success to loop() via restartResultCh; loop() will extend
 			// the deadline and re-arm fsmTimerRestart.
-			newDeadline := time.Now().Add(timeout)
+			newDeadline := time.Now().Add(job.DelayTimeout)
 			slog.Debug(fmt.Sprintf("Job: ActionRestart ok, next reset in %s", job.delayRestartDuration()),
-				"room", lkRm, "lkId", lkId)
+				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
 			select {
-			case resCh <- newDeadline:
-			case <-ctx.Done():
+			case job.restartResultCh <- newDeadline:
+			case <-job.ctx.Done():
 			}
 			return
 		}
 
 		select {
-		case ch <- signal:
-		case <-ctx.Done():
+		case job.EventChannel <- signal:
+		case <-job.ctx.Done():
 		}
 	}()
 
