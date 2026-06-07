@@ -767,8 +767,8 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 
 	originalExec := ExecuteDelayedEventAction
 	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+		return http.StatusOK, nil
 	}
 
 	handler := NewHandler(
@@ -802,8 +802,8 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 
 	originalExec := ExecuteDelayedEventAction
 	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+		return http.StatusOK, nil
 	}
 
 	handler := NewHandler(
@@ -1063,8 +1063,8 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 
 	originalExec := ExecuteDelayedEventAction
 	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+		return http.StatusOK, nil
 	}
 
 	handler := NewHandler(
@@ -1124,8 +1124,8 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 
 	originalExec := ExecuteDelayedEventAction
 	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+		return http.StatusOK, nil
 	}
 
 	handler := NewHandler(

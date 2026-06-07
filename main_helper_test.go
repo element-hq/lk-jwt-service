@@ -206,8 +206,8 @@ func TestCreateLiveKitIdentity_Format(t *testing.T) {
 
 // ── ExecuteDelayedEventAction ─────────────────────────────────────────────────
 
-// TestExecuteDelayedEventAction_Success verifies that a 200 OK response is
-// returned as-is without error.
+// TestExecuteDelayedEventAction_Success verifies that a 200 OK response
+// returns the status code without error.
 func TestExecuteDelayedEventAction_Success(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -217,15 +217,12 @@ func TestExecuteDelayedEventAction_Success(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	resp, err := ExecuteDelayedEventAction(ts.URL, "delay-id-1", ActionRestart)
+	status, err := ExecuteDelayedEventAction(ts.URL, "delay-id-1", ActionRestart)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp == nil {
-		t.Fatal("expected non-nil response")
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if status != http.StatusOK {
+		t.Errorf("expected 200, got %d", status)
 	}
 }
 
@@ -273,19 +270,19 @@ func TestExecuteDelayedEventAction_PathEscaping(t *testing.T) {
 
 // TestExecuteDelayedEventAction_404OnSend verifies that a 404 for ActionSend
 // is treated as success (delayed event already sent/cancelled) and returns
-// the response without error.
+// the status code without error.
 func TestExecuteDelayedEventAction_404OnSend(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer ts.Close()
 
-	resp, err := ExecuteDelayedEventAction(ts.URL, "gone-id", ActionSend)
+	status, err := ExecuteDelayedEventAction(ts.URL, "gone-id", ActionSend)
 	if err != nil {
 		t.Fatalf("expected no error for ActionSend 404, got: %v", err)
 	}
-	if resp == nil || resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404 response, got %v", resp)
+	if status != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", status)
 	}
 }
 
@@ -297,12 +294,12 @@ func TestExecuteDelayedEventAction_404OnRestart(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	resp, err := ExecuteDelayedEventAction(ts.URL, "gone-id", ActionRestart)
+	status, err := ExecuteDelayedEventAction(ts.URL, "gone-id", ActionRestart)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp == nil || resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404 response, got %v", resp)
+	if status != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", status)
 	}
 }
 
@@ -335,12 +332,12 @@ func TestExecuteDelayedEventAction_RetryAfter_Formats(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			resp, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+			status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
 			if err == nil {
 				t.Fatal("expected error for 429, got nil")
 			}
-			if resp != nil {
-				t.Error("expected nil response for 429 with Retry-After")
+			if status != http.StatusTooManyRequests {
+				t.Errorf("expected status 429, got %d", status)
 			}
 			var retryAfterErr *backoff.RetryAfterError
 			if !errors.As(err, &retryAfterErr) {
@@ -357,35 +354,42 @@ func TestExecuteDelayedEventAction_RetryAfter_Formats(t *testing.T) {
 }
 
 // TestExecuteDelayedEventAction_429WithoutRetryAfter verifies that a 429
-// without a Retry-After header returns the response without a RetryAfterError.
+// without a usable Retry-After returns a plain transient error (so callers
+// wrapping in backoff.Retry will retry with the default interval) and that
+// the 429 status code is still surfaced to the caller for logging.
 func TestExecuteDelayedEventAction_429WithoutRetryAfter(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer ts.Close()
 
-	resp, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+	if err == nil {
+		t.Fatal("expected transient error for 429 without Retry-After, got nil")
 	}
-	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("expected 429 response, got %v", resp)
+	var retryAfterErr *backoff.RetryAfterError
+	if errors.As(err, &retryAfterErr) {
+		t.Errorf("did not expect *backoff.RetryAfterError, got %v", err)
+	}
+	if status != http.StatusTooManyRequests {
+		t.Errorf("expected status 429, got %d", status)
 	}
 }
 
-// TestExecuteDelayedEventAction_502BadGateway verifies that a 502 error is handled as error
+// TestExecuteDelayedEventAction_502BadGateway verifies that a 502 returns a
+// transient error and surfaces the status code for logging.
 func TestExecuteDelayedEventAction_502BadGateway(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer ts.Close()
 
-	resp, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+	status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
 	if err == nil {
-		t.Fatalf("Expected error: CS API temporarily unavailable (http status code 502)")
+		t.Fatal("expected error for 502, got nil")
 	}
-	if resp == nil || resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("expected 502 response, got %v", resp)
+	if status != http.StatusBadGateway {
+		t.Errorf("expected status 502, got %d", status)
 	}
 }
 

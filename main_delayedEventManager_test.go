@@ -82,8 +82,8 @@ func newJobWithDoneCh(timeout time.Duration) (*DelayedEventJob, chan *DelayedEve
 func mockExecOK(t *testing.T) {
 	t.Helper()
 	original := ExecuteDelayedEventAction
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+		return http.StatusOK, nil
 	}
 	t.Cleanup(func() { ExecuteDelayedEventAction = original })
 }
@@ -473,11 +473,11 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 // resulting in a Disconnected signal on doneCh.
 func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	original := ExecuteDelayedEventAction
-	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (*http.Response, error) {
+	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (int, error) {
 		if action == ActionRestart {
-			return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody}, nil
+			return http.StatusNotFound, nil
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		return http.StatusOK, nil
 	}
 	t.Cleanup(func() { ExecuteDelayedEventAction = original })
 
@@ -507,11 +507,11 @@ func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 // resulting in a Disconnected signal on doneCh.
 func TestDelayedEventJob_ActionRestart_Error(t *testing.T) {
 	original := ExecuteDelayedEventAction
-	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (*http.Response, error) {
+	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (int, error) {
 		if action == ActionRestart {
-			return nil, context.DeadlineExceeded
+			return 0, context.DeadlineExceeded
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		return http.StatusOK, nil
 	}
 	t.Cleanup(func() { ExecuteDelayedEventAction = original })
 

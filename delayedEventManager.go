@@ -10,7 +10,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 
@@ -577,9 +576,9 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 			expBackOff.RandomizationFactor = 0.5
 			expBackOff.MaxInterval = 60 * time.Second
 
-			resp, err := backoff.Retry(
+			status, err := backoff.Retry(
 				job.ctx,
-				func() (*http.Response, error) {
+				func() (int, error) {
 					return ExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionSend)
 				},
 				backoff.WithBackOff(expBackOff),
@@ -590,11 +589,12 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 					"state", Disconnected, "event", snapshotEvent,
 					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
 					"err", err)
-			} else if resp == nil || resp.StatusCode < 200 || (resp.StatusCode >= 300 && resp.StatusCode != 404) {
+			} else if status < 200 || (status >= 300 && status != 404) {
 				slog.Warn("Job: ActionSend unexpected status",
 					"state", Disconnected, "event", snapshotEvent,
-					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
-			} else if resp != nil && resp.StatusCode == 404 {
+					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
+					"status", status)
+			} else if status == 404 {
 				slog.Info("Job: ActionSend — delayed event already sent or cancelled",
 					"state", Disconnected, "event", snapshotEvent,
 					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
@@ -732,9 +732,9 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 		expBackOff.RandomizationFactor = 0.5
 		expBackOff.MaxInterval = 60 * time.Second
 
-		resp, err := backoff.Retry(
+		status, err := backoff.Retry(
 			ctx,
-			func() (*http.Response, error) {
+			func() (int, error) {
 				return ExecuteDelayedEventAction(job.CsApiUrl, job.DelayId, ActionRestart)
 			},
 			backoff.WithBackOff(expBackOff),
@@ -747,13 +747,13 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 			slog.Warn("Job: ActionRestart failed — emitting DelayedEventTimedOut",
 				"room", lkRm, "lkId", lkId, "jobId", job.JobId, "err", err)
 			signal = DelayedEventTimedOut
-		case resp == nil || resp.StatusCode == 404:
+		case status == 404:
 			slog.Warn("Job: ActionRestart not found — emitting DelayedEventNotFound",
 				"room", lkRm, "lkId", lkId, "jobId", job.JobId)
 			signal = DelayedEventNotFound
-		case resp.StatusCode < 200 || resp.StatusCode >= 300:
+		case status < 200 || status >= 300:
 			slog.Warn("Job: ActionRestart bad status — emitting DelayedEventTimedOut",
-				"room", lkRm, "lkId", lkId, "jobId", job.JobId)
+				"room", lkRm, "lkId", lkId, "jobId", job.JobId, "status", status)
 			signal = DelayedEventTimedOut
 		default:
 			// Report success to Loop() via restartResultCh; Loop() will extend

@@ -166,57 +166,70 @@ var LiveKitGetParticipant = func(
 	return err
 }
 
-var ExecuteDelayedEventAction = func(CsApiUrl string, delayID string, action DelayEventAction) (*http.Response, error) {
-	// Use url.JoinPath so delayID is path-escaped, preventing path traversal
-	// attacks (e.g. delayID = "../admin") since it is attacker-controlled.
-	// action is a typed constant (ActionRestart/ActionSend) and safe by construction.
-	endpoint, err := url.JoinPath(CsApiUrl, DelayedEventsEndpoint, delayID, string(action))
+// ExecuteDelayedEventAction POSTs the given action (restart/send) to the Matrix
+// CS-API for delayID and returns the HTTP status code.  The returned error
+// drives retries when callers wrap the call in backoff.Retry:
+//
+//   - 200/204 on either action, and 404 on ActionSend (per MSC4140: event
+//     already sent or cancelled) return a nil error.
+//   - 429 with a usable Retry-After returns a *backoff.RetryAfterError so
+//     backoff honours the server's hint.
+//   - 429 without a usable Retry-After, 502, and transport errors return a
+//     plain error so backoff retries with its default interval.
+//
+// The status code is returned even on error so callers can log it; 0 means no
+// response was received (URL build failure or transport error).
+var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action DelayEventAction) (int, error) {
+	// url.JoinPath path-escapes delayID, preventing path-traversal attacks since
+	// delayID is attacker-controlled.  action is a typed constant and safe.
+	endpoint, err := url.JoinPath(csAPIURL, DelayedEventsEndpoint, delayID, string(action))
 	if err != nil {
-		return nil, fmt.Errorf("ExecuteDelayedEventAction: invalid URL: %w", err)
+		return 0, fmt.Errorf("ExecuteDelayedEventAction: invalid URL: %w", err)
 	}
-	var jsonStr = []byte(`{}`)
 
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Post(endpoint, "application/json", bytes.NewBuffer(jsonStr))
-
+	resp, err := client.Post(endpoint, "application/json", bytes.NewBufferString("{}"))
 	if err != nil {
-		slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", endpoint, "err", err)
-		return resp, err
+		slog.Debug("ExecuteDelayedEventAction", "url", endpoint, "err", err)
+		return 0, err
 	}
 	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.Error("failed to close response body", "err", err)
+		if cerr := resp.Body.Close(); cerr != nil {
+			slog.Error("failed to close response body", "err", cerr)
 		}
 	}()
 
-	slog.Debug("ExecuteDelayedEventAction", "time", time.Now(), "url", endpoint, "StatusCode", resp.StatusCode, "err", err)
+	slog.Debug("ExecuteDelayedEventAction", "url", endpoint, "StatusCode", resp.StatusCode)
 
-	// https://github.com/matrix-org/matrix-spec-proposals/blob/toger5/expiring-events-keep-alive/proposals/4140-delayed-events-futures.md#managing-delayed-events
-	// 404 means the delayed event is already sent or does not exist.
-	if action == ActionSend && resp.StatusCode == http.StatusNotFound {
-		return resp, nil
-	}
+	switch {
+	case action == ActionSend && resp.StatusCode == http.StatusNotFound:
+		// MSC-4140: 404 on send means the event was already sent or cancelled.
+		return resp.StatusCode, nil
 
-	// Retry 502s (bad gateway) to handle transient API outages (restarts/network).
-	if resp.StatusCode == http.StatusBadGateway {
-		return resp, fmt.Errorf("CS API temporarily unavailable (http status code 502)")
-	}
+	case resp.StatusCode == http.StatusBadGateway:
+		// Transient: CS API restart / load-balancer hiccup.  Let backoff retry.
+		return resp.StatusCode, fmt.Errorf("CS API temporarily unavailable (http status code 502)")
 
-	if resp.StatusCode == http.StatusTooManyRequests {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// Honour Retry-After if it parses as delta-seconds or HTTP-date
+		// (RFC 7231 §7.1.3); otherwise return a plain transient error so
+		// backoff.Retry retries on its default schedule.
 		retryAfter := resp.Header.Get("Retry-After")
-
 		if seconds, err := strconv.Atoi(retryAfter); err == nil {
-			return nil, backoff.RetryAfter(seconds)
-		}
-
-		if date, err := http.ParseTime(retryAfter); err == nil {
-			duration := time.Until(date)
-			if duration > 0 {
-				return nil, backoff.RetryAfter(int(duration.Seconds()))
+			if seconds < 0 {
+				seconds = 0
 			}
-			return nil, backoff.RetryAfter(0)
+			return resp.StatusCode, backoff.RetryAfter(seconds)
 		}
+		if t, err := http.ParseTime(retryAfter); err == nil {
+			d := time.Until(t)
+			if d < 0 {
+				d = 0
+			}
+			return resp.StatusCode, backoff.RetryAfter(int(d.Seconds()))
+		}
+		return resp.StatusCode, fmt.Errorf("CS API temporarily unavailable (http status code 429)")
 	}
 
-	return resp, err
+	return resp.StatusCode, nil
 }
