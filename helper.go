@@ -149,9 +149,10 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 	return nil
 }
 
-// LiveKitListParticipants returns all participants currently present in a
-// LiveKit room. LiveKitRoomWorker uses this for both Phase-1 (initial lookup)
-// and Phase-2 (periodic sanity check), batching all identities in one call.
+// LiveKitGetParticipant checks whether the given identity is currently present
+// in the given LiveKit room.  Returns nil if the participant is present, an
+// error otherwise (including "not found").  Used by startParticipantLookup
+// for both Phase-1 (initial lookup) and Phase-2 (periodic sanity check).
 var LiveKitGetParticipant = func(
 	ctx context.Context,
 	lkAuth LiveKitAuth,

@@ -16,9 +16,15 @@ import (
 	"github.com/cenkalti/backoff/v5"
 )
 
+// DelayedEventsEndpoint is the Matrix CS-API path for delayed events.
+//
+// TODO(msc4140): switch to the stable path once MSC-4140 is merged into
+// the Matrix spec:
+//
+//	/_matrix/client/v1/delayed_events
+//
+// See https://github.com/matrix-org/matrix-spec-proposals/pull/4140
 var DelayedEventsEndpoint = "/_matrix/client/unstable/org.matrix.msc4140/delayed_events"
-
-//var DelayedEventsEndpoint =  "/_matrix/client/v1/delayed_events"
 
 type DelayEventAction string
 

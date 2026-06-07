@@ -66,6 +66,9 @@ type OpenIDTokenType struct {
 	ExpiresIn        int    `json:"expires_in"`
 }
 
+// Deprecated: LegacySFURequest is the request body for /sfu/get, the
+// pre-Matrix-2.0 endpoint.  Remove once all in-the-wild clients have
+// migrated to /get_token (SFURequest).
 type LegacySFURequest struct {
 	Room          string          `json:"room"`
 	OpenIDToken   OpenIDTokenType `json:"openid_token"`
@@ -511,6 +514,8 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
 }
 
+// Deprecated: processLegacySFURequest serves the pre-Matrix-2.0 /sfu/get
+// endpoint.  Remove once all in-the-wild clients have migrated to /get_token.
 func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
 	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
 	if err != nil {
@@ -775,7 +780,7 @@ func (h *Handler) handleMembershipLeaveDelegation(w http.ResponseWriter, r *http
 
 func (h *Handler) prepareMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sfu/get", h.handle_legacy) // TODO: deprecated
+	mux.HandleFunc("/sfu/get", h.handle_legacy) // Deprecated: pre-Matrix-2.0; remove once clients migrate to /get_token.
 	mux.HandleFunc("/get_token", h.handle)
 	mux.HandleFunc("/membership_leave_delegation", h.handleMembershipLeaveDelegation)
 	mux.HandleFunc("/sfu_webhook", h.handleSfuWebhook)
