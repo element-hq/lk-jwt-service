@@ -74,6 +74,14 @@ var exchangeOpenIdUserInfo = func(
 
 var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 
+// marshalStrings marshals a slice of strings to JSON.  json.Marshal of
+// []string is total — string has no MarshalJSON hook, no cycles are possible,
+// no unsupported types can appear — so the error return is discarded.
+func marshalStrings(ss []string) []byte {
+	b, _ := json.Marshal(ss)
+	return b
+}
+
 // RoomClient defines the interface for room operations
 type RoomClient interface {
 	CreateRoom(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error)
@@ -88,25 +96,15 @@ var newRoomServiceClient = func(url, key, secret string) RoomClient {
 func CreateLiveKitRoomAlias(matrixRoom string, matrixRtcSlot string) LiveKitRoomAlias {
 	// Create a deterministic LiveKit room alias based on Matrix room ID and slot ID
 	// to ensure uniqueness and avoid collisions.
-	lkRoomAliasRawBytes, err := json.Marshal([]string{matrixRoom, matrixRtcSlot})
-	if err != nil {
-		panic("unreachable, probably")
-	}
-	lkRoomAliasRaw := string(lkRoomAliasRawBytes)
-	lkRoomAliasHash := sha256.Sum256([]byte(lkRoomAliasRaw))
-	return LiveKitRoomAlias(unpaddedBase64.EncodeToString(lkRoomAliasHash[:]))
+	hash := sha256.Sum256(marshalStrings([]string{matrixRoom, matrixRtcSlot}))
+	return LiveKitRoomAlias(unpaddedBase64.EncodeToString(hash[:]))
 }
 
 func CreateLiveKitIdentity(matrixID string, deviceId string, memberID string) LiveKitIdentity {
 	// Create a deterministic LiveKit identity based on user ID and device ID
 	// to ensure uniqueness and avoid collisions.
-	lkIdentityRawBytes, err := json.Marshal([]string{matrixID, deviceId, memberID})
-	if err != nil {
-		panic("unreachable, probably")
-	}
-	lkIdentityRaw := string(lkIdentityRawBytes)
-	lkIdentityHash := sha256.Sum256([]byte(lkIdentityRaw))
-	return LiveKitIdentity(unpaddedBase64.EncodeToString(lkIdentityHash[:]))
+	hash := sha256.Sum256(marshalStrings([]string{matrixID, deviceId, memberID}))
+	return LiveKitIdentity(unpaddedBase64.EncodeToString(hash[:]))
 }
 
 var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room LiveKitRoomAlias, matrixUser string, lkIdentity LiveKitIdentity) error {
