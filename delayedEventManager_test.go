@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cenkalti/backoff/v5"
 )
 
 // ── test helpers ──────────────────────────────────────────────────────────────
@@ -468,14 +470,16 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 
 // ── FSM: ActionRestart outcomes ───────────────────────────────────────────────
 
-// TestDelayedEventJob_ActionRestart_404 verifies that a 404 response from
-// ActionRestart causes DelayedEventNotFound to be fed back into the FSM,
-// resulting in a Disconnected signal on doneCh.
+// TestDelayedEventJob_ActionRestart_404 verifies that the
+// errDelayedEventNotFound sentinel (returned by the helper for a 404 on
+// ActionRestart, wrapped in backoff.Permanent so backoff.Retry stops immediately)
+// causes DelayedEventNotFound to be fed back into the FSM, resulting in a
+// Disconnected signal on doneCh.
 func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	original := ExecuteDelayedEventAction
 	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (int, error) {
 		if action == ActionRestart {
-			return http.StatusNotFound, nil
+			return http.StatusNotFound, backoff.Permanent(errDelayedEventNotFound)
 		}
 		return http.StatusOK, nil
 	}

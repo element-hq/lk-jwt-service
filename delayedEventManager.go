@@ -8,8 +8,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -630,17 +632,17 @@ func (job *DelayedEventJob) handleStateEntryAction(event DelayedEventSignal) {
 				backoff.WithBackOff(expBackOff),
 				backoff.WithMaxElapsedTime(remaining),
 			)
-			if err != nil {
+			// Per ExecuteDelayedEventAction's explicit-success contract:
+			// err != nil covers transient (5xx, 429, transport) and permanent
+			// (4xx other than 404) failures.  err == nil + status == 404 means
+			// MSC-4140 already-sent.  err == nil + 200/204 is silent success.
+			switch {
+			case err != nil:
 				slog.Warn("Job: ActionSend failed",
 					"state", Disconnected, "event", event,
 					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
-					"err", err)
-			} else if status < 200 || (status >= 300 && status != 404) {
-				slog.Warn("Job: ActionSend unexpected status",
-					"state", Disconnected, "event", event,
-					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
-					"status", status)
-			} else if status == 404 {
+					"status", status, "err", err)
+			case status == http.StatusNotFound:
 				slog.Info("Job: ActionSend — delayed event already sent or cancelled",
 					"state", Disconnected, "event", event,
 					"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
@@ -780,19 +782,20 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 			backoff.WithMaxElapsedTime(remaining),
 		)
 
+		// Per ExecuteDelayedEventAction's explicit-success contract:
+		// errDelayedEventNotFound is the only "soft" failure we treat specially
+		// (the event is gone, not a transient blip).  Any other err falls into
+		// the generic timed-out bucket.  err == nil is the success path.
 		var signal DelayedEventSignal
 		switch {
-		case err != nil:
-			slog.Warn("Job: ActionRestart failed — emitting DelayedEventTimedOut",
-				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId, "err", err)
-			signal = DelayedEventTimedOut
-		case status == 404:
+		case errors.Is(err, errDelayedEventNotFound):
 			slog.Warn("Job: ActionRestart not found — emitting DelayedEventNotFound",
 				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
 			signal = DelayedEventNotFound
-		case status < 200 || status >= 300:
-			slog.Warn("Job: ActionRestart bad status — emitting DelayedEventTimedOut",
-				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId, "status", status)
+		case err != nil:
+			slog.Warn("Job: ActionRestart failed — emitting DelayedEventTimedOut",
+				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId,
+				"status", status, "err", err)
 			signal = DelayedEventTimedOut
 		default:
 			// Report success to loop() via restartResultCh; loop() will extend

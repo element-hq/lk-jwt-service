@@ -290,7 +290,10 @@ func TestExecuteDelayedEventAction_404OnSend(t *testing.T) {
 }
 
 // TestExecuteDelayedEventAction_404OnRestart verifies that a 404 for
-// ActionRestart is passed through normally (not special-cased).
+// ActionRestart returns the errDelayedEventNotFound sentinel so callers
+// can map it to DelayedEventNotFound (vs. the generic transient/permanent
+// failure path).  This is the contract differentiator from 404-on-Send,
+// which is treated as success per MSC-4140.
 func TestExecuteDelayedEventAction_404OnRestart(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -298,11 +301,14 @@ func TestExecuteDelayedEventAction_404OnRestart(t *testing.T) {
 	defer ts.Close()
 
 	status, err := ExecuteDelayedEventAction(ts.URL, "gone-id", ActionRestart)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected errDelayedEventNotFound for 404 on ActionRestart, got nil")
+	}
+	if !errors.Is(err, errDelayedEventNotFound) {
+		t.Errorf("expected errDelayedEventNotFound, got %v", err)
 	}
 	if status != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", status)
+		t.Errorf("expected status 404, got %d", status)
 	}
 }
 
@@ -393,6 +399,106 @@ func TestExecuteDelayedEventAction_502BadGateway(t *testing.T) {
 	}
 	if status != http.StatusBadGateway {
 		t.Errorf("expected status 502, got %d", status)
+	}
+}
+
+// TestExecuteDelayedEventAction_500InternalServerError verifies that a 500
+// returns a transient error and surfaces the status code for logging.
+func TestExecuteDelayedEventAction_500InternalServerError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
+	}
+	if status != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %d", status)
+	}
+}
+
+// TestExecuteDelayedEventAction_5xxAreAllTransient verifies that the
+// generalized "any 5xx" branch returns a transient error for the common
+// retryable codes — 500, 502, 503, 504 — plus a less common one (507)
+// to lock the contract in place.  None of these is a *backoff.RetryAfterError;
+// they all let backoff.Retry use its default schedule.
+func TestExecuteDelayedEventAction_5xxAreAllTransient(t *testing.T) {
+	for _, code := range []int{
+		http.StatusInternalServerError, // 500
+		http.StatusBadGateway,          // 502
+		http.StatusServiceUnavailable,  // 503
+		http.StatusGatewayTimeout,      // 504
+		http.StatusInsufficientStorage, // 507
+	} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer ts.Close()
+
+			status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+			if err == nil {
+				t.Fatalf("expected transient error for %d, got nil", code)
+			}
+			var retryAfterErr *backoff.RetryAfterError
+			if errors.As(err, &retryAfterErr) {
+				t.Errorf("did not expect *backoff.RetryAfterError for %d, got %v", code, err)
+			}
+			if status != code {
+				t.Errorf("expected status %d, got %d", code, status)
+			}
+		})
+	}
+}
+
+// TestExecuteDelayedEventAction_UnknownStatusAreTransient verifies the
+// catch-all branch: any status code the switch doesn't classify (genuine
+// transients like 408 / 421 / 423 / 425, oddball 4xx like 400 / 418, …)
+// returns a non-Permanent error so backoff.Retry keeps trying until
+// WithMaxElapsedTime expires.  Locks in two things at once:
+//
+//   - the explicit-success contract (nil err means success — these don't
+//     silently slip through);
+//   - the "transient by default" policy (only errDelayedEventNotFound is
+//     wrapped in backoff.Permanent; everything else gets the benefit of
+//     retry budget).
+func TestExecuteDelayedEventAction_UnknownStatusAreTransient(t *testing.T) {
+	for _, code := range []int{
+		http.StatusBadRequest,           // 400 — permanent in spirit, but retry budget is cheap
+		http.StatusUnauthorized,         // 401
+		http.StatusForbidden,            // 403
+		http.StatusRequestTimeout,       // 408 — actually transient
+		http.StatusMisdirectedRequest,   // 421 — actually transient
+		http.StatusLocked,               // 423 — actually transient
+		http.StatusTooEarly,             // 425 — actually transient
+		http.StatusTeapot,               // 418
+	} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer ts.Close()
+
+			status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+			if err == nil {
+				t.Fatalf("expected unexpected-status error for %d, got nil", code)
+			}
+			if status != code {
+				t.Errorf("expected status %d, got %d", code, status)
+			}
+			// Not a RetryAfter (only 429 with parseable Retry-After is).
+			var retryAfterErr *backoff.RetryAfterError
+			if errors.As(err, &retryAfterErr) {
+				t.Errorf("did not expect *backoff.RetryAfterError for %d, got %v", code, err)
+			}
+			// Not Permanent — backoff should keep trying until the deadline.
+			var permErr *backoff.PermanentError
+			if errors.As(err, &permErr) {
+				t.Errorf("did not expect *backoff.PermanentError for %d (let backoff retry), got %v", code, err)
+			}
+		})
 	}
 }
 

@@ -39,8 +39,12 @@ import (
 
 // errParticipantAbsent is returned to backoff.Retry from
 // startParticipantLookup's Phase-1 loop so it keeps polling while the SFU
-// confirms the participant is not present yet.  Not a transport failure.
+// confirms the participant is not present yet. (Not a transport failure)
 var errParticipantAbsent = errors.New("livekit: participant not currently present")
+
+// errDelayedEventNotFound is returned by ExecuteDelayedEventAction when a
+// 404 comes back on ActionRestart.
+var errDelayedEventNotFound = errors.New("CS API: delayed event not found")
 
 type UniqueID string
 
@@ -191,19 +195,23 @@ var LiveKitParticipantExists = func(
 	return false, err
 }
 
-// ExecuteDelayedEventAction POSTs the given action (restart/send) to the Matrix
-// CS-API for delayID and returns the HTTP status code.  The returned error
-// drives retries when callers wrap the call in backoff.Retry:
+// ExecuteDelayedEventAction POSTs the given action (restart/send) to the
+// Matrix CS-API for delayID.  Explicit-success contract:
 //
-//   - 200/204 on either action, and 404 on ActionSend (per MSC4140: event
-//     already sent or cancelled) return a nil error.
-//   - 429 with a usable Retry-After returns a *backoff.RetryAfterError so
-//     backoff honours the server's hint.
-//   - 429 without a usable Retry-After, 502, and transport errors return a
-//     plain error so backoff retries with its default interval.
+//   - (200/204, nil)                       success — action took effect
+//   - (404, nil)          ActionSend       MSC-4140: already sent / cancelled
+//   - (404, errDelayedEventNotFound)
+//     ActionRestart                        delayed event no longer present
+//   - (5xx, transient err)                 CS API hiccup, let backoff retry
+//   - (429, *backoff.RetryAfterError)      honour server's Retry-After
+//   - (429, transient err)                 no usable Retry-After, default backoff
+//   - (status, "unexpected status" err)    any other code — treated as
+//     transient (backoff retries
+//     until WithMaxElapsedTime)
+//   - (0, transport err)                   URL build or network error
 //
-// The status code is returned even on error so callers can log it; 0 means no
-// response was received (URL build failure or transport error).
+// The status code is returned even on error so callers can log it; 0 means
+// no response was received.
 var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action DelayEventAction) (int, error) {
 	// url.JoinPath path-escapes delayID, preventing path-traversal attacks since
 	// delayID is attacker-controlled.  action is a typed constant and safe.
@@ -212,7 +220,7 @@ var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action Del
 		return 0, fmt.Errorf("ExecuteDelayedEventAction: invalid URL: %w", err)
 	}
 
-	client := &http.Client{Timeout: 1 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(endpoint, "application/json", bytes.NewBufferString("{}"))
 	if err != nil {
 		slog.Debug("ExecuteDelayedEventAction", "url", endpoint, "err", err)
@@ -227,13 +235,27 @@ var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action Del
 	slog.Debug("ExecuteDelayedEventAction", "url", endpoint, "StatusCode", resp.StatusCode)
 
 	switch {
-	case action == ActionSend && resp.StatusCode == http.StatusNotFound:
-		// MSC-4140: 404 on send means the event was already sent or cancelled.
+	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent:
+		// Happy path: server accepted the action.
 		return resp.StatusCode, nil
 
-	case resp.StatusCode == http.StatusBadGateway:
-		// Transient: CS API restart / load-balancer hiccup.  Let backoff retry.
-		return resp.StatusCode, fmt.Errorf("CS API temporarily unavailable (http status code 502)")
+	case action == ActionSend && resp.StatusCode == http.StatusNotFound:
+		// MSC-4140: 404 on send means the event was already sent or cancelled —
+		// treat as success.
+		return resp.StatusCode, nil
+
+	case resp.StatusCode == http.StatusNotFound:
+		// 404 on restart: delayed event no longer present on the homeserver.
+		// Wrapped in backoff.Permanent so backoff.Retry stops immediately;
+		// errors.Is unwraps through PermanentError so callers can still match
+		// the sentinel.
+		return resp.StatusCode, backoff.Permanent(errDelayedEventNotFound)
+
+	case resp.StatusCode >= 500 && resp.StatusCode < 600:
+		// Any 5xx is transient (CS API restart, DB lock, load-balancer hiccup,
+		// upstream timeout).  Let backoff.Retry retry on its default schedule.
+		return resp.StatusCode, fmt.Errorf(
+			"CS API temporarily unavailable (http status code %d)", resp.StatusCode)
 
 	case resp.StatusCode == http.StatusTooManyRequests:
 		// Honour Retry-After if it parses as delta-seconds or HTTP-date
@@ -256,5 +278,9 @@ var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action Del
 		return resp.StatusCode, fmt.Errorf("CS API temporarily unavailable (http status code 429)")
 	}
 
-	return resp.StatusCode, nil
+	// Anything not classified above is treated as transient — many 4xx codes
+	// are genuinely retriable (408 Request Timeout, 421 Misdirected,
+	// 423 Locked, 425 Too Early, …)
+	return resp.StatusCode, fmt.Errorf(
+		"CS API returned unexpected status: %d", resp.StatusCode)
 }
