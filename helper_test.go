@@ -385,6 +385,94 @@ func TestExecuteDelayedEventAction_429WithoutRetryAfter(t *testing.T) {
 	}
 }
 
+// TestExecuteDelayedEventAction_429MatrixRetryAfterMs verifies the Matrix-
+// specific body fallback: when a 429 omits the Retry-After header (or its
+// value is unparseable) but the response body carries the M_LIMIT_EXCEEDED
+// `retry_after_ms` field, the helper honours it.
+// Matrix spec v1.10 spec deprecated this in favour of the standard
+// Retry-After header but Synapse/Dendrite/Conduit still emit it for backwards
+// compatibility.
+func TestExecuteDelayedEventAction_429MatrixRetryAfterMs(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		header         string // value of Retry-After (empty = unset)
+		body           string // raw response body
+		wantRetryAfter bool   // expect *backoff.RetryAfterError
+		wantMinSeconds int    // lower bound on the retry duration in seconds
+	}{
+		{
+			name:           "body retry_after_ms — 2000 ms → 2 s",
+			body:           `{"errcode":"M_LIMIT_EXCEEDED","retry_after_ms":2000}`,
+			wantRetryAfter: true,
+			wantMinSeconds: 2,
+		},
+		{
+			name:           "body retry_after_ms — sub-second 500 ms ceils to 1 s",
+			body:           `{"errcode":"M_LIMIT_EXCEEDED","retry_after_ms":500}`,
+			wantRetryAfter: true,
+			wantMinSeconds: 1,
+		},
+		{
+			name:           "header wins when both present",
+			header:         "10",
+			body:           `{"errcode":"M_LIMIT_EXCEEDED","retry_after_ms":30000}`,
+			wantRetryAfter: true,
+			wantMinSeconds: 10, // header value, not the body's 30
+		},
+		{
+			name:           "retry_after_ms = 0 → fall through to transient err",
+			body:           `{"errcode":"M_LIMIT_EXCEEDED","retry_after_ms":0}`,
+			wantRetryAfter: false,
+		},
+		{
+			name:           "negative retry_after_ms → fall through to transient err",
+			body:           `{"errcode":"M_LIMIT_EXCEEDED","retry_after_ms":-100}`,
+			wantRetryAfter: false,
+		},
+		{
+			name:           "invalid JSON body → fall through to transient err",
+			body:           `not json {`,
+			wantRetryAfter: false,
+		},
+		{
+			name:           "body without retry_after_ms field → fall through",
+			body:           `{"errcode":"M_LIMIT_EXCEEDED","error":"slow down"}`,
+			wantRetryAfter: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.header != "" {
+					w.Header().Set("Retry-After", tc.header)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+			if err == nil {
+				t.Fatal("expected error for 429, got nil")
+			}
+			if status != http.StatusTooManyRequests {
+				t.Errorf("expected status 429, got %d", status)
+			}
+			var retryAfterErr *backoff.RetryAfterError
+			gotRetryAfter := errors.As(err, &retryAfterErr)
+			if gotRetryAfter != tc.wantRetryAfter {
+				t.Fatalf("RetryAfterError = %v, want %v (err: %v)",
+					gotRetryAfter, tc.wantRetryAfter, err)
+			}
+			if tc.wantRetryAfter {
+				if got := int(retryAfterErr.Duration.Seconds()); got < tc.wantMinSeconds {
+					t.Errorf("retry duration too short: got %ds, want at least %ds",
+						got, tc.wantMinSeconds)
+				}
+			}
+		})
+	}
+}
+
 // TestExecuteDelayedEventAction_502BadGateway verifies that a 502 returns a
 // transient error and surfaces the status code for logging.
 func TestExecuteDelayedEventAction_502BadGateway(t *testing.T) {
@@ -466,14 +554,14 @@ func TestExecuteDelayedEventAction_5xxAreAllTransient(t *testing.T) {
 //     retry budget).
 func TestExecuteDelayedEventAction_UnknownStatusAreTransient(t *testing.T) {
 	for _, code := range []int{
-		http.StatusBadRequest,           // 400 — permanent in spirit, but retry budget is cheap
-		http.StatusUnauthorized,         // 401
-		http.StatusForbidden,            // 403
-		http.StatusRequestTimeout,       // 408 — actually transient
-		http.StatusMisdirectedRequest,   // 421 — actually transient
-		http.StatusLocked,               // 423 — actually transient
-		http.StatusTooEarly,             // 425 — actually transient
-		http.StatusTeapot,               // 418
+		http.StatusBadRequest,         // 400 — permanent in spirit, but retry budget is cheap
+		http.StatusUnauthorized,       // 401
+		http.StatusForbidden,          // 403
+		http.StatusRequestTimeout,     // 408 — actually transient
+		http.StatusMisdirectedRequest, // 421 — actually transient
+		http.StatusLocked,             // 423 — actually transient
+		http.StatusTooEarly,           // 425 — actually transient
+		http.StatusTeapot,             // 418
 	} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

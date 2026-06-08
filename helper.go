@@ -203,8 +203,9 @@ var LiveKitParticipantExists = func(
 //   - (404, errDelayedEventNotFound)
 //     ActionRestart                        delayed event no longer present
 //   - (5xx, transient err)                 CS API hiccup, let backoff retry
-//   - (429, *backoff.RetryAfterError)      honour server's Retry-After
-//   - (429, transient err)                 no usable Retry-After, default backoff
+//   - (429, *backoff.RetryAfterError)      Retry-After header OR Matrix
+//     retry_after_ms body field
+//   - (429, transient err)                 no usable retry hint, default backoff
 //   - (status, "unexpected status" err)    any other code — treated as
 //     transient (backoff retries
 //     until WithMaxElapsedTime)
@@ -258,9 +259,9 @@ var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action Del
 			"CS API temporarily unavailable (http status code %d)", resp.StatusCode)
 
 	case resp.StatusCode == http.StatusTooManyRequests:
-		// Honour Retry-After if it parses as delta-seconds or HTTP-date
-		// (RFC 7231 §7.1.3); otherwise return a plain transient error so
-		// backoff.Retry retries on its default schedule.
+		// Prefer the standard HTTP Retry-After header (RFC 7231 §7.1.3) —
+		// works for all Matrix homeservers and for any non-Matrix middlebox
+		// (CDN, proxy, gateway) sitting in front.
 		retryAfter := resp.Header.Get("Retry-After")
 		if seconds, err := strconv.Atoi(retryAfter); err == nil {
 			if seconds < 0 {
@@ -275,6 +276,21 @@ var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action Del
 			}
 			return resp.StatusCode, backoff.RetryAfter(int(d.Seconds()))
 		}
+		// Matrix-spec fallback: M_LIMIT_EXCEEDED carries retry_after_ms in
+		// the response body.  Deprecated in spec v1.10 in favour of
+		// Retry-After, but still emitted by Synapse / Dendrite / Conduit for
+		// backwards compatibility — and the only signal from older
+		// homeservers.  Best-effort: decode once; ignore failures.
+		var mErr struct {
+			ErrCode      string `json:"errcode"`
+			RetryAfterMs int    `json:"retry_after_ms"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&mErr) == nil && mErr.RetryAfterMs > 0 {
+			// Ceil ms → s (e.g. 500 ms → 1 s, 1500 ms → 2 s).
+			return resp.StatusCode, backoff.RetryAfter((mErr.RetryAfterMs + 999) / 1000)
+		}
+		// Neither header nor body had a usable hint — let backoff.Retry
+		// decide.
 		return resp.StatusCode, fmt.Errorf("CS API temporarily unavailable (http status code 429)")
 	}
 
