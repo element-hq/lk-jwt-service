@@ -153,8 +153,8 @@ var CreateLiveKitRoom = func(ctx context.Context, liveKitAuth *LiveKitAuth, room
 	}
 
 	isNewRoom := lkRoom.GetCreationTime() >= creationStart && lkRoom.GetCreationTime() <= time.Now().Unix()
-	slog.Info(
-		fmt.Sprintf("CreateLiveKitRoom: %s Room", map[bool]string{true: "Created", false: "Using"}[isNewRoom]),
+	slog.Info("CreateLiveKitRoom",
+		"room_status", map[bool]string{true: "created", false: "reused"}[isNewRoom],
 		"room", room,
 		"roomSid", lkRoom.Sid,
 		"lkId", lkIdentity,
