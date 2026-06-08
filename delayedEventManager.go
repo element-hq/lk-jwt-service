@@ -264,45 +264,45 @@ type DelayedEventJobParams struct {
 //
 // # Finite State Machine (FSM) — Main Job Lifecycle
 //
-//	                        ParticipantConnected,            DelayedEventReset /
-//	   (Start)              ParticipantLookupSuccessful    (Execute ActionRestart)
-//	      |                ┌───────────────────────────┐          ┌──────┐
-//	      ▼                |                           ▼          |      |
-//	 ┌──────────────────────────┐        ┌───────────────────────────┐   |
-//	 │ WaitingForInitialConnect │        │ Connected                 │◄──┘
-//	 │                          │        │                           │
-//	 │ On Entry: (none)         │        │ On Entry:                 │
-//	 └──────────────────────────┘        │ • Stop waiting timer      │
-//	     |                 |             │ • Setup delayed timer     │
-//	     |                 |             │ • Emit: DelayedEventReset │
-//	     |                 |             └───────────────────────────┘
-//	     |                 |                           │
-//	     |                 | DelayedEventTimedOut,     │ DelayedEventTimedOut,
-//	     |                 | DelayedEventNotFound,     │ DelayedEventNotFound,
-//	     |                 | WaitingStateTimedOut      │ ParticipantDisconnectedIntentionally,
-//	     |                 |                           │ ParticipantConnectionAborted,
-//	     |                 └───────────────────────────│ SFUParticipantGone
-//	     |                                             │
-//	     | ParticipantConnectionAborted                │
-//	     ▼                                             ▼
-//	 ┌──────────────────────┐              ┌──────────────────────┐
-//	 │ Completed            │              │ Disconnected         │
-//	 │                      |              │                      │
-//	 │ On Entry:            │              │ On Entry:            │
-//	 │ • Stop FSM timers    │              │ • Stop timers        │
-//	 │ • Notify handler     │              │ • Execute ActionSend │
-//	 └──────────────────────┘              │ • Notify handler     │
-//	                                       └──────────────────────┘
+//	                       ParticipantConnected,            DelayedEventReset /
+//	  (Start)              ParticipantLookupSuccessful    (Execute ActionRestart)
+//	     |                ┌───────────────────────────┐          ┌──────┐
+//	     ▼                |                           ▼          |      |
+//	┌──────────────────────────┐        ┌───────────────────────────┐   |
+//	│ WaitingForInitialConnect │        │ Connected                 │◄──┘
+//	│                          │        │                           │
+//	│ On Entry: (none)         │        │ On Entry:                 │
+//	└──────────────────────────┘        │ • Stop waiting timer      │
+//	    |                 |             │ • Setup delayed timer     │
+//	    |                 |             │ • Emit: DelayedEventReset │
+//	    |                 |             └───────────────────────────┘
+//	    |                 |                           │
+//	    |                 | DelayedEventTimedOut,     │ DelayedEventTimedOut,
+//	    |                 | DelayedEventNotFound,     │ DelayedEventNotFound,
+//	    |                 | WaitingStateTimedOut      │ ParticipantDisconnectedIntentionally,
+//	    |                 |                           │ ParticipantConnectionAborted,
+//	    |                 └───────────────────────────│ SFUParticipantGone
+//	    |                                             │
+//	    | ParticipantConnectionAborted                │
+//	    ▼                                             ▼
+//	┌──────────────────────┐              ┌──────────────────────┐
+//	│ Completed            │              │ Disconnected         │
+//	│                      |              │                      │
+//	│ On Entry:            │              │ On Entry:            │
+//	│ • Stop FSM timers    │              │ • Stop timers        │
+//	│ • Notify handler     │              │ • Execute ActionSend │
+//	└──────────────────────┘              │ • Notify handler     │
+//	                                      └──────────────────────┘
 //
-//	     (from any state)
-//	            |
-//	            │ JobReplaced
-//	            ▼
-//	 ┌──────────────────────┐
-//	 │ Replaced             │
-//	 │                      │
-//	 │ On Entry: (none)     │
-//	 └──────────────────────┘
+//	    (from any state)
+//	           |
+//	           │ JobReplaced
+//	           ▼
+//	┌──────────────────────┐
+//	│ Replaced             │
+//	│                      │
+//	│ On Entry: (none)     │
+//	└──────────────────────┘
 //
 // # FSM — Waiting-State Timer
 //
@@ -801,8 +801,9 @@ func (job *DelayedEventJob) handleEventDelayedEventReset() bool {
 			// Report success to loop() via restartResultCh; loop() will extend
 			// the deadline and re-arm fsmTimerRestart.
 			newDeadline := time.Now().Add(job.DelayTimeout)
-			slog.Debug(fmt.Sprintf("Job: ActionRestart ok, next reset in %s", job.delayRestartDuration()),
-				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
+			slog.Debug("Job: ActionRestart ok", "room", job.LiveKitRoom,
+				"lkId", job.LiveKitIdentity,
+				"next reset in", job.delayRestartDuration())
 			select {
 			case job.restartResultCh <- newDeadline:
 			case <-job.ctx.Done():
@@ -840,4 +841,3 @@ func (job *DelayedEventJob) handleEventSFUParticipantGone() bool {
 	}
 	return false // no state change: no state-entry action
 }
-

@@ -348,7 +348,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
 	slog.Debug("Handler: got Matrix user info",
 		"userInfo.Sub", userInfo.Sub,
-		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser])
+		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser])
 
 	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
 	slotId := "m.call#ROOM"
@@ -431,7 +431,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
 	slog.Debug("Handler: got Matrix user info",
 		"userInfo.Sub", userInfo.Sub,
-		"access", map[bool]string{true: "full access", false: "restricted access"}[isFullAccessUser])
+		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser])
 
 	lkIdentity := LiveKitIdentityFor(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
