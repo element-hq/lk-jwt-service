@@ -4,6 +4,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
+// helper_test.go: tests for the cross-cutting helpers in helper.go
+// (ID generation, LiveKit SDK wrappers, Matrix CS-API calls).
+
 package main
 
 import (
@@ -170,7 +173,7 @@ func TestLiveKitIdentityFor_Deterministic(t *testing.T) {
 	}
 }
 
-// TestLiveKitIdentityFor_SampleInputsDistinct verifies that different inputs 
+// TestLiveKitIdentityFor_SampleInputsDistinct verifies that different inputs
 // produce different identities.
 func TestLiveKitIdentityFor_SampleInputsDistinct(t *testing.T) {
 	cases := [][3]string{
@@ -466,7 +469,7 @@ func TestCreateLiveKitRoom_SuccessCreatingNewRoom(t *testing.T) {
 	originalNewClient := newRoomServiceClient
 	newRoomServiceClient = func(url, key, secret string) RoomClient {
 		return &mockRoomServiceClient{
-		createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
+			createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
 				if string(req.Name) != string(roomAlias) {
 					t.Errorf("expected room name %q, got %q", roomAlias, req.Name)
 				}
@@ -514,7 +517,7 @@ func TestCreateLiveKitRoom_SuccessUsingExistingRoom(t *testing.T) {
 	originalNewClient := newRoomServiceClient
 	newRoomServiceClient = func(url, key, secret string) RoomClient {
 		return &mockRoomServiceClient{
-		createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
+			createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
 				return mockRoom, nil
 			},
 		}
@@ -576,7 +579,7 @@ func TestCreateLiveKitRoom_RoomConfigurationParameters(t *testing.T) {
 	originalNewClient := newRoomServiceClient
 	newRoomServiceClient = func(url, key, secret string) RoomClient {
 		return &mockRoomServiceClient{
-		createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
+			createRoomFunc: func(ctx context.Context, req *livekit.CreateRoomRequest) (*livekit.Room, error) {
 				capturedRequest = req
 				return &livekit.Room{Sid: "test", CreationTime: time.Now().Unix()}, nil
 			},

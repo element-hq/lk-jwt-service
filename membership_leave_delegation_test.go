@@ -4,8 +4,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// main_membership_leave_delegation_test.go contains tests for the
-// POST /membership_leave_delegation endpoint and its supporting types.
+// membership_leave_delegation_test.go: tests for the
+// POST /membership_leave_delegation endpoint and its supporting types
+// (handler.go: handleMembershipLeaveDelegation, processMembershipLeaveDelegation).
 
 package main
 
@@ -20,78 +21,6 @@ import (
 
 	"github.com/matrix-org/gomatrixserverlib/fclient"
 )
-
-// ── MembershipLeaveDelegationRequest.Validate() ────────────────────────────────────
-
-func TestMembershipLeaveDelegationRequest_Validate_Valid(t *testing.T) {
-	req := validMembershipLeaveDelegationRequest()
-	if err := req.Validate(); err != nil {
-		t.Errorf("expected no error for valid request, got: %v", err)
-	}
-}
-
-func TestMembershipLeaveDelegationRequest_Validate_MissingRoomID(t *testing.T) {
-	req := validMembershipLeaveDelegationRequest()
-	req.RoomID = ""
-	assertValidationError(t, req.Validate(), "M_BAD_JSON")
-}
-
-func TestMembershipLeaveDelegationRequest_Validate_MissingSlotID(t *testing.T) {
-	req := validMembershipLeaveDelegationRequest()
-	req.SlotID = ""
-	assertValidationError(t, req.Validate(), "M_BAD_JSON")
-}
-
-func TestMembershipLeaveDelegationRequest_Validate_MissingMemberFields(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		mutate func(*MembershipLeaveDelegationRequest)
-	}{
-		{"missing ID",              func(r *MembershipLeaveDelegationRequest) { r.Member.ID = "" }},
-		{"missing ClaimedUserID",   func(r *MembershipLeaveDelegationRequest) { r.Member.ClaimedUserID = "" }},
-		{"missing ClaimedDeviceID", func(r *MembershipLeaveDelegationRequest) { r.Member.ClaimedDeviceID = "" }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := validMembershipLeaveDelegationRequest()
-			tc.mutate(&req)
-			assertValidationError(t, req.Validate(), "M_BAD_JSON")
-		})
-	}
-}
-
-func TestMembershipLeaveDelegationRequest_Validate_MissingOpenIDToken(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		mutate func(*MembershipLeaveDelegationRequest)
-	}{
-		{"missing AccessToken",      func(r *MembershipLeaveDelegationRequest) { r.OpenIDToken.AccessToken = "" }},
-		{"missing MatrixServerName", func(r *MembershipLeaveDelegationRequest) { r.OpenIDToken.MatrixServerName = "" }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := validMembershipLeaveDelegationRequest()
-			tc.mutate(&req)
-			assertValidationError(t, req.Validate(), "M_BAD_JSON")
-		})
-	}
-}
-
-func TestMembershipLeaveDelegationRequest_Validate_MissingDelayedEventParams(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		mutate func(*MembershipLeaveDelegationRequest)
-	}{
-		{"missing DelayId",       func(r *MembershipLeaveDelegationRequest) { r.DelayId = "" }},
-		{"zero DelayTimeout",     func(r *MembershipLeaveDelegationRequest) { r.DelayTimeout = 0 }},
-		{"negative DelayTimeout", func(r *MembershipLeaveDelegationRequest) { r.DelayTimeout = -1 }},
-		{"missing DelayCsApiUrl", func(r *MembershipLeaveDelegationRequest) { r.DelayCsApiUrl = "" }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := validMembershipLeaveDelegationRequest()
-			tc.mutate(&req)
-			assertValidationError(t, req.Validate(), "M_BAD_JSON")
-		})
-	}
-}
 
 // ── handleMembershipLeaveDelegation HTTP handler ───────────────────────────────────
 

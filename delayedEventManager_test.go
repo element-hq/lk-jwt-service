@@ -4,9 +4,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// main_delayedEventManager_test.go contains unit tests for DelayedEventJob
-// (FSM transitions, timer behaviour), LiveKitRoomWorker,
-// and the String() methods of DelayEventState and DelayedEventSignal.
+// delayedEventManager_test.go: unit tests for DelayedEventJob (FSM
+// transitions, timer behaviour), startParticipantLookup (Phase 1 / Phase 2),
+// and the String() methods of DelayEventState and DelayedEventSignal
+// (delayedEventManager.go).
 
 package main
 
@@ -29,7 +30,7 @@ func newTestJob(t *testing.T, timeout time.Duration) *DelayedEventJob {
 	job, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:   "https://matrix.example.com",
+			CsApiUrl:        "https://matrix.example.com",
 			DelayId:         "test-delay-id",
 			DelayTimeout:    timeout,
 			LiveKitRoom:     LiveKitRoomAlias("test-room"),
@@ -65,7 +66,7 @@ func newJobWithDoneCh(timeout time.Duration) (*DelayedEventJob, chan *DelayedEve
 	job, _ := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:   "https://example.com",
+			CsApiUrl:        "https://example.com",
 			DelayId:         "id",
 			DelayTimeout:    timeout,
 			LiveKitRoom:     "room",
@@ -743,7 +744,7 @@ func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 	job, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:   "https://example.com",
+			CsApiUrl:        "https://example.com",
 			DelayId:         "phase1-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
@@ -796,7 +797,7 @@ func TestParticipantLookup_Phase2_DetectsGoneParticipant(t *testing.T) {
 	job, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:   "https://example.com",
+			CsApiUrl:        "https://example.com",
 			DelayId:         "phase2-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
@@ -853,7 +854,7 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 	job, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:   "https://example.com",
+			CsApiUrl:        "https://example.com",
 			DelayId:         "disabled-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
