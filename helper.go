@@ -232,7 +232,7 @@ var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action Del
 		}
 	}()
 
-	slog.Debug("ExecuteDelayedEventAction", "url", endpoint, "StatusCode", resp.StatusCode)
+	slog.Debug("ExecuteDelayedEventAction", "url", endpoint, "status", resp.StatusCode)
 
 	switch {
 	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent:

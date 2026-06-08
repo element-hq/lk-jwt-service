@@ -294,7 +294,7 @@ func (h *Handler) addDelayedEventJob(p DelayedEventJobParams) {
 	slog.Debug("Handler: adding delayed event job",
 		"room", p.LiveKitRoom,
 		"lkId", p.LiveKitIdentity,
-		"DelayId", p.DelayId)
+		"delayId", p.DelayId)
 
 	result := make(chan addJobResult, 1)
 	select {
@@ -347,7 +347,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	slog.Debug("Handler: got Matrix user info",
-		"userInfo.Sub", userInfo.Sub,
+		"matrixId", userInfo.Sub,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser])
 
 	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
@@ -374,7 +374,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 		if delayedEventDelegationRequested {
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
-				"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
+				"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl)
 			h.addDelayedEventJob(DelayedEventJobParams{
 				CsApiUrl:        req.DelayCsApiUrl,
 				DelayId:         req.DelayId,
@@ -388,9 +388,9 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 
 	slog.Info("Handler: generated Legacy SFU access token",
 		"matrixId", userInfo.Sub,
-		"ClaimedDeviceID", req.DeviceID,
+		"claimedDeviceId", req.DeviceID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
-		"MatrixRoom", req.Room,
+		"matrixRoom", req.Room,
 		"lkId", lkIdentity,
 		"room", lkRoomAlias,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
@@ -410,7 +410,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
 	if req.Member.ClaimedUserID != userInfo.Sub {
 		slog.Warn("Handler: ClaimedUserID does not match token subject",
-			"ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
+			"claimedUserId", req.Member.ClaimedUserID, "matrixId", userInfo.Sub)
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
@@ -430,7 +430,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	slog.Debug("Handler: got Matrix user info",
-		"userInfo.Sub", userInfo.Sub,
+		"matrixId", userInfo.Sub,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser])
 
 	lkIdentity := LiveKitIdentityFor(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
@@ -438,7 +438,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
-		slog.Error("Handler: error getting LiveKit token", "userInfo.Sub", userInfo.Sub, "err", err)
+		slog.Error("Handler: error getting LiveKit token", "matrixId", userInfo.Sub, "err", err)
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
@@ -458,7 +458,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		if delayedEventDelegationRequested {
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
-				"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl)
+				"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl)
 			h.addDelayedEventJob(DelayedEventJobParams{
 				CsApiUrl:        req.DelayCsApiUrl,
 				DelayId:         req.DelayId,
@@ -471,9 +471,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 
 	slog.Info("Handler: generated SFU access token",
 		"matrixId", userInfo.Sub,
-		"ClaimedDeviceID", req.Member.ClaimedDeviceID,
+		"claimedDeviceId", req.Member.ClaimedDeviceID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
-		"MatrixRoom", req.RoomID,
+		"matrixRoom", req.RoomID,
 		"MatrixRTCSlot", req.SlotID,
 		"lkId", lkIdentity,
 		"room", lkRoomAlias,
@@ -505,7 +505,7 @@ func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *Members
 
 	if req.Member.ClaimedUserID != userInfo.Sub {
 		slog.Warn("Handler: membership_leave_delegation: ClaimedUserID does not match token subject",
-			"ClaimedUserID", req.Member.ClaimedUserID, "userInfo.Sub", userInfo.Sub)
+			"claimedUserId", req.Member.ClaimedUserID, "matrixId", userInfo.Sub)
 		return &MatrixErrorResponse{
 			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
@@ -527,7 +527,7 @@ func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *Members
 
 	slog.Info("Handler: scheduling delayed event job (membership_leave_delegation)",
 		"room", lkRoomAlias, "lkId", lkIdentity,
-		"DelayId", req.DelayId, "CsApiUrl", req.DelayCsApiUrl,
+		"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
 	h.addDelayedEventJob(DelayedEventJobParams{

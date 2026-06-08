@@ -147,9 +147,9 @@ func (r *SFURequest) Validate() error {
 	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
 	if atLeastOneDelayedEventParamPresent && !allDelayedEventParamsPresent {
 		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
-			"DelayId", r.DelayId,
-			"DelayTimeout", r.DelayTimeout,
-			"DelayCsApiUrl", r.DelayCsApiUrl,
+			"delayId", r.DelayId,
+			"delayTimeout", r.DelayTimeout,
+			"csApiUrl", r.DelayCsApiUrl,
 		)
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
@@ -180,9 +180,9 @@ func (r *LegacySFURequest) Validate() error {
 	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
 	if atLeastOneDelayedEventParamPresent && !allDelayedEventParamsPresent {
 		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
-			"DelayId", r.DelayId,
-			"DelayTimeout", r.DelayTimeout,
-			"DelayCsApiUrl", r.DelayCsApiUrl,
+			"delayId", r.DelayId,
+			"delayTimeout", r.DelayTimeout,
+			"csApiUrl", r.DelayCsApiUrl,
 		)
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
