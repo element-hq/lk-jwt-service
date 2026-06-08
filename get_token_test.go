@@ -30,13 +30,7 @@ import (
 // TestHandle_MethodNotAllowed verifies that non-POST/OPTIONS requests to
 // /get_token return 405.
 func TestHandle_MethodNotAllowed(t *testing.T) {
-	handler := NewHandler(
-		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
-		false, []string{"*"},
-		0, // sanityCheckInterval disabled
-	)
-	t.Cleanup(handler.Close)
-
+	handler := newGetTokenHandler(t)
 	for _, method := range []string{"GET", "PUT", "DELETE", "PATCH"} {
 		req := httptest.NewRequest(method, "/get_token", nil)
 		rr := httptest.NewRecorder()
@@ -49,12 +43,7 @@ func TestHandle_MethodNotAllowed(t *testing.T) {
 
 // TestHandle_Options verifies that OPTIONS /get_token returns 200.
 func TestHandle_Options(t *testing.T) {
-	handler := NewHandler(
-		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
-		false, []string{"*"},
-		0, // sanityCheckInterval disabled
-	)
-	t.Cleanup(handler.Close)
+	handler := newGetTokenHandler(t)
 	req := httptest.NewRequest("OPTIONS", "/get_token", nil)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
@@ -65,12 +54,7 @@ func TestHandle_Options(t *testing.T) {
 
 // TestHandle_InvalidJSON verifies that malformed JSON to /get_token returns 400.
 func TestHandle_InvalidJSON(t *testing.T) {
-	handler := NewHandler(
-		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
-		false, []string{"*"},
-		0, // sanityCheckInterval disabled
-	)
-	t.Cleanup(handler.Close)
+	handler := newGetTokenHandler(t)
 	req := httptest.NewRequest("POST", "/get_token", strings.NewReader("{invalid json}"))
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
@@ -170,6 +154,9 @@ func TestHandlePost(t *testing.T) {
 	}
 }
 
+// TestHandle_UnauthorizedUser verifies that a mismatch between the
+// OpenID-validated sub and the claimed_user_id in the request body returns
+// 401.
 func TestHandle_UnauthorizedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
@@ -177,23 +164,64 @@ func TestHandle_UnauthorizedUser(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@real:example.com"}, nil
 	}
 
-	handler := NewHandler(
-		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
-		false, []string{"*"},
-		0, // sanityCheckInterval disabled
-	)
-	t.Cleanup(handler.Close)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"room_id": "!room:example.com", "slot_id": "slot",
-		"openid_token": map[string]interface{}{"access_token": "tok", "matrix_server_name": "example.com"},
-		"member":       map[string]interface{}{"id": "mid", "claimed_user_id": "@attacker:example.com", "claimed_device_id": "dev"},
+	handler := newGetTokenHandler(t)
+	body := marshalSFURequest(t, func(r *SFURequest) {
+		r.Member.ClaimedUserID = "@attacker:example.com" // mismatch vs Sub
 	})
-	req := httptest.NewRequest("POST", "/get_token", bytes.NewReader(body))
+	req := httptest.NewRequest("POST", "/get_token", body)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for mismatched user, got %d", rr.Code)
+	}
+}
+
+// TestHandle_RestrictedUser verifies that a request from a homeserver that
+// is not on the full-access list, with delayed-event delegation params,
+// returns 400 / M_BAD_JSON.  Delegation is gated on full-access; restricted
+// users may join existing rooms but not delegate delayed-event handling.
+func TestHandle_RestrictedUser(t *testing.T) {
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return &fclient.UserInfo{Sub: "@user:restricted.com"}, nil
+	}
+
+	// newGetTokenHandler configures full access only for example.com.
+	handler := newGetTokenHandler(t)
+	body := marshalSFURequest(t, func(r *SFURequest) {
+		r.Member.ClaimedUserID = "@user:restricted.com"
+		r.OpenIDToken.MatrixServerName = "restricted.com" // not in full-access list
+		// Delegation params trigger the restricted-user reject path.
+		r.DelayId = "delay-id"
+		r.DelayTimeout = 30000 // 30 s in ms
+		r.DelayCsApiUrl = "https://restricted.com"
+	})
+	req := httptest.NewRequest("POST", "/get_token", body)
+	rr := httptest.NewRecorder()
+	handler.prepareMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for restricted user requesting delegation, got %d", rr.Code)
+	}
+}
+
+// TestHandle_ExchangeError verifies that an OpenID lookup failure surfaces
+// as 401 / M_UNAUTHORIZED — the request couldn't be authorised.
+func TestHandle_ExchangeError(t *testing.T) {
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return nil, &MatrixErrorResponse{
+			Status: http.StatusUnauthorized, ErrCode: "M_UNAUTHORIZED", Err: "no",
+		}
+	}
+
+	handler := newGetTokenHandler(t)
+	req := httptest.NewRequest("POST", "/get_token", marshalSFURequest(t, nil))
+	rr := httptest.NewRecorder()
+	handler.prepareMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 when OpenID exchange fails, got %d", rr.Code)
 	}
 }
 
@@ -266,4 +294,53 @@ func TestProcessSFURequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// validSFURequest returns a fully populated, valid request.  The default
+// homeserver is "example.com" (matches newGetTokenHandler's full-access list).
+func validSFURequest() SFURequest {
+	return SFURequest{
+		RoomID: "!testRoom:example.com",
+		SlotID: "m.call#ROOM",
+		OpenIDToken: OpenIDTokenType{
+			AccessToken:      "test-token",
+			MatrixServerName: "example.com",
+		},
+		Member: MatrixRTCMemberType{
+			ID:              "member-id",
+			ClaimedUserID:   "@user:example.com",
+			ClaimedDeviceID: "device-id",
+		},
+	}
+}
+
+// marshalSFURequest returns a valid request body with an optional mutation
+// applied before marshalling.
+func marshalSFURequest(t *testing.T, mutate func(*SFURequest)) *bytes.Reader {
+	t.Helper()
+	req := validSFURequest()
+	if mutate != nil {
+		mutate(&req)
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+	return bytes.NewReader(body)
+}
+
+// newGetTokenHandler creates a Handler configured for testing /get_token,
+// with example.com as the only full-access homeserver and a LIFO cleanup.
+func newGetTokenHandler(t *testing.T) *Handler {
+	t.Helper()
+	handler := NewHandler(
+		LiveKitAuth{key: "key", secret: "secret", lkUrl: "wss://lk.local"},
+		false,
+		[]string{"example.com"},
+		0, // sanityCheckInterval disabled
+	)
+	t.Cleanup(handler.Close)
+	return handler
 }
