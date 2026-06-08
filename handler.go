@@ -49,6 +49,19 @@ func writeMatrixError(w http.ResponseWriter, status int, errCode string, errMsg 
 	}
 }
 
+// writeIfMatrixError unwraps err as a *MatrixErrorResponse and writes the
+// corresponding HTTP response; returns true if it wrote.  Non-Matrix errors
+// are silently dropped (response unwritten) — callers always return after
+// calling this regardless of the bool.
+func writeIfMatrixError(w http.ResponseWriter, err error) bool {
+	var mErr *MatrixErrorResponse
+	if errors.As(err, &mErr) {
+		writeMatrixError(w, mErr.Status, mErr.ErrCode, mErr.Err)
+		return true
+	}
+	return false
+}
+
 func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identity LiveKitIdentity) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
@@ -529,56 +542,58 @@ func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *Members
 }
 
 func (h *Handler) handleMembershipLeaveDelegation(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
-
-	switch r.Method {
-	case "OPTIONS":
-		w.WriteHeader(http.StatusOK)
-		return
-	case "POST":
-		slog.Debug("Handler: membership_leave_delegation request",
-			"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
-
-		var req MembershipLeaveDelegationRequest
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&req); err != nil {
-			slog.Error("Handler: membership_leave_delegation: error reading body",
-				"RemoteAddr", r.RemoteAddr, "err", err)
-			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
-			return
-		}
-
-		if err := req.Validate(); err != nil {
-			matrixErr := &MatrixErrorResponse{}
-			if errors.As(err, &matrixErr) {
-				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-			}
-			return
-		}
-
-		if err := h.processMembershipLeaveDelegation(r, &req); err != nil {
-			matrixErr := &MatrixErrorResponse{}
-			if errors.As(err, &matrixErr) {
-				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-			}
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-	default:
+	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	slog.Debug("Handler: membership_leave_delegation request",
+		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
+
+	var req MembershipLeaveDelegationRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		slog.Error("Handler: membership_leave_delegation: error reading body",
+			"RemoteAddr", r.RemoteAddr, "err", err)
+		writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		writeIfMatrixError(w, err)
+		return
+	}
+
+	if err := h.processMembershipLeaveDelegation(r, &req); err != nil {
+		writeIfMatrixError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// corsJSON adds the four standard CORS + JSON headers used by every POST
+// endpoint and short-circuits the CORS preflight (OPTIONS) with 200.  Any
+// other method falls through to next.
+func corsJSON(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next(w, r)
 	}
 }
 
 func (h *Handler) prepareMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sfu/get", h.handle_legacy) // Deprecated: pre-Matrix-2.0; remove once clients migrate to /get_token.
-	mux.HandleFunc("/get_token", h.handle)
-	mux.HandleFunc("/membership_leave_delegation", h.handleMembershipLeaveDelegation)
+	mux.HandleFunc("/sfu/get", corsJSON(h.handle_legacy)) // Deprecated: pre-Matrix-2.0; remove once clients migrate to /get_token.
+	mux.HandleFunc("/get_token", corsJSON(h.handle))
+	mux.HandleFunc("/membership_leave_delegation", corsJSON(h.handleMembershipLeaveDelegation))
 	mux.HandleFunc("/sfu_webhook", h.handleSfuWebhook)
 	mux.HandleFunc("/healthz", h.healthcheck)
 	return mux
@@ -597,102 +612,71 @@ func (h *Handler) healthcheck(w http.ResponseWriter, r *http.Request) {
 // Deprecated: handle_legacy serves the pre-Matrix-2.0 /sfu/get endpoint.
 // Remove once all in-the-wild clients have migrated to /get_token.
 func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	slog.Debug("Handler (legacy): new request",
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
-
-	switch r.Method {
-	case "OPTIONS":
-		w.WriteHeader(http.StatusOK)
+	var req LegacySFURequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		slog.Error("Handler (legacy): error reading body",
+			"RemoteAddr", r.RemoteAddr, "err", err)
+		writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
 		return
-	case "POST":
-		var req LegacySFURequest
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&req); err != nil {
-			slog.Error("Handler (legacy): error reading body",
-				"RemoteAddr", r.RemoteAddr, "err", err)
-			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
-			return
-		}
+	}
 
-		if err := req.Validate(); err != nil {
-			matrixErr := &MatrixErrorResponse{}
-			if errors.As(err, &matrixErr) {
-				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-			}
-			return
-		}
+	if err := req.Validate(); err != nil {
+		writeIfMatrixError(w, err)
+		return
+	}
 
-		sfuAccessResponse, err := h.processLegacySFURequest(r, &req)
-		if err != nil {
-			matrixErr := &MatrixErrorResponse{}
-			if errors.As(err, &matrixErr) {
-				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-			}
-			return
-		}
+	sfuAccessResponse, err := h.processLegacySFURequest(r, &req)
+	if err != nil {
+		writeIfMatrixError(w, err)
+		return
+	}
 
-		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-			slog.Error("Handler (legacy): failed to encode response",
-				"RemoteAddr", r.RemoteAddr, "err", err)
-		}
-	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
+		slog.Error("Handler (legacy): failed to encode response",
+			"RemoteAddr", r.RemoteAddr, "err", err)
 	}
 }
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token")
-
-	switch r.Method {
-	case "OPTIONS":
-		slog.Debug("Handler: preflight", "RemoteAddr", r.RemoteAddr)
-		w.WriteHeader(http.StatusOK)
-		return
-	case "POST":
-		slog.Debug("Handler: new request", "RemoteAddr", r.RemoteAddr)
-		var sfuAccessRequest SFURequest
-
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&sfuAccessRequest); err != nil {
-			slog.Error("Handler: error reading body",
-				"RemoteAddr", r.RemoteAddr, "err", err)
-			writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
-			return
-		}
-
-		if err := sfuAccessRequest.Validate(); err != nil {
-			matrixErr := &MatrixErrorResponse{}
-			if errors.As(err, &matrixErr) {
-				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-			}
-			return
-		}
-
-		sfuAccessResponse, err := h.processSFURequest(r, &sfuAccessRequest)
-		if err != nil {
-			matrixErr := &MatrixErrorResponse{}
-			if errors.As(err, &matrixErr) {
-				writeMatrixError(w, matrixErr.Status, matrixErr.ErrCode, matrixErr.Err)
-			}
-			return
-		}
-
-		if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
-			slog.Error("Handler: failed to encode response",
-				"RemoteAddr", r.RemoteAddr, "err", err)
-		}
-	default:
+	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	slog.Debug("Handler: new request", "RemoteAddr", r.RemoteAddr)
+
+	var sfuAccessRequest SFURequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&sfuAccessRequest); err != nil {
+		slog.Error("Handler: error reading body",
+			"RemoteAddr", r.RemoteAddr, "err", err)
+		writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
+		return
+	}
+
+	if err := sfuAccessRequest.Validate(); err != nil {
+		writeIfMatrixError(w, err)
+		return
+	}
+
+	sfuAccessResponse, err := h.processSFURequest(r, &sfuAccessRequest)
+	if err != nil {
+		writeIfMatrixError(w, err)
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(&sfuAccessResponse); err != nil {
+		slog.Error("Handler: failed to encode response",
+			"RemoteAddr", r.RemoteAddr, "err", err)
 	}
 }
 
