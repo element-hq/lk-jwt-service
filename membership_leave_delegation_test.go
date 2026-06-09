@@ -285,30 +285,3 @@ func marshalMembershipLeaveDelegationRequest(t *testing.T, mutate func(*Membersh
 	}
 	return bytes.NewReader(body)
 }
-
-// assertValidationError checks that err is a MatrixErrorResponse with the
-// expected error code.
-func assertValidationError(t *testing.T, err error, wantErrCode string) {
-	t.Helper()
-	if err == nil {
-		t.Error("expected validation error, got nil")
-		return
-	}
-	matrixErr := &MatrixErrorResponse{}
-	if !errorsAs(err, matrixErr) {
-		t.Errorf("expected *MatrixErrorResponse, got %T: %v", err, err)
-		return
-	}
-	if matrixErr.ErrCode != wantErrCode {
-		t.Errorf("ErrCode = %q, want %q", matrixErr.ErrCode, wantErrCode)
-	}
-}
-
-// errorsAs is a thin wrapper so the test file doesn't need to import "errors".
-func errorsAs(err error, target *MatrixErrorResponse) bool {
-	me, ok := err.(*MatrixErrorResponse)
-	if ok {
-		*target = *me
-	}
-	return ok
-}

@@ -9,7 +9,28 @@
 
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+// assertValidationError checks that err is a *MatrixErrorResponse with the
+// expected error code.
+func assertValidationError(t *testing.T, err error, wantErrCode string) {
+	t.Helper()
+	if err == nil {
+		t.Error("expected validation error, got nil")
+		return
+	}
+	var matrixErr *MatrixErrorResponse
+	if !errors.As(err, &matrixErr) {
+		t.Errorf("expected *MatrixErrorResponse, got %T: %v", err, err)
+		return
+	}
+	if matrixErr.ErrCode != wantErrCode {
+		t.Errorf("ErrCode = %q, want %q", matrixErr.ErrCode, wantErrCode)
+	}
+}
 
 // TestMatrixErrorResponse_Error verifies the Error() string method.
 func TestMatrixErrorResponse_Error(t *testing.T) {
@@ -81,9 +102,6 @@ func TestSFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
 }
 
 // ── MembershipLeaveDelegationRequest.Validate() ───────────────────────────────
-// Helpers (validMembershipLeaveDelegationRequest, assertValidationError) live
-// in membership_leave_delegation_test.go and are visible because they're in
-// the same package.
 
 func TestMembershipLeaveDelegationRequest_Validate_Valid(t *testing.T) {
 	req := validMembershipLeaveDelegationRequest()
