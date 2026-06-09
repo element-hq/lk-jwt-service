@@ -31,7 +31,9 @@ import (
 	"github.com/matrix-org/gomatrixserverlib/fclient"
 )
 
-func TestHandleOptions(t *testing.T) {
+// TestHandleSfuGet_Options verifies that OPTIONS /sfu/get returns 200 with
+// the expected CORS headers.
+func TestHandleSfuGet_Options(t *testing.T) {
 	handler := &Handler{}
 	req, err := http.NewRequest("OPTIONS", "/sfu/get", nil)
 	if err != nil {
@@ -51,7 +53,9 @@ func TestHandleOptions(t *testing.T) {
 	}
 }
 
-func TestHandlePostMissingParams(t *testing.T) {
+// TestHandleSfuGet_MissingParams verifies that POSTs missing required body
+// fields return 400 / M_BAD_JSON via LegacySFURequest.Validate.
+func TestHandleSfuGet_MissingParams(t *testing.T) {
 	handler := &Handler{}
 	for _, testCase := range []map[string]interface{}{{}, {"room": ""}} {
 		jsonBody, _ := json.Marshal(testCase)
@@ -74,7 +78,11 @@ func TestHandlePostMissingParams(t *testing.T) {
 	}
 }
 
-func TestLegacyHandlePost(t *testing.T) {
+// TestHandleSfuGet_Success verifies the happy-path POST /sfu/get: OpenID
+// userinfo is fetched from a real httptest TLS server, the response carries
+// a valid SFUResponse, and the JWT's sub/room claims encode the legacy
+// (pre-Matrix-2.0) identity scheme.
+func TestHandleSfuGet_Success(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true, []string{"example.com"},

@@ -27,9 +27,9 @@ import (
 	"github.com/matrix-org/gomatrixserverlib/fclient"
 )
 
-// TestHandle_MethodNotAllowed verifies that non-POST/OPTIONS requests to
+// TestHandleGetToken_MethodNotAllowed verifies that non-POST/OPTIONS requests to
 // /get_token return 405.
-func TestHandle_MethodNotAllowed(t *testing.T) {
+func TestHandleGetToken_MethodNotAllowed(t *testing.T) {
 	handler := newGetTokenHandler(t)
 	for _, method := range []string{"GET", "PUT", "DELETE", "PATCH"} {
 		req := httptest.NewRequest(method, "/get_token", nil)
@@ -41,8 +41,8 @@ func TestHandle_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-// TestHandle_Options verifies that OPTIONS /get_token returns 200.
-func TestHandle_Options(t *testing.T) {
+// TestHandleGetToken_Options verifies that OPTIONS /get_token returns 200.
+func TestHandleGetToken_Options(t *testing.T) {
 	handler := newGetTokenHandler(t)
 	req := httptest.NewRequest("OPTIONS", "/get_token", nil)
 	rr := httptest.NewRecorder()
@@ -52,8 +52,8 @@ func TestHandle_Options(t *testing.T) {
 	}
 }
 
-// TestHandle_InvalidJSON verifies that malformed JSON to /get_token returns 400.
-func TestHandle_InvalidJSON(t *testing.T) {
+// TestHandleGetToken_InvalidJSON verifies that malformed JSON to /get_token returns 400.
+func TestHandleGetToken_InvalidJSON(t *testing.T) {
 	handler := newGetTokenHandler(t)
 	req := httptest.NewRequest("POST", "/get_token", strings.NewReader("{invalid json}"))
 	rr := httptest.NewRecorder()
@@ -63,7 +63,11 @@ func TestHandle_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestHandlePost(t *testing.T) {
+// TestHandleGetToken_Success verifies the happy-path POST /get_token: OpenID
+// userinfo is fetched from a real httptest TLS server, the response carries a
+// valid SFUResponse, and the JWT's sub/room claims match the MSC-4195 test
+// vectors.
+func TestHandleGetToken_Success(t *testing.T) {
 	handler := NewHandler(
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true, []string{"example.com"},
@@ -154,10 +158,10 @@ func TestHandlePost(t *testing.T) {
 	}
 }
 
-// TestHandle_UnauthorizedUser verifies that a mismatch between the
+// TestHandleGetToken_UnauthorizedUser verifies that a mismatch between the
 // OpenID-validated sub and the claimed_user_id in the request body returns
 // 401.
-func TestHandle_UnauthorizedUser(t *testing.T) {
+func TestHandleGetToken_UnauthorizedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
@@ -176,11 +180,11 @@ func TestHandle_UnauthorizedUser(t *testing.T) {
 	}
 }
 
-// TestHandle_RestrictedUser verifies that a request from a homeserver that
-// is not on the full-access list, with delayed-event delegation params,
+// TestHandleGetToken_RestrictedUser verifies that a request from a homeserver
+// that is not on the full-access list, with delayed-event delegation params,
 // returns 400 / M_BAD_JSON.  Delegation is gated on full-access; restricted
 // users may join existing rooms but not delegate delayed-event handling.
-func TestHandle_RestrictedUser(t *testing.T) {
+func TestHandleGetToken_RestrictedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
@@ -205,9 +209,9 @@ func TestHandle_RestrictedUser(t *testing.T) {
 	}
 }
 
-// TestHandle_ExchangeError verifies that an OpenID lookup failure surfaces
-// as 401 / M_UNAUTHORIZED — the request couldn't be authorised.
-func TestHandle_ExchangeError(t *testing.T) {
+// TestHandleGetToken_ExchangeError verifies that an OpenID lookup failure
+// surfaces as 401 / M_UNAUTHORIZED — the request couldn't be authorised.
+func TestHandleGetToken_ExchangeError(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
