@@ -195,24 +195,29 @@ var LiveKitParticipantExists = func(
 	return false, err
 }
 
-// ExecuteDelayedEventAction POSTs the given action (restart/send) to the
-// Matrix CS-API for delayID.  Explicit-success contract:
+// ExecuteDelayedEventAction POSTs the given action (restart or send) to the
+// Matrix CS-API for delayID.
 //
-//   - (200/204, nil)                       success — action took effect
-//   - (404, nil)          ActionSend       MSC-4140: already sent / cancelled
-//   - (404, errDelayedEventNotFound)
-//     ActionRestart                        delayed event no longer present
-//   - (5xx, transient err)                 CS API hiccup, let backoff retry
-//   - (429, *backoff.RetryAfterError)      Retry-After header OR Matrix
-//     retry_after_ms body field
-//   - (429, transient err)                 no usable retry hint, default backoff
-//   - (status, "unexpected status" err)    any other code — treated as
-//     transient (backoff retries
-//     until WithMaxElapsedTime)
-//   - (0, transport err)                   URL build or network error
+// Return contract — by how backoff.Retry treats the result:
 //
-// The status code is returned even on error so callers can log it; 0 means
-// no response was received.
+// success — no retry; caller proceeds:
+//   - 2xx                                → nil
+//   - 404 on ActionSend                  → nil (MSC-4140 already-sent / cancelled)
+//
+// Permanent — no retry; caller then matches err with errors.Is:
+//   - 404 on ActionRestart               → backoff.Permanent(errDelayedEventNotFound)
+//
+// RetryAfter — retry after the server's hint:
+//   - 429 + Retry-After or retry_after_ms → *backoff.RetryAfterError
+//
+// transient — retry on default schedule until WithMaxElapsedTime:
+//   - 5xx                                → err — "temporarily unavailable"
+//   - 429 with no usable retry hint      → err — "temporarily unavailable"
+//   - Transport / URL error              → err; status field is 0
+//   - Any other status (catchall)        → err — "CS API returned unexpected status: N"
+//     (e.g. 408, 421, 423, 425 — genuinely retriable; also 1xx, 3xx)
+//
+// The status code is returned alongside err so callers can log it.
 var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action DelayEventAction) (int, error) {
 	// url.JoinPath path-escapes delayID, preventing path-traversal attacks since
 	// delayID is attacker-controlled.  action is a typed constant and safe.
