@@ -125,6 +125,7 @@ Set environment variables to configure the service:
 | `LIVEKIT_JWT_BIND`                            | Address to bind the server to                                 | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_PORT` | `:8080` |
 | `LIVEKIT_JWT_PORT`                            | ⚠️ Deprecated Port to bind the server to                      | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_BIND` |         |
 | `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all — see security note below) | ✅ Yes                                               |         |
+| `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS`       | Interval (seconds) at which delegated-leave jobs re-check that a connected participant is still on the SFU. Guards against missed SFU webhooks. Unset/`0` disables the sanity check. | ❌ No                                                | `0` (disabled) |
 
 > [!WARNING]
 > **Restricting room creation** requires two pieces working together:
@@ -141,6 +142,36 @@ Set environment variables to configure the service:
 >    room:
 >      auto_create: false
 >    ```
+
+## 🔌 LiveKit SFU Wiring (Webhooks)
+
+Delegated MatrixRTC leave handling
+([MSC4140](https://github.com/matrix-org/matrix-spec-proposals/pull/4140))
+relies on participant lifecycle events from the SFU. Point the LiveKit
+SFU's webhook receiver at this service's `/sfu_webhook` endpoint in its
+[config.yaml](https://github.com/livekit/livekit/blob/master/config-sample.yaml):
+
+```yaml
+webhook:
+  api_key: devkey   # must match LIVEKIT_KEY used by this service —
+                    # the SFU signs webhooks with it, this service verifies
+  urls:
+    - https://matrix-rtc.domain.tld/livekit/jwt/sfu_webhook
+```
+
+> [!NOTE]
+> - The URL is the public, reverse-proxied path to this service (see the
+>   TLS/reverse-proxy section below). For a local dev stack this is
+>   typically `https://matrix-rtc.m.localhost/livekit/jwt/sfu_webhook`.
+> - `webhook.api_key` **must** be one of the API keys the SFU knows
+>   (configured under `keys:` in the SFU config) and **must** match the
+>   `LIVEKIT_KEY` this service is started with. Webhook payloads are
+>   signed by the SFU and verified here.
+> - Without this wiring, `/get_token`, `/sfu/get` and
+>   `/membership_leave_delegation` the service cannot observe participant
+>   disconnects and therefore cannot send the delegated leave event. The
+>   `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS` pull-based fallback partially
+>   mitigates this.
 
 ## 🔒 Transport Layer Security (TLS) Setup Using a Reverse Proxy
 
