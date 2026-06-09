@@ -19,10 +19,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -78,63 +76,67 @@ func TestHandleSfuGet_MissingParams(t *testing.T) {
 	}
 }
 
-// TestHandleSfuGet_Success verifies the happy-path POST /sfu/get: OpenID
-// userinfo is fetched from a real httptest TLS server, the response carries
-// a valid SFUResponse, and the JWT's sub/room claims encode the legacy
-// (pre-Matrix-2.0) identity scheme.
+// TestHandleSfuGet_Success verifies the full-access happy-path POST /sfu/get:
+// a valid request produces a 200 SFUResponse, CreateLiveKitRoom is invoked,
+// and the JWT's sub/room claims encode the legacy (pre-Matrix-2.0) identity
+// scheme (`<sub>:<device>` for sub, hashed (room, "m.call#ROOM") for room).
+//
+// The OpenID exchange and LiveKit room creation are mocked here — the real
+// exchangeOpenIdUserInfo path is exercised by TestExchangeOpenIdUserInfo in
+// helper_test.go.
 func TestHandleSfuGet_Success(t *testing.T) {
+	const matrixServerName = "example.com"
+	const claimedUserSub = "@user:" + matrixServerName
+	const deviceID = "testDevice"
+	const matrixRoom = "testRoom"
+
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return &fclient.UserInfo{Sub: claimedUserSub}, nil
+	}
+
+	originalCreate := CreateLiveKitRoom
+	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
+	var createCalled bool
+	CreateLiveKitRoom = func(_ context.Context, _ *LiveKitAuth, _ LiveKitRoomAlias, _ string, _ LiveKitIdentity) error {
+		createCalled = true
+		return nil
+	}
+
 	handler := NewHandler(
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
-		true, []string{"example.com"},
+		false, []string{matrixServerName},
 		0, // sanityCheckInterval disabled
 	)
+	t.Cleanup(handler.Close)
 
-	var matrixServerName string
-	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/_matrix/federation/v1/openid/userinfo" {
-			t.Errorf("unexpected path: got %v", r.URL.Path)
-		}
-		if accessToken := r.URL.Query().Get("access_token"); accessToken != "testAccessToken" {
-			t.Errorf("unexpected access token: got %v", accessToken)
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := fmt.Fprintf(w, `{"sub": "@user:%s"}`, matrixServerName); err != nil {
-			t.Fatalf("failed to write response: %v", err)
-		}
-	}))
-	defer testServer.Close()
-
-	u, _ := url.Parse(testServer.URL)
-	matrixServerName = u.Host
-	matrixRoom := "testRoom"
-
-	testCase := map[string]interface{}{
+	body, _ := json.Marshal(map[string]interface{}{
 		"room": matrixRoom,
 		"openid_token": map[string]interface{}{
-			"access_token": "testAccessToken", "token_type": "testTokenType",
-			"matrix_server_name": u.Host, "expires_in": 3600,
+			"access_token":       "testAccessToken",
+			"token_type":         "testTokenType",
+			"matrix_server_name": matrixServerName,
+			"expires_in":         3600,
 		},
-		"device_id": "testDevice",
-	}
-
-	jsonBody, _ := json.Marshal(testCase)
-	req, err := http.NewRequest("POST", "/sfu/get", bytes.NewBuffer(jsonBody))
-	if err != nil {
-		t.Fatal(err)
-	}
+		"device_id": deviceID,
+	})
+	req := httptest.NewRequest("POST", "/sfu/get", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+	if !createCalled {
+		t.Error("expected CreateLiveKitRoom to be called for full-access user")
 	}
 
 	var resp SFUResponse
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Errorf("failed to decode response body: %v", err)
+		t.Fatalf("failed to decode response body: %v", err)
 	}
 	if resp.URL != "wss://lk.local:8080/foo" {
-		t.Errorf("unexpected URL: got %v", resp.URL)
+		t.Errorf("resp.URL = %q, want wss://lk.local:8080/foo", resp.URL)
 	}
 	if resp.JWT == "" {
 		t.Error("expected JWT to be non-empty")
@@ -150,11 +152,13 @@ func TestHandleSfuGet_Success(t *testing.T) {
 	if !ok || !token.Valid {
 		t.Fatalf("failed to parse claims from JWT")
 	}
-	if claims["sub"] != "@user:"+matrixServerName+":testDevice" {
-		t.Errorf("unexpected sub: got %v", claims["sub"])
+	wantSub := claimedUserSub + ":" + deviceID
+	if claims["sub"] != wantSub {
+		t.Errorf("sub = %v, want %v", claims["sub"], wantSub)
 	}
-	if claims["video"].(map[string]interface{})["room"] != string(LiveKitRoomAliasFor(matrixRoom, "m.call#ROOM")) {
-		t.Errorf("unexpected room: got %v", claims["video"].(map[string]interface{})["room"])
+	wantRoom := string(LiveKitRoomAliasFor(matrixRoom, "m.call#ROOM"))
+	if got := claims["video"].(map[string]interface{})["room"]; got != wantRoom {
+		t.Errorf("room = %v, want %v", got, wantRoom)
 	}
 }
 

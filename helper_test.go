@@ -12,8 +12,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -616,6 +618,50 @@ func TestExecuteDelayedEventAction_ContentType(t *testing.T) {
 	_, _ = ExecuteDelayedEventAction(ts.URL, "id", ActionRestart)
 	if capturedContentType != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %q", capturedContentType)
+	}
+}
+
+// ── exchangeOpenIdUserInfo ────────────────────────────────────────────────────
+
+// TestExchangeOpenIdUserInfo_Success verifies the end-to-end OpenID userinfo
+// lookup: exchangeOpenIdUserInfo builds the correct federation request, parses
+// the response body, and returns the sub.  Endpoint happy-path tests mock
+// this function to focus on endpoint behaviour — this is its dedicated home.
+func TestExchangeOpenIdUserInfo_Success(t *testing.T) {
+	const accessToken = "testAccessToken"
+	var matrixServerName string
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/_matrix/federation/v1/openid/userinfo" {
+			t.Errorf("unexpected path: got %q", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("access_token"); got != accessToken {
+			t.Errorf("access_token = %q, want %q", got, accessToken)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := fmt.Fprintf(w, `{"sub": "@alice:%s"}`, matrixServerName); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	matrixServerName = u.Host
+
+	info, err := exchangeOpenIdUserInfo(
+		context.Background(),
+		OpenIDTokenType{
+			AccessToken:      accessToken,
+			MatrixServerName: matrixServerName,
+		},
+		true, // skipVerifyTLS — required for the httptest TLS server
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "@alice:" + matrixServerName; info.Sub != want {
+		t.Errorf("Sub = %q, want %q", info.Sub, want)
 	}
 }
 

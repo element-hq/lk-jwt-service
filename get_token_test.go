@@ -16,10 +16,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -63,66 +61,59 @@ func TestHandleGetToken_InvalidJSON(t *testing.T) {
 	}
 }
 
-// TestHandleGetToken_Success verifies the happy-path POST /get_token: OpenID
-// userinfo is fetched from a real httptest TLS server, the response carries a
-// valid SFUResponse, and the JWT's sub/room claims match the MSC-4195 test
-// vectors.
+// TestHandleGetToken_Success verifies the full-access happy-path POST
+// /get_token: a valid request produces a 200 SFUResponse, CreateLiveKitRoom
+// is invoked, and the JWT's sub/room claims match the MSC-4195 test vectors.
+//
+// The OpenID exchange and LiveKit room creation are mocked here — the real
+// exchangeOpenIdUserInfo path is exercised by TestExchangeOpenIdUserInfo in
+// helper_test.go.
 func TestHandleGetToken_Success(t *testing.T) {
-	handler := NewHandler(
-		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
-		true, []string{"example.com"},
-		0, // sanityCheckInterval disabled
-	)
+	const matrixServerName = "example.com"
+	const claimedUserID = "@alice:" + matrixServerName
 
-	var matrixServerName string
-	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/_matrix/federation/v1/openid/userinfo" {
-			t.Errorf("unexpected path: got %v", r.URL.Path)
-		}
-		if accessToken := r.URL.Query().Get("access_token"); accessToken != "testAccessToken" {
-			t.Errorf("unexpected access token: got %v", accessToken)
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := fmt.Fprintf(w, `{"sub": "@alice:%s"}`, matrixServerName); err != nil {
-			t.Fatalf("failed to write response: %v", err)
-		}
-	}))
-	defer testServer.Close()
-
-	u, _ := url.Parse(testServer.URL)
-	matrixServerName = u.Host
-
-	testCase := map[string]interface{}{
-		// from https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
-		"room_id": "!roomid:example.com", "slot_id": "slot123",
-		"openid_token": map[string]interface{}{
-			"access_token": "testAccessToken", "token_type": "testTokenType",
-			"matrix_server_name": u.Host, "expires_in": 3600,
-		},
-		"member": map[string]interface{}{
-			"id": "memberABC", "claimed_user_id": "@alice:" + matrixServerName,
-			"claimed_device_id": "DEVICE123",
-		},
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return &fclient.UserInfo{Sub: claimedUserID}, nil
 	}
 
-	jsonBody, _ := json.Marshal(testCase)
-	req, err := http.NewRequest("POST", "/get_token", bytes.NewBuffer(jsonBody))
-	if err != nil {
-		t.Fatal(err)
+	originalCreate := CreateLiveKitRoom
+	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
+	var createCalled bool
+	CreateLiveKitRoom = func(_ context.Context, _ *LiveKitAuth, _ LiveKitRoomAlias, _ string, _ LiveKitIdentity) error {
+		createCalled = true
+		return nil
 	}
+
+	handler := newGetTokenHandler(t)
+
+	// Inputs match the MSC-4195 test vectors exactly:
+	// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
+	body := marshalSFURequest(t, func(r *SFURequest) {
+		r.RoomID = "!roomid:example.com"
+		r.SlotID = "slot123"
+		r.OpenIDToken.MatrixServerName = matrixServerName
+		r.Member.ID = "memberABC"
+		r.Member.ClaimedUserID = claimedUserID
+		r.Member.ClaimedDeviceID = "DEVICE123"
+	})
+	req := httptest.NewRequest("POST", "/get_token", body)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+	if !createCalled {
+		t.Error("expected CreateLiveKitRoom to be called for full-access user")
 	}
 
 	var resp SFUResponse
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Errorf("failed to decode response body: %v", err)
+		t.Fatalf("failed to decode response body: %v", err)
 	}
-	if resp.URL != "wss://lk.local:8080/foo" {
-		t.Errorf("unexpected URL: got %v", resp.URL)
+	if resp.URL != handler.liveKitAuth.lkUrl {
+		t.Errorf("resp.URL = %q, want %q", resp.URL, handler.liveKitAuth.lkUrl)
 	}
 	if resp.JWT == "" {
 		t.Error("expected JWT to be non-empty")
@@ -138,23 +129,20 @@ func TestHandleGetToken_Success(t *testing.T) {
 	if !ok || !token.Valid {
 		t.Fatalf("failed to parse claims from JWT")
 	}
-	// from https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
 
-	wantSubRawBytes, err := json.Marshal([]string{"@alice:" + matrixServerName, "DEVICE123", "memberABC"})
-	if err != nil {
-		panic("unreachable, probably")
-	}
-	wantSubIdentityRaw := string(wantSubRawBytes)
-	wantSubIdentityHash := sha256.Sum256([]byte(wantSubIdentityRaw))
-	wantSub := unpaddedBase64.EncodeToString(wantSubIdentityHash[:])
+	// MSC-4195 identity hash of (claimed_user_id, claimed_device_id, member.id).
+	// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
+	wantSubRawBytes, _ := json.Marshal([]string{claimedUserID, "DEVICE123", "memberABC"})
+	wantSubHash := sha256.Sum256(wantSubRawBytes)
+	wantSub := unpaddedBase64.EncodeToString(wantSubHash[:])
 	if claims["sub"] != wantSub {
-		t.Errorf("unexpected sub: got %v want %v", claims["sub"], wantSub)
+		t.Errorf("sub = %v, want %v", claims["sub"], wantSub)
 	}
-
-	// from https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
-	wantRoom := "AUDmNDQiVHmWYRE+rKBvieWX8AUSzepenuj6u+d/n9c"
-	if claims["video"].(map[string]interface{})["room"] != wantRoom {
-		t.Errorf("unexpected room: got %v want %v", claims["video"].(map[string]interface{})["room"], wantRoom)
+	// MSC-4195 room hash of ("!roomid:example.com", "slot123").
+	// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
+	const wantRoom = "AUDmNDQiVHmWYRE+rKBvieWX8AUSzepenuj6u+d/n9c"
+	if got := claims["video"].(map[string]interface{})["room"]; got != wantRoom {
+		t.Errorf("room = %v, want %v", got, wantRoom)
 	}
 }
 
