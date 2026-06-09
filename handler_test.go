@@ -16,7 +16,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -24,7 +27,9 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // ── HTTP handler smoke tests ──────────────────────────────────────────────────
@@ -362,6 +367,156 @@ func TestSfuEventFromWebhook_UnknownEvent(t *testing.T) {
 				t.Errorf("expected ok=false for event type %q", eventType)
 			}
 		})
+	}
+}
+
+// ── handleSfuWebhook (HTTP entry-point) ───────────────────────────────────────
+
+// signedSfuWebhookRequest builds a POST /sfu_webhook request signed using the
+// LiveKit webhook protocol: protojson-encoded body, SHA-256 of the body
+// embedded in an AccessToken JWT in the Authorization header.  Mirrors
+// webhook.URLNotifier's signing logic so ReceiveWebhookEvent accepts it.
+func signedSfuWebhookRequest(t *testing.T, key, secret string, event *livekit.WebhookEvent) *http.Request {
+	t.Helper()
+	body, err := protojson.Marshal(event)
+	if err != nil {
+		t.Fatalf("protojson.Marshal: %v", err)
+	}
+	sum := sha256.Sum256(body)
+	token, err := auth.NewAccessToken(key, secret).
+		SetValidFor(5 * time.Minute).
+		SetSha256(base64.StdEncoding.EncodeToString(sum[:])).
+		ToJWT()
+	if err != nil {
+		t.Fatalf("auth.ToJWT: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/sfu_webhook", bytes.NewReader(body))
+	req.Header.Set("Authorization", token)
+	return req
+}
+
+// newSfuWebhookTestHandler builds a Handler with just enough wiring to serve
+// /sfu_webhook directly — sfuEventCh and ctx are set, but loop() is NOT
+// started so the test can observe sfuEventCh without competing with the
+// actor.
+func newSfuWebhookTestHandler(key, secret string) *Handler {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Handler{
+		ctx:    ctx,
+		cancel: cancel,
+		liveKitAuth: LiveKitAuth{
+			key:          key,
+			secret:       secret,
+			authProvider: auth.NewSimpleKeyProvider(key, secret),
+		},
+		sfuEventCh: make(chan sfuEventRequest, 200),
+	}
+}
+
+// TestHandleSfuWebhook_ParticipantJoined verifies that a properly signed
+// participant_joined webhook is parsed and routed to sfuEventCh as a
+// ParticipantConnected message.
+func TestHandleSfuWebhook_ParticipantJoined(t *testing.T) {
+	const key, secret = "test-key", "test-secret"
+	h := newSfuWebhookTestHandler(key, secret)
+	defer h.cancel()
+
+	event := &livekit.WebhookEvent{
+		Event:       "participant_joined",
+		Room:        &livekit.Room{Name: "test-room"},
+		Participant: &livekit.ParticipantInfo{Identity: "@alice:example.com"},
+	}
+	req := signedSfuWebhookRequest(t, key, secret, event)
+	h.handleSfuWebhook(httptest.NewRecorder(), req)
+
+	select {
+	case ev := <-h.sfuEventCh:
+		if ev.roomAlias != LiveKitRoomAlias("test-room") {
+			t.Errorf("roomAlias = %q, want test-room", ev.roomAlias)
+		}
+		if ev.msg.Type != ParticipantConnected {
+			t.Errorf("msg.Type = %v, want ParticipantConnected", ev.msg.Type)
+		}
+		if ev.msg.LiveKitIdentity != "@alice:example.com" {
+			t.Errorf("msg.LiveKitIdentity = %q, want @alice:example.com",
+				ev.msg.LiveKitIdentity)
+		}
+	default:
+		t.Fatal("expected event on sfuEventCh, got none")
+	}
+}
+
+// TestHandleSfuWebhook_AuthFailure verifies that a request without a valid
+// signature (e.g. missing Authorization header) is silently dropped — the
+// handler returns and no event reaches sfuEventCh.
+func TestHandleSfuWebhook_AuthFailure(t *testing.T) {
+	h := newSfuWebhookTestHandler("test-key", "test-secret")
+	defer h.cancel()
+
+	// No Authorization header → ReceiveWebhookEvent fails fast.
+	req := httptest.NewRequest("POST", "/sfu_webhook", bytes.NewReader([]byte("{}")))
+	h.handleSfuWebhook(httptest.NewRecorder(), req)
+
+	select {
+	case ev := <-h.sfuEventCh:
+		t.Errorf("unauthenticated request was routed: %+v", ev)
+	default:
+	}
+}
+
+// TestHandleSfuWebhook_UnknownEvent verifies that webhook event types which
+// sfuEventFromWebhook does not translate (e.g. room_started) are silently
+// dropped before reaching sfuEventCh.
+func TestHandleSfuWebhook_UnknownEvent(t *testing.T) {
+	const key, secret = "test-key", "test-secret"
+	h := newSfuWebhookTestHandler(key, secret)
+	defer h.cancel()
+
+	event := &livekit.WebhookEvent{
+		Event: "room_started",
+		Room:  &livekit.Room{Name: "test-room"},
+	}
+	req := signedSfuWebhookRequest(t, key, secret, event)
+	h.handleSfuWebhook(httptest.NewRecorder(), req)
+
+	select {
+	case ev := <-h.sfuEventCh:
+		t.Errorf("non-routable event reached sfuEventCh: %+v", ev)
+	default:
+	}
+}
+
+// TestHandleSfuWebhook_ShutdownDrop covers the ctx.Done() branch of the
+// routing select: when the handler is shut down and sfuEventCh is full, the
+// inbound webhook must not block — the send is abandoned via ctx.Done() and
+// handleSfuWebhook returns promptly.
+func TestHandleSfuWebhook_ShutdownDrop(t *testing.T) {
+	const key, secret = "test-key", "test-secret"
+	h := newSfuWebhookTestHandler(key, secret)
+	h.cancel() // ctx is Done immediately
+
+	// Fill sfuEventCh so the send case in the select is never ready —
+	// forcing the ctx.Done() branch to win.
+	for i := 0; i < cap(h.sfuEventCh); i++ {
+		h.sfuEventCh <- sfuEventRequest{}
+	}
+
+	event := &livekit.WebhookEvent{
+		Event:       "participant_joined",
+		Room:        &livekit.Room{Name: "shutdown-room"},
+		Participant: &livekit.ParticipantInfo{Identity: "@x"},
+	}
+	req := signedSfuWebhookRequest(t, key, secret, event)
+
+	done := make(chan struct{})
+	go func() {
+		h.handleSfuWebhook(httptest.NewRecorder(), req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleSfuWebhook blocked after handler shutdown")
 	}
 }
 
