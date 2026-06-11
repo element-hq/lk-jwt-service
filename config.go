@@ -119,12 +119,11 @@ func parseConfig() (*Config, error) {
 
 	var sanityCheckInterval time.Duration
 	if s := os.Getenv("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS"); s != "" {
-		if secs, err := strconv.Atoi(s); err != nil || secs <= 0 {
-			return nil, fmt.Errorf("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a positive integer, got %q", s)
-		} else {
-			sanityCheckInterval = time.Duration(secs) * time.Second
-			slog.Info("Sanity check enabled", "interval", sanityCheckInterval)
+		secs, err := strconv.Atoi(s)
+		if err != nil || secs < 0 {
+			return nil, fmt.Errorf("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a non-negative integer, got %q", s)
 		}
+		sanityCheckInterval = time.Duration(secs) * time.Second
 	}
 
 	return &Config{

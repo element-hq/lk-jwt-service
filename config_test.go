@@ -217,10 +217,10 @@ func TestParseConfig(t *testing.T) {
 				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "not-a-number",
 				"LIVEKIT_FULL_ACCESS_HOMESERVERS":       "*",
 			},
-			wantErrMsg: `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a positive integer, got "not-a-number"`,
+			wantErrMsg: `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a non-negative integer, got "not-a-number"`,
 		},
 		{
-			name: "Sanity check interval zero rejected",
+			name: "Sanity check interval zero disables",
 			env: map[string]string{
 				"LIVEKIT_KEY":                           "test_key",
 				"LIVEKIT_SECRET":                        "test_secret",
@@ -228,7 +228,25 @@ func TestParseConfig(t *testing.T) {
 				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "0",
 				"LIVEKIT_FULL_ACCESS_HOMESERVERS":       "*",
 			},
-			wantErrMsg: `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a positive integer, got "0"`,
+			wantConfig: &Config{
+				Key:                   "test_key",
+				Secret:                "test_secret",
+				LkUrl:                 "wss://test.livekit.cloud",
+				FullAccessHomeservers: []string{"*"},
+				LkJwtBind:             ":8080",
+				SanityCheckInterval:   0,
+			},
+		},
+		{
+			name: "Sanity check interval negative rejected",
+			env: map[string]string{
+				"LIVEKIT_KEY":                           "test_key",
+				"LIVEKIT_SECRET":                        "test_secret",
+				"LIVEKIT_URL":                           "wss://test.livekit.cloud",
+				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "-1",
+				"LIVEKIT_FULL_ACCESS_HOMESERVERS":       "*",
+			},
+			wantErrMsg: `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a non-negative integer, got "-1"`,
 		},
 	}
 

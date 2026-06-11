@@ -62,12 +62,16 @@ func main() {
 		config.SanityCheckInterval,
 	)
 
+	sanityCheckIntervalDisplay := "disabled"
+	if config.SanityCheckInterval > 0 {
+		sanityCheckIntervalDisplay = config.SanityCheckInterval.String()
+	}
 	slog.Info("Starting service",
 		"LIVEKIT_URL", config.LkUrl,
 		"LIVEKIT_JWT_BIND", config.LkJwtBind,
 		"LIVEKIT_FULL_ACCESS_HOMESERVERS", config.FullAccessHomeservers,
 		"SkipVerifyTLS", config.SkipVerifyTLS,
-		"SanityCheckInterval", config.SanityCheckInterval,
+		"SanityCheckInterval", sanityCheckIntervalDisplay,
 	)
 
 	log.Fatal(http.ListenAndServe(config.LkJwtBind, handler.prepareMux()))
