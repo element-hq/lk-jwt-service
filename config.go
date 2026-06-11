@@ -63,6 +63,8 @@ func readKeySecret() (string, string) {
 			}
 			slog.Info("Using LiveKit API key from LIVEKIT_KEY_FROM_FILE", "keyPath", keyPath)
 			key = string(keyBytes)
+		} else {
+			slog.Info("Using LiveKit API key from LIVEKIT_KEY")
 		}
 		if secretPath != "" {
 			secretBytes, err := os.ReadFile(secretPath)
@@ -71,6 +73,8 @@ func readKeySecret() (string, string) {
 			}
 			slog.Info("Using LiveKit API secret from LIVEKIT_SECRET_FROM_FILE", "secretPath", secretPath)
 			secret = string(secretBytes)
+		} else {
+			slog.Info("Using LiveKit API secret from LIVEKIT_SECRET")
 		}
 	}
 
@@ -92,7 +96,7 @@ func parseConfig() (*Config, error) {
 	lkUrl := os.Getenv("LIVEKIT_URL")
 
 	if key == "" || secret == "" || lkUrl == "" {
-		return nil, fmt.Errorf("LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL must be set")
+		return nil, fmt.Errorf("LIVEKIT_KEY* / LIVEKIT_SECRET* and LIVEKIT_URL must be set")
 	}
 
 	fullAccessHomeservers := os.Getenv("LIVEKIT_FULL_ACCESS_HOMESERVERS")
