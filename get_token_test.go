@@ -170,7 +170,7 @@ func TestHandleGetToken_UnauthorizedUser(t *testing.T) {
 
 // TestHandleGetToken_RestrictedUser verifies that a request from a homeserver
 // that is not on the full-access list, with delayed-event delegation params,
-// returns 400 / M_BAD_JSON.  Delegation is gated on full-access; restricted
+// returns 400 / M_BAD_JSON. Delegation is gated on full-access; restricted
 // users may join existing rooms but not delegate delayed-event handling.
 func TestHandleGetToken_RestrictedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
@@ -290,7 +290,7 @@ func TestProcessSFURequest(t *testing.T) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// validSFURequest returns a fully populated, valid request.  The default
+// validSFURequest returns a fully populated, valid request. The default
 // homeserver is "example.com" (matches newGetTokenHandler's full-access list).
 func validSFURequest() SFURequest {
 	return SFURequest{

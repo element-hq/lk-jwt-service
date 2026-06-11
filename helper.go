@@ -6,7 +6,7 @@
 
 // helper.go: cross-cutting helpers shared by request handlers and the
 // delayed-event manager — ID generation, LiveKit SDK wrappers, Matrix
-// CS-API calls.  The exported `var X = func(...)` patterns exist so
+// CS-API calls. The exported `var X = func(...)` patterns exist so
 // tests can swap them; this is slated to move to interface-based
 // injection in a later step.
 
@@ -90,7 +90,7 @@ var exchangeOpenIdUserInfo = func(
 
 var unpaddedBase64 = base64.StdEncoding.WithPadding(base64.NoPadding)
 
-// marshalStrings marshals a slice of strings to JSON.  json.Marshal of
+// marshalStrings marshals a slice of strings to JSON. json.Marshal of
 // []string is total — string has no MarshalJSON hook, no cycles are possible,
 // no unsupported types can appear — so the error return is discarded.
 func marshalStrings(ss []string) []byte {
@@ -220,7 +220,7 @@ var LiveKitParticipantExists = func(
 // The status code is returned alongside err so callers can log it.
 var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action DelayEventAction) (int, error) {
 	// url.JoinPath path-escapes delayID, preventing path-traversal attacks since
-	// delayID is attacker-controlled.  action is a typed constant and safe.
+	// delayID is attacker-controlled. action is a typed constant and safe.
 	endpoint, err := url.JoinPath(csAPIURL, DelayedEventsEndpoint, delayID, string(action))
 	if err != nil {
 		return 0, fmt.Errorf("ExecuteDelayedEventAction: invalid URL: %w", err)
@@ -259,7 +259,7 @@ var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action Del
 
 	case resp.StatusCode >= 500 && resp.StatusCode < 600:
 		// Any 5xx is transient (CS API restart, DB lock, load-balancer hiccup,
-		// upstream timeout).  Let backoff.Retry retry on its default schedule.
+		// upstream timeout). Let backoff.Retry retry on its default schedule.
 		return resp.StatusCode, fmt.Errorf(
 			"CS API temporarily unavailable (http status code %d)", resp.StatusCode)
 
@@ -282,10 +282,10 @@ var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action Del
 			return resp.StatusCode, backoff.RetryAfter(int(d.Seconds()))
 		}
 		// Matrix-spec fallback: M_LIMIT_EXCEEDED carries retry_after_ms in
-		// the response body.  Deprecated in spec v1.10 in favour of
+		// the response body. Deprecated in spec v1.10 in favour of
 		// Retry-After, but still emitted by Synapse / Dendrite / Conduit for
 		// backwards compatibility — and the only signal from older
-		// homeservers.  Best-effort: decode once; ignore failures.
+		// homeservers. Best-effort: decode once; ignore failures.
 		var mErr struct {
 			ErrCode      string `json:"errcode"`
 			RetryAfterMs int    `json:"retry_after_ms"`

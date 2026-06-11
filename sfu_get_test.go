@@ -9,7 +9,7 @@
 // full POST happy-path (with JWT inspection), and the underlying
 // Handler.processLegacySFURequest method (handler.go).
 //
-// Deprecated: this endpoint is pre-Matrix-2.0.  When /sfu/get is removed
+// Deprecated: this endpoint is pre-Matrix-2.0. When /sfu/get is removed
 // (see // Deprecated comments on LegacySFURequest / handle_legacy /
 // processLegacySFURequest), delete this file too.
 

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// main.go: process entry point.  Sets up structured logging, parses the
+// main.go: process entry point. Sets up structured logging, parses the
 // environment-driven Config (see config.go), constructs a Handler (see
 // handler.go), and serves it.
 

@@ -8,7 +8,7 @@
 //
 // Handler owns the actor-model jobs map (only loop() reads/writes it),
 // routes incoming requests, generates LiveKit JWTs, and delegates to the
-// delayed-event manager for leave-event handling.  This file also contains
+// delayed-event manager for leave-event handling. This file also contains
 // LiveKitAuth (Handler's auth bundle) and getJoinToken (the JWT minter)
 // because they only make sense as Handler's internals.
 
@@ -50,7 +50,7 @@ func writeMatrixError(w http.ResponseWriter, status int, errCode string, errMsg 
 }
 
 // writeIfMatrixError unwraps err as a *MatrixErrorResponse and writes the
-// corresponding HTTP response; returns true if it wrote.  Non-Matrix errors
+// corresponding HTTP response; returns true if it wrote. Non-Matrix errors
 // are silently dropped (response unwritten) — callers always return after
 // calling this regardless of the bool.
 func writeIfMatrixError(w http.ResponseWriter, err error) bool {
@@ -89,7 +89,7 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 // # Concurrency model
 //
 // Handler.loop() is the single goroutine that owns the jobs map — no mutex
-// needed.  HTTP handler goroutines communicate with loop() exclusively through
+// needed. HTTP handler goroutines communicate with loop() exclusively through
 // channels:
 //
 //   - addJobCh:   deliver new DelayedEventJobParams to loop(), which creates a
@@ -163,7 +163,7 @@ func (h *Handler) loop() {
 	// loopWg.Wait() in the ctx.Done() teardown path ensures no goroutine still
 	// references global function variables (e.g. LiveKitListParticipants,
 	// ExecuteDelayedEventAction) after Handler.Close() returns, which is
-	// required for test safety.  Participant-lookup goroutines are tracked by
+	// required for test safety. Participant-lookup goroutines are tracked by
 	// job.backgroundWg and are therefore also waited on (loop() calls backgroundWg.Wait()
 	// before it returns).
 	var loopWg sync.WaitGroup
@@ -324,7 +324,7 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 }
 
 // Deprecated: processLegacySFURequest serves the pre-Matrix-2.0 /sfu/get
-// endpoint.  Remove once all in-the-wild clients have migrated to /get_token.
+// endpoint. Remove once all in-the-wild clients have migrated to /get_token.
 func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
 	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
 	if err != nil {
@@ -573,7 +573,7 @@ func (h *Handler) handleDelegateDelayedLeave(w http.ResponseWriter, r *http.Requ
 }
 
 // corsJSON adds the four standard CORS + JSON headers used by every POST
-// endpoint and short-circuits the CORS preflight (OPTIONS) with 200.  Any
+// endpoint and short-circuits the CORS preflight (OPTIONS) with 200. Any
 // other method falls through to next.
 func corsJSON(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -681,7 +681,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // sfuEventFromWebhook translates a validated LiveKit webhook event into an
-// (roomAlias, SFUMessage) pair.  Returns ok=false for event types that do
+// (roomAlias, SFUMessage) pair. Returns ok=false for event types that do
 // not require routing (e.g. room events, unknown types).
 func sfuEventFromWebhook(event *livekit.WebhookEvent) (LiveKitRoomAlias, SFUMessage, bool) {
 	// https://docs.livekit.io/intro/basics/rooms-participants-tracks/webhooks-events/#webhook-events

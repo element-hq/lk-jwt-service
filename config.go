@@ -30,7 +30,7 @@ type Config struct {
 	FullAccessHomeservers []string
 	LkJwtBind             string
 	// SanityCheckInterval is the period at which the job worker re-checks
-	// whether connected participants are still present on the SFU.  Zero (the
+	// whether connected participants are still present on the SFU. Zero (the
 	// default) disables the sanity check entirely.
 	// Configure via LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS (unit: seconds).
 	SanityCheckInterval time.Duration

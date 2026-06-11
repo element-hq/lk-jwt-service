@@ -6,7 +6,7 @@
 
 // handler_test.go: cross-cutting tests for Handler infrastructure —
 // healthcheck, IsFullAccessUser, getJoinToken, the Handler.loop() actor
-// lifecycle, sfuEventFromWebhook translation.  Endpoint-specific tests
+// lifecycle, sfuEventFromWebhook translation. Endpoint-specific tests
 // live next to their endpoint:
 //
 //   - /get_token                       → get_token_test.go
@@ -212,7 +212,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 // ── Handler.Close() timeout branch ───────────────────────────────────────────
 
 // TestHandler_Close_Timeout verifies that Close() logs a warning and returns
-// after 10 s when loop() never exits.  We simulate this by constructing a
+// after 10 s when loop() never exits. We simulate this by constructing a
 // Handler whose loopDone channel is never closed.
 func TestHandler_Close_Timeout(t *testing.T) {
 	if testing.Short() {
@@ -374,7 +374,7 @@ func TestSfuEventFromWebhook_UnknownEvent(t *testing.T) {
 
 // signedSfuWebhookRequest builds a POST /sfu_webhook request signed using the
 // LiveKit webhook protocol: protojson-encoded body, SHA-256 of the body
-// embedded in an AccessToken JWT in the Authorization header.  Mirrors
+// embedded in an AccessToken JWT in the Authorization header. Mirrors
 // webhook.URLNotifier's signing logic so ReceiveWebhookEvent accepts it.
 func signedSfuWebhookRequest(t *testing.T, key, secret string, event *livekit.WebhookEvent) *http.Request {
 	t.Helper()
@@ -523,7 +523,7 @@ func TestHandleSfuWebhook_ShutdownDrop(t *testing.T) {
 // ── Handler.loop() job lifecycle ─────────────────────────────────────────────
 
 // TestHandler_loop_AllJobsClosedOnShutdown verifies that handler.Close() waits
-// for ALL participant-lookup goroutines to fully exit before returning.  This prevents
+// for ALL participant-lookup goroutines to fully exit before returning. This prevents
 // races on global function variables (e.g. LiveKitParticipantExists) between
 // lookup goroutines and test cleanup.
 func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
@@ -633,7 +633,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 
 // TestHandler_loop_JobReplacement_NoDeadlock verifies that replacing a job for
 // the same (room, identity) slot and then calling handler.Close() does not
-// deadlock.  A stale doneCh signal from the old job must be ignored (pointer
+// deadlock. A stale doneCh signal from the old job must be ignored (pointer
 // equality check in the doneCh case of loop()).
 func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 	originalLookup := LiveKitParticipantExists

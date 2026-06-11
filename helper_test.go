@@ -294,7 +294,7 @@ func TestExecuteDelayedEventAction_404OnSend(t *testing.T) {
 // TestExecuteDelayedEventAction_404OnRestart verifies that a 404 for
 // ActionRestart returns the errDelayedEventNotFound sentinel so callers
 // can map it to DelayedEventNotFound (vs. the generic transient/permanent
-// failure path).  This is the contract differentiator from 404-on-Send,
+// failure path). This is the contract differentiator from 404-on-Send,
 // which is treated as success per MSC-4140.
 func TestExecuteDelayedEventAction_404OnRestart(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -512,7 +512,7 @@ func TestExecuteDelayedEventAction_500InternalServerError(t *testing.T) {
 // TestExecuteDelayedEventAction_5xxAreAllTransient verifies that the
 // generalized "any 5xx" branch returns a transient error for the common
 // retryable codes — 500, 502, 503, 504 — plus a less common one (507)
-// to lock the contract in place.  None of these is a *backoff.RetryAfterError;
+// to lock the contract in place. None of these is a *backoff.RetryAfterError;
 // they all let backoff.Retry use its default schedule.
 func TestExecuteDelayedEventAction_5xxAreAllTransient(t *testing.T) {
 	for _, code := range []int{
@@ -547,7 +547,7 @@ func TestExecuteDelayedEventAction_5xxAreAllTransient(t *testing.T) {
 // catch-all branch: any status code the switch doesn't classify (genuine
 // transients like 408 / 421 / 423 / 425, oddball 4xx like 400 / 418, …)
 // returns a non-Permanent error so backoff.Retry keeps trying until
-// WithMaxElapsedTime expires.  Locks in two things at once:
+// WithMaxElapsedTime expires. Locks in two things at once:
 //
 //   - the explicit-success contract (nil err means success — these don't
 //     silently slip through);
@@ -625,7 +625,7 @@ func TestExecuteDelayedEventAction_ContentType(t *testing.T) {
 
 // TestExchangeOpenIdUserInfo_Success verifies the end-to-end OpenID userinfo
 // lookup: exchangeOpenIdUserInfo builds the correct federation request, parses
-// the response body, and returns the sub.  Endpoint happy-path tests mock
+// the response body, and returns the sub. Endpoint happy-path tests mock
 // this function to focus on endpoint behaviour — this is its dedicated home.
 func TestExchangeOpenIdUserInfo_Success(t *testing.T) {
 	const accessToken = "testAccessToken"

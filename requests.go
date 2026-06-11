@@ -7,7 +7,7 @@
 // requests.go: HTTP request / response DTOs used by the handler —
 // SFURequest, DelegateDelayedLeaveRequest, LegacySFURequest,
 // SFUResponse, MatrixErrorResponse — together with their Validate()
-// methods.  Each type lives next to its validator (idiomatic Go).
+// methods. Each type lives next to its validator (idiomatic Go).
 
 package main
 
@@ -30,7 +30,7 @@ type OpenIDTokenType struct {
 }
 
 // Deprecated: LegacySFURequest is the request body for /sfu/get, the
-// pre-Matrix-2.0 endpoint.  Remove once all in-the-wild clients have
+// pre-Matrix-2.0 endpoint. Remove once all in-the-wild clients have
 // migrated to /get_token (SFURequest).
 type LegacySFURequest struct {
 	Room          string          `json:"room"`
@@ -62,7 +62,7 @@ type SFUResponse struct {
 // needed and the LiveKit room already exists.
 //
 // All three delayed-event fields are mandatory (unlike SFURequest where they
-// are optional).  The participant is assumed to be already present on the SFU,
+// are optional). The participant is assumed to be already present on the SFU,
 // so the participant-lookup goroutine uses its backoff to confirm presence
 // rather than waiting for the webhook (which has already fired).
 type DelegateDelayedLeaveRequest struct {

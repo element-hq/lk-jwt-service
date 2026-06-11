@@ -130,11 +130,11 @@ type jobKey struct {
 // performs Phase-1 and Phase-2 participant checks for the given job.
 //
 //   - Phase 1: calls LiveKitParticipantExists with exponential backoff until
-//     the identity is present or job.DelayTimeout elapses.  On success sends
+//     the identity is present or job.DelayTimeout elapses. On success sends
 //     ParticipantLookupSuccessful to job.EventChannel.
 //   - Phase 2: at every sanityInterval tick, calls LiveKitParticipantExists;
 //     if the identity is confirmed absent (SFU returned NotFound), sends
-//     SFUParticipantGone.  Transport errors are logged and ignored.
+//     SFUParticipantGone. Transport errors are logged and ignored.
 //     Disabled when sanityInterval == 0.
 //
 // Communication is identical to SFU webhooks — signals are sent on
@@ -190,7 +190,7 @@ func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInte
 		// Phase 2: periodic sanity checks (disabled when sanityInterval == 0).
 		//
 		// Only emit SFUParticipantGone when the SFU confirms absence
-		// ((false, nil) from LiveKitParticipantExists).  Transport errors
+		// ((false, nil) from LiveKitParticipantExists). Transport errors
 		// are logged and ignored — a transient blip should not tear the
 		// job down prematurely.
 		if sanityInterval == 0 {
@@ -229,9 +229,9 @@ func startParticipantLookup(job *DelayedEventJob, lkAuth LiveKitAuth, sanityInte
 // ── DelayedEventJob ──────────────────────────────────────────────────────────
 
 // DelayedEventJobParams is the immutable bundle of inputs needed to construct
-// a DelayedEventJob.  Built by request handlers in main.go and handed to
+// a DelayedEventJob. Built by request handlers in main.go and handed to
 // Handler.addDelayedEventJob, which forwards it to Handler.loop() and
-// NewDelayedEventJob.  Embedded into DelayedEventJob so its fields are
+// NewDelayedEventJob. Embedded into DelayedEventJob so its fields are
 // promoted (job.LiveKitRoom etc. resolve here without going through .Params).
 type DelayedEventJobParams struct {
 	DelayId         string
@@ -247,11 +247,11 @@ type DelayedEventJobParams struct {
 // # Actor model
 //
 // A single goroutine — started via loop() — is the sole owner of all mutable
-// state (current FSM state, timers, …).  No mutex is needed for that state
+// state (current FSM state, timers, …). No mutex is needed for that state
 // because nothing outside that goroutine touches it.
 //
 // External callers communicate with the job exclusively through its
-// EventChannel (write-only from the outside).  loop() reads from that channel
+// EventChannel (write-only from the outside). loop() reads from that channel
 // and drives the FSM.
 //
 // # Lifecycle
@@ -351,7 +351,7 @@ type DelayedEventJob struct {
 	cancel context.CancelFunc
 
 	// doneCh signals Handler.loop() when the job enters a terminal state
-	// (Disconnected after ActionSend completes, or Completed).  The job sends
+	// (Disconnected after ActionSend completes, or Aborted). The job sends
 	// a pointer to itself so the Handler can verify it is still the active job
 	// for this (room, identity) before cancelling and cleaning it up.
 	doneCh chan<- *DelayedEventJob
@@ -436,7 +436,7 @@ func (job *DelayedEventJob) loop() {
 		select {
 		case <-job.ctx.Done():
 			job.stopTimers()
-			// Wait for all background goroutines to finish.  They all use
+			// Wait for all background goroutines to finish. They all use
 			// job.ctx which is now cancelled, so they will exit promptly.
 			job.backgroundWg.Wait()
 			slog.Debug("Job: Loop exiting", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
