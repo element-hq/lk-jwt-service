@@ -176,7 +176,7 @@ func TestParseConfig(t *testing.T) {
 			env: map[string]string{
 				"LIVEKIT_KEY": "test_key",
 			},
-			wantErrMsg: "LIVEKIT_KEY[_FILE], LIVEKIT_SECRET[_FILE] and LIVEKIT_URL must be set",
+			wantErrMsg: "LIVEKIT_KEY* / LIVEKIT_SECRET* and LIVEKIT_URL must be set",
 		},
 		{
 			name: "Conflicting bind configuration",
