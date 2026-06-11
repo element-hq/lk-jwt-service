@@ -101,72 +101,72 @@ func TestSFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
 	}
 }
 
-// ── MembershipLeaveDelegationRequest.Validate() ───────────────────────────────
+// ── DelegateDelayedLeaveRequest.Validate() ───────────────────────────────
 
-func TestMembershipLeaveDelegationRequest_Validate_Valid(t *testing.T) {
-	req := validMembershipLeaveDelegationRequest()
+func TestDelegateDelayedLeaveRequest_Validate_Valid(t *testing.T) {
+	req := validDelegateDelayedLeaveRequest()
 	if err := req.Validate(); err != nil {
 		t.Errorf("expected no error for valid request, got: %v", err)
 	}
 }
 
-func TestMembershipLeaveDelegationRequest_Validate_MissingRoomID(t *testing.T) {
-	req := validMembershipLeaveDelegationRequest()
+func TestDelegateDelayedLeaveRequest_Validate_MissingRoomID(t *testing.T) {
+	req := validDelegateDelayedLeaveRequest()
 	req.RoomID = ""
 	assertValidationError(t, req.Validate(), "M_BAD_JSON")
 }
 
-func TestMembershipLeaveDelegationRequest_Validate_MissingSlotID(t *testing.T) {
-	req := validMembershipLeaveDelegationRequest()
+func TestDelegateDelayedLeaveRequest_Validate_MissingSlotID(t *testing.T) {
+	req := validDelegateDelayedLeaveRequest()
 	req.SlotID = ""
 	assertValidationError(t, req.Validate(), "M_BAD_JSON")
 }
 
-func TestMembershipLeaveDelegationRequest_Validate_MissingMemberFields(t *testing.T) {
+func TestDelegateDelayedLeaveRequest_Validate_MissingMemberFields(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*MembershipLeaveDelegationRequest)
+		mutate func(*DelegateDelayedLeaveRequest)
 	}{
-		{"missing ID", func(r *MembershipLeaveDelegationRequest) { r.Member.ID = "" }},
-		{"missing ClaimedUserID", func(r *MembershipLeaveDelegationRequest) { r.Member.ClaimedUserID = "" }},
-		{"missing ClaimedDeviceID", func(r *MembershipLeaveDelegationRequest) { r.Member.ClaimedDeviceID = "" }},
+		{"missing ID", func(r *DelegateDelayedLeaveRequest) { r.Member.ID = "" }},
+		{"missing ClaimedUserID", func(r *DelegateDelayedLeaveRequest) { r.Member.ClaimedUserID = "" }},
+		{"missing ClaimedDeviceID", func(r *DelegateDelayedLeaveRequest) { r.Member.ClaimedDeviceID = "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := validMembershipLeaveDelegationRequest()
+			req := validDelegateDelayedLeaveRequest()
 			tc.mutate(&req)
 			assertValidationError(t, req.Validate(), "M_BAD_JSON")
 		})
 	}
 }
 
-func TestMembershipLeaveDelegationRequest_Validate_MissingOpenIDToken(t *testing.T) {
+func TestDelegateDelayedLeaveRequest_Validate_MissingOpenIDToken(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*MembershipLeaveDelegationRequest)
+		mutate func(*DelegateDelayedLeaveRequest)
 	}{
-		{"missing AccessToken", func(r *MembershipLeaveDelegationRequest) { r.OpenIDToken.AccessToken = "" }},
-		{"missing MatrixServerName", func(r *MembershipLeaveDelegationRequest) { r.OpenIDToken.MatrixServerName = "" }},
+		{"missing AccessToken", func(r *DelegateDelayedLeaveRequest) { r.OpenIDToken.AccessToken = "" }},
+		{"missing MatrixServerName", func(r *DelegateDelayedLeaveRequest) { r.OpenIDToken.MatrixServerName = "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := validMembershipLeaveDelegationRequest()
+			req := validDelegateDelayedLeaveRequest()
 			tc.mutate(&req)
 			assertValidationError(t, req.Validate(), "M_BAD_JSON")
 		})
 	}
 }
 
-func TestMembershipLeaveDelegationRequest_Validate_MissingDelayedEventParams(t *testing.T) {
+func TestDelegateDelayedLeaveRequest_Validate_MissingDelayedEventParams(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*MembershipLeaveDelegationRequest)
+		mutate func(*DelegateDelayedLeaveRequest)
 	}{
-		{"missing DelayId", func(r *MembershipLeaveDelegationRequest) { r.DelayId = "" }},
-		{"zero DelayTimeout", func(r *MembershipLeaveDelegationRequest) { r.DelayTimeout = 0 }},
-		{"negative DelayTimeout", func(r *MembershipLeaveDelegationRequest) { r.DelayTimeout = -1 }},
-		{"missing DelayCsApiUrl", func(r *MembershipLeaveDelegationRequest) { r.DelayCsApiUrl = "" }},
+		{"missing DelayId", func(r *DelegateDelayedLeaveRequest) { r.DelayId = "" }},
+		{"zero DelayTimeout", func(r *DelegateDelayedLeaveRequest) { r.DelayTimeout = 0 }},
+		{"negative DelayTimeout", func(r *DelegateDelayedLeaveRequest) { r.DelayTimeout = -1 }},
+		{"missing DelayCsApiUrl", func(r *DelegateDelayedLeaveRequest) { r.DelayCsApiUrl = "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := validMembershipLeaveDelegationRequest()
+			req := validDelegateDelayedLeaveRequest()
 			tc.mutate(&req)
 			assertValidationError(t, req.Validate(), "M_BAD_JSON")
 		})

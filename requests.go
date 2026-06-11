@@ -5,7 +5,7 @@
 // Please see LICENSE files in the repository root for full details.
 
 // requests.go: HTTP request / response DTOs used by the handler —
-// SFURequest, MembershipLeaveDelegationRequest, LegacySFURequest,
+// SFURequest, DelegateDelayedLeaveRequest, LegacySFURequest,
 // SFUResponse, MatrixErrorResponse — together with their Validate()
 // methods.  Each type lives next to its validator (idiomatic Go).
 
@@ -56,7 +56,7 @@ type SFUResponse struct {
 	JWT string `json:"jwt"`
 }
 
-// MembershipLeaveDelegationRequest is the body of POST /membership_leave_delegation.
+// DelegateDelayedLeaveRequest is the body of POST /delegate_delayed_leave.
 // It is used when the client is already connected to the SFU and wants to
 // hand over the delayed disconnect event after the fact — i.e. no JWT is
 // needed and the LiveKit room already exists.
@@ -65,7 +65,7 @@ type SFUResponse struct {
 // are optional).  The participant is assumed to be already present on the SFU,
 // so the participant-lookup goroutine uses its backoff to confirm presence
 // rather than waiting for the webhook (which has already fired).
-type MembershipLeaveDelegationRequest struct {
+type DelegateDelayedLeaveRequest struct {
 	RoomID        string              `json:"room_id"`
 	SlotID        string              `json:"slot_id"`
 	OpenIDToken   OpenIDTokenType     `json:"openid_token"`
@@ -75,7 +75,7 @@ type MembershipLeaveDelegationRequest struct {
 	DelayCsApiUrl string              `json:"delay_cs_api_url"`
 }
 
-func (r *MembershipLeaveDelegationRequest) Validate() error {
+func (r *DelegateDelayedLeaveRequest) Validate() error {
 	if r.RoomID == "" || r.SlotID == "" {
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,

@@ -168,7 +168,7 @@ webhook:
 >   `LIVEKIT_KEY` this service is started with. Webhook payloads are
 >   signed by the SFU and verified here.
 > - Without this wiring, `/get_token`, `/sfu/get` and
->   `/membership_leave_delegation` the service cannot observe participant
+>   `/delegate_delayed_leave` the service cannot observe participant
 >   disconnects and therefore cannot send the delegated leave event. The
 >   `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS` pull-based fallback partially
 >   mitigates this.

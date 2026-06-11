@@ -4,9 +4,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// membership_leave_delegation_test.go: tests for the
-// POST /membership_leave_delegation endpoint and its supporting types
-// (handler.go: handleMembershipLeaveDelegation, processMembershipLeaveDelegation).
+// delegate_delayed_leave_test.go: tests for the
+// POST /delegate_delayed_leave endpoint and its supporting types
+// (handler.go: handleDelegateDelayedLeave, processDelegateDelayedLeave).
 
 package main
 
@@ -22,11 +22,11 @@ import (
 	"github.com/matrix-org/gomatrixserverlib/fclient"
 )
 
-// ── handleMembershipLeaveDelegation HTTP handler ───────────────────────────────────
+// ── handleDelegateDelayedLeave HTTP handler ───────────────────────────────────
 
-func TestHandleMembershipLeaveDelegation_Options(t *testing.T) {
-	handler := newMembershipLeaveDelegationHandler(t)
-	req := httptest.NewRequest("OPTIONS", "/membership_leave_delegation", nil)
+func TestHandleDelegateDelayedLeave_Options(t *testing.T) {
+	handler := newDelegateDelayedLeaveHandler(t)
+	req := httptest.NewRequest("OPTIONS", "/delegate_delayed_leave", nil)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -34,10 +34,10 @@ func TestHandleMembershipLeaveDelegation_Options(t *testing.T) {
 	}
 }
 
-func TestHandleMembershipLeaveDelegation_MethodNotAllowed(t *testing.T) {
-	handler := newMembershipLeaveDelegationHandler(t)
+func TestHandleDelegateDelayedLeave_MethodNotAllowed(t *testing.T) {
+	handler := newDelegateDelayedLeaveHandler(t)
 	for _, method := range []string{"GET", "PUT", "DELETE"} {
-		req := httptest.NewRequest(method, "/membership_leave_delegation", nil)
+		req := httptest.NewRequest(method, "/delegate_delayed_leave", nil)
 		rr := httptest.NewRecorder()
 		handler.prepareMux().ServeHTTP(rr, req)
 		if rr.Code != http.StatusMethodNotAllowed {
@@ -46,9 +46,9 @@ func TestHandleMembershipLeaveDelegation_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestHandleMembershipLeaveDelegation_InvalidJSON(t *testing.T) {
-	handler := newMembershipLeaveDelegationHandler(t)
-	req := httptest.NewRequest("POST", "/membership_leave_delegation", bytes.NewBufferString("{bad json}"))
+func TestHandleDelegateDelayedLeave_InvalidJSON(t *testing.T) {
+	handler := newDelegateDelayedLeaveHandler(t)
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", bytes.NewBufferString("{bad json}"))
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -56,10 +56,10 @@ func TestHandleMembershipLeaveDelegation_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestHandleMembershipLeaveDelegation_MissingFields(t *testing.T) {
-	handler := newMembershipLeaveDelegationHandler(t)
+func TestHandleDelegateDelayedLeave_MissingFields(t *testing.T) {
+	handler := newDelegateDelayedLeaveHandler(t)
 	body, _ := json.Marshal(map[string]interface{}{})
-	req := httptest.NewRequest("POST", "/membership_leave_delegation", bytes.NewReader(body))
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -67,18 +67,18 @@ func TestHandleMembershipLeaveDelegation_MissingFields(t *testing.T) {
 	}
 }
 
-func TestHandleMembershipLeaveDelegation_UnauthorizedUser(t *testing.T) {
+func TestHandleDelegateDelayedLeave_UnauthorizedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@real:example.com"}, nil
 	}
 
-	handler := newMembershipLeaveDelegationHandler(t)
-	body := marshalMembershipLeaveDelegationRequest(t, func(r *MembershipLeaveDelegationRequest) {
+	handler := newDelegateDelayedLeaveHandler(t)
+	body := marshalDelegateDelayedLeaveRequest(t, func(r *DelegateDelayedLeaveRequest) {
 		r.Member.ClaimedUserID = "@attacker:example.com" // mismatch
 	})
-	req := httptest.NewRequest("POST", "/membership_leave_delegation", body)
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", body)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
@@ -86,7 +86,7 @@ func TestHandleMembershipLeaveDelegation_UnauthorizedUser(t *testing.T) {
 	}
 }
 
-func TestHandleMembershipLeaveDelegation_RestrictedUser(t *testing.T) {
+func TestHandleDelegateDelayedLeave_RestrictedUser(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
@@ -94,12 +94,12 @@ func TestHandleMembershipLeaveDelegation_RestrictedUser(t *testing.T) {
 	}
 
 	// Handler configured with only "example.com" as full-access.
-	handler := newMembershipLeaveDelegationHandler(t)
-	body := marshalMembershipLeaveDelegationRequest(t, func(r *MembershipLeaveDelegationRequest) {
+	handler := newDelegateDelayedLeaveHandler(t)
+	body := marshalDelegateDelayedLeaveRequest(t, func(r *DelegateDelayedLeaveRequest) {
 		r.Member.ClaimedUserID = "@user:restricted.com"
 		r.OpenIDToken.MatrixServerName = "restricted.com" // not in full-access list
 	})
-	req := httptest.NewRequest("POST", "/membership_leave_delegation", body)
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", body)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
@@ -107,16 +107,16 @@ func TestHandleMembershipLeaveDelegation_RestrictedUser(t *testing.T) {
 	}
 }
 
-func TestHandleMembershipLeaveDelegation_ExchangeError(t *testing.T) {
+func TestHandleDelegateDelayedLeave_ExchangeError(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return nil, &MatrixErrorResponse{Status: http.StatusUnauthorized, ErrCode: "M_UNAUTHORIZED", Err: "no"}
 	}
 
-	handler := newMembershipLeaveDelegationHandler(t)
-	body := marshalMembershipLeaveDelegationRequest(t, nil)
-	req := httptest.NewRequest("POST", "/membership_leave_delegation", body)
+	handler := newDelegateDelayedLeaveHandler(t)
+	body := marshalDelegateDelayedLeaveRequest(t, nil)
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", body)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
@@ -124,7 +124,7 @@ func TestHandleMembershipLeaveDelegation_ExchangeError(t *testing.T) {
 	}
 }
 
-func TestHandleMembershipLeaveDelegation_Success(t *testing.T) {
+func TestHandleDelegateDelayedLeave_Success(t *testing.T) {
 	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
@@ -139,9 +139,9 @@ func TestHandleMembershipLeaveDelegation_Success(t *testing.T) {
 		return false, ctx.Err()
 	}
 
-	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
-	body := marshalMembershipLeaveDelegationRequest(t, nil)
-	req := httptest.NewRequest("POST", "/membership_leave_delegation", body)
+	handler := newDelegateDelayedLeaveHandler(t) // registers handler.Close last → runs first
+	body := marshalDelegateDelayedLeaveRequest(t, nil)
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", body)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 
@@ -154,9 +154,9 @@ func TestHandleMembershipLeaveDelegation_Success(t *testing.T) {
 	}
 }
 
-// TestHandleMembershipLeaveDelegation_NoJWT verifies that the endpoint does NOT
+// TestHandleDelegateDelayedLeave_NoJWT verifies that the endpoint does NOT
 // return a JWT — differentiating it from /get_token.
-func TestHandleMembershipLeaveDelegation_NoJWT(t *testing.T) {
+func TestHandleDelegateDelayedLeave_NoJWT(t *testing.T) {
 	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
@@ -171,9 +171,9 @@ func TestHandleMembershipLeaveDelegation_NoJWT(t *testing.T) {
 		return false, ctx.Err()
 	}
 
-	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
-	body := marshalMembershipLeaveDelegationRequest(t, nil)
-	req := httptest.NewRequest("POST", "/membership_leave_delegation", body)
+	handler := newDelegateDelayedLeaveHandler(t) // registers handler.Close last → runs first
+	body := marshalDelegateDelayedLeaveRequest(t, nil)
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", body)
 	rr := httptest.NewRecorder()
 	handler.prepareMux().ServeHTTP(rr, req)
 
@@ -193,12 +193,12 @@ func TestHandleMembershipLeaveDelegation_NoJWT(t *testing.T) {
 	}
 }
 
-// ── processMembershipLeaveDelegation unit test ─────────────────────────────────────
+// ── processDelegateDelayedLeave unit test ─────────────────────────────────────
 
-// TestProcessMembershipLeaveDelegation_CreatesJob verifies that a successful call
-// to processMembershipLeaveDelegation hands a job over to the monitor without
+// TestProcessDelegateDelayedLeave_CreatesJob verifies that a successful call
+// to processDelegateDelayedLeave hands a job over to the monitor without
 // creating a LiveKit room or token.
-func TestProcessMembershipLeaveDelegation_CreatesJob(t *testing.T) {
+func TestProcessDelegateDelayedLeave_CreatesJob(t *testing.T) {
 	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
 	originalCreate := CreateLiveKitRoom
 	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
@@ -221,14 +221,14 @@ func TestProcessMembershipLeaveDelegation_CreatesJob(t *testing.T) {
 		return false, ctx.Err()
 	}
 
-	handler := newMembershipLeaveDelegationHandler(t) // registers handler.Close last → runs first
-	req := validMembershipLeaveDelegationRequest()
-	if err := handler.processMembershipLeaveDelegation(&http.Request{}, &req); err != nil {
+	handler := newDelegateDelayedLeaveHandler(t) // registers handler.Close last → runs first
+	req := validDelegateDelayedLeaveRequest()
+	if err := handler.processDelegateDelayedLeave(&http.Request{}, &req); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if createRoomCalled {
-		t.Error("processMembershipLeaveDelegation must NOT call CreateLiveKitRoom")
+		t.Error("processDelegateDelayedLeave must NOT call CreateLiveKitRoom")
 	}
 
 	// Give the job a moment to be registered, then verify the monitor exists.
@@ -237,9 +237,9 @@ func TestProcessMembershipLeaveDelegation_CreatesJob(t *testing.T) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// validMembershipLeaveDelegationRequest returns a fully populated, valid request.
-func validMembershipLeaveDelegationRequest() MembershipLeaveDelegationRequest {
-	return MembershipLeaveDelegationRequest{
+// validDelegateDelayedLeaveRequest returns a fully populated, valid request.
+func validDelegateDelayedLeaveRequest() DelegateDelayedLeaveRequest {
+	return DelegateDelayedLeaveRequest{
 		RoomID: "!testRoom:example.com",
 		SlotID: "m.call#ROOM",
 		OpenIDToken: OpenIDTokenType{
@@ -257,9 +257,9 @@ func validMembershipLeaveDelegationRequest() MembershipLeaveDelegationRequest {
 	}
 }
 
-// newMembershipLeaveDelegationHandler creates a Handler configured for testing
-// the /membership_leave_delegation endpoint, with a LIFO cleanup.
-func newMembershipLeaveDelegationHandler(t *testing.T) *Handler {
+// newDelegateDelayedLeaveHandler creates a Handler configured for testing
+// the /delegate_delayed_leave endpoint, with a LIFO cleanup.
+func newDelegateDelayedLeaveHandler(t *testing.T) *Handler {
 	t.Helper()
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
@@ -271,11 +271,11 @@ func newMembershipLeaveDelegationHandler(t *testing.T) *Handler {
 	return handler
 }
 
-// marshalMembershipLeaveDelegationRequest returns a valid request body with an
+// marshalDelegateDelayedLeaveRequest returns a valid request body with an
 // optional mutation applied before marshalling.
-func marshalMembershipLeaveDelegationRequest(t *testing.T, mutate func(*MembershipLeaveDelegationRequest)) *bytes.Reader {
+func marshalDelegateDelayedLeaveRequest(t *testing.T, mutate func(*DelegateDelayedLeaveRequest)) *bytes.Reader {
 	t.Helper()
-	req := validMembershipLeaveDelegationRequest()
+	req := validDelegateDelayedLeaveRequest()
 	if mutate != nil {
 		mutate(&req)
 	}

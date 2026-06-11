@@ -226,7 +226,7 @@ func (h *Handler) loop() {
 			}()
 			// Pull-based lookup (additionally to SFU webhook)
 			// Phase 1:
-			// - required for `handleMembershipLeaveDelegation` as no SFU webhook is
+			// - required for `handleDelegateDelayedLeave` as no SFU webhook is
 			//   expected for this code path
 			// - safeguard in case of `processLegacySFURequest` and `processSFURequest`
 			//   to minimize impact of transient SFU webhook failures
@@ -482,7 +482,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	return &SFUResponse{URL: h.liveKitAuth.lkUrl, JWT: token}, nil
 }
 
-// processMembershipLeaveDelegation handles the /membership_leave_delegation endpoint.
+// processDelegateDelayedLeave handles the /delegate_delayed_leave endpoint.
 //
 // Unlike processSFURequest it:
 //   - Does NOT issue a JWT (the client is already connected to the SFU).
@@ -493,7 +493,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 // ParticipantConnected SFU webhook has already happened, the participant-lookup
 // goroutine (startParticipantLookup) will use its
 // backoff to confirm presence.
-func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *MembershipLeaveDelegationRequest) error {
+func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDelayedLeaveRequest) error {
 	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
 	if err != nil {
 		return &MatrixErrorResponse{
@@ -504,7 +504,7 @@ func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *Members
 	}
 
 	if req.Member.ClaimedUserID != userInfo.Sub {
-		slog.Warn("Handler: membership_leave_delegation: ClaimedUserID does not match token subject",
+		slog.Warn("Handler: delegate_delayed_leave: ClaimedUserID does not match token subject",
 			"claimedUserId", req.Member.ClaimedUserID, "matrixId", userInfo.Sub)
 		return &MatrixErrorResponse{
 			Status:  http.StatusUnauthorized,
@@ -525,7 +525,7 @@ func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *Members
 	lkIdentity := LiveKitIdentityFor(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
-	slog.Info("Handler: scheduling delayed event job (membership_leave_delegation)",
+	slog.Info("Handler: scheduling delayed event job (delegate_delayed_leave)",
 		"room", lkRoomAlias, "lkId", lkIdentity,
 		"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
@@ -541,19 +541,19 @@ func (h *Handler) processMembershipLeaveDelegation(r *http.Request, req *Members
 	return nil
 }
 
-func (h *Handler) handleMembershipLeaveDelegation(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleDelegateDelayedLeave(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	slog.Debug("Handler: membership_leave_delegation request",
+	slog.Debug("Handler: delegate_delayed_leave request",
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
-	var req MembershipLeaveDelegationRequest
+	var req DelegateDelayedLeaveRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
-		slog.Error("Handler: membership_leave_delegation: error reading body",
+		slog.Error("Handler: delegate_delayed_leave: error reading body",
 			"RemoteAddr", r.RemoteAddr, "err", err)
 		writeMatrixError(w, http.StatusBadRequest, "M_NOT_JSON", "Error reading request")
 		return
@@ -564,7 +564,7 @@ func (h *Handler) handleMembershipLeaveDelegation(w http.ResponseWriter, r *http
 		return
 	}
 
-	if err := h.processMembershipLeaveDelegation(r, &req); err != nil {
+	if err := h.processDelegateDelayedLeave(r, &req); err != nil {
 		writeIfMatrixError(w, err)
 		return
 	}
@@ -593,7 +593,7 @@ func (h *Handler) prepareMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sfu/get", corsJSON(h.handle_legacy)) // Deprecated: pre-Matrix-2.0; remove once clients migrate to /get_token.
 	mux.HandleFunc("/get_token", corsJSON(h.handle))
-	mux.HandleFunc("/membership_leave_delegation", corsJSON(h.handleMembershipLeaveDelegation))
+	mux.HandleFunc("/delegate_delayed_leave", corsJSON(h.handleDelegateDelayedLeave))
 	mux.HandleFunc("/sfu_webhook", h.handleSfuWebhook)
 	mux.HandleFunc("/healthz", h.healthcheck)
 	return mux

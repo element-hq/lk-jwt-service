@@ -11,7 +11,7 @@
 //
 //   - /get_token                       → get_token_test.go
 //   - /sfu/get                         → sfu_get_test.go
-//   - /membership_leave_delegation     → membership_leave_delegation_test.go
+//   - /delegate_delayed_leave          → delegate_delayed_leave_test.go
 
 package main
 
