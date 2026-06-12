@@ -153,7 +153,7 @@ func TestDelayedEventJob_ParticipantLookupSuccessful(t *testing.T) {
 }
 
 // TestDelayedEventJob_ConnectionAborted verifies
-// WaitingForInitialConnect → Completed via ParticipantConnectionAborted,
+// WaitingForInitialConnect → Aborted via ParticipantConnectionAborted,
 // and that the done channel receives the job pointer.
 func TestDelayedEventJob_ConnectionAborted(t *testing.T) {
 	job, doneCh := newJobWithDoneCh(10 * time.Second)
@@ -164,10 +164,10 @@ func TestDelayedEventJob_ConnectionAborted(t *testing.T) {
 	select {
 	case doneJob := <-doneCh:
 		if doneJob.state != Aborted {
-			t.Errorf("expected Completed, got %v", doneJob.state)
+			t.Errorf("expected Aborted, got %v", doneJob.state)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for Completed signal on doneCh")
+		t.Fatal("timed out waiting for Aborted signal on doneCh")
 	}
 	err := job.Close()
 	if err != nil {
@@ -312,45 +312,45 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 		t.Errorf("expected state %v, got %v", DelayEventState(Connected), job.state)
 	}
 
-	// Test Completed state
+	// Test Aborted state
 	job = newTestJob(t, 10*time.Second)
 	go job.loop()
-	job.EventChannel <- ParticipantConnectionAborted // Transitioning to Completed
+	job.EventChannel <- ParticipantConnectionAborted // Transitioning to Aborted
 	time.Sleep(20 * time.Millisecond)
 
-	// WaitingStateTimedOut in Completed → no-op.
+	// WaitingStateTimedOut in Aborted → no-op.
 	job.EventChannel <- WaitingStateTimedOut
 	time.Sleep(20 * time.Millisecond)
 
-	// ParticipantConnected in Completed → no-op.
+	// ParticipantConnected in Aborted → no-op.
 	job.EventChannel <- ParticipantConnected
 	time.Sleep(20 * time.Millisecond)
 
-	// ParticipantLookupSuccessful in Completed → no-op.
+	// ParticipantLookupSuccessful in Aborted → no-op.
 	job.EventChannel <- ParticipantLookupSuccessful
 	time.Sleep(20 * time.Millisecond)
 
-	// DelayedEventTimedOut in Completed → no-op.
+	// DelayedEventTimedOut in Aborted → no-op.
 	job.EventChannel <- DelayedEventTimedOut
 	time.Sleep(20 * time.Millisecond)
 
-	// DelayedEventNotFound in Completed → no-op.
+	// DelayedEventNotFound in Aborted → no-op.
 	job.EventChannel <- DelayedEventNotFound
 	time.Sleep(20 * time.Millisecond)
 
-	// DelayedEventReset in Completed → no-op.
+	// DelayedEventReset in Aborted → no-op.
 	job.EventChannel <- DelayedEventReset
 	time.Sleep(20 * time.Millisecond)
 
-	// ParticipantDisconnectedIntentionally in Completed → no-op.
+	// ParticipantDisconnectedIntentionally in Aborted → no-op.
 	job.EventChannel <- ParticipantDisconnectedIntentionally
 	time.Sleep(20 * time.Millisecond)
 
-	// ParticipantConnectionAborted in Completed → no-op.
+	// ParticipantConnectionAborted in Aborted → no-op.
 	job.EventChannel <- ParticipantConnectionAborted
 	time.Sleep(20 * time.Millisecond)
 
-	// SFUParticipantGone in Completed → no-op.
+	// SFUParticipantGone in Aborted → no-op.
 	job.EventChannel <- SFUParticipantGone
 	time.Sleep(20 * time.Millisecond)
 
@@ -549,7 +549,7 @@ func TestDelayEventState_String(t *testing.T) {
 		{WaitingForInitialConnect, "WaitingForInitialConnect"},
 		{Connected, "Connected"},
 		{Disconnected, "Disconnected"},
-		{Aborted, "Completed"},
+		{Aborted, "Aborted"},
 		{Replaced, "Replaced"},
 		{DelayEventState(99), "DelayEventState(99)"},
 	} {
