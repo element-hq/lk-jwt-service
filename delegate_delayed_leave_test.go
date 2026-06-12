@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -238,6 +239,63 @@ func TestProcessDelegateDelayedLeave_CreatesJob(t *testing.T) {
 
 	// Give the job a moment to be registered, then verify the monitor exists.
 	time.Sleep(50 * time.Millisecond)
+}
+
+// TestProcessDelegateDelayedLeave_InvalidDelayTimeout verifies that a job
+// rejected by NewDelayedEventJob (DelayTimeout <= 0, bypassing request
+// parsing) surfaces as 400 M_BAD_JSON carrying the creation error.
+func TestProcessDelegateDelayedLeave_InvalidDelayTimeout(t *testing.T) {
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	handler := newDelegateDelayedLeaveHandler(t)
+	req := validDelegateDelayedLeaveRequest()
+	req.DelayTimeout = 0 // invalid — would be rejected by request parsing, too
+
+	resp, err := handler.processDelegateDelayedLeave(&http.Request{}, &req)
+	if resp != nil {
+		t.Errorf("expected no response, got %v", resp)
+	}
+	var mErr *MatrixErrorResponse
+	if !errors.As(err, &mErr) {
+		t.Fatalf("expected MatrixErrorResponse, got %v", err)
+	}
+	if mErr.Status != http.StatusBadRequest || mErr.ErrCode != "M_BAD_JSON" {
+		t.Errorf("expected 400 M_BAD_JSON, got %d %s", mErr.Status, mErr.ErrCode)
+	}
+	if mErr.Err == "" {
+		t.Error("expected the job-creation error as message, got empty string")
+	}
+}
+
+// TestProcessDelegateDelayedLeave_AfterShutdown verifies that a delegation
+// request hitting an already-shut-down handler surfaces as 503 M_UNKNOWN
+// (not M_BAD_JSON — the request itself was fine).
+func TestProcessDelegateDelayedLeave_AfterShutdown(t *testing.T) {
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	handler := newDelegateDelayedLeaveHandler(t)
+	handler.Close() // idempotent — the t.Cleanup Close is a no-op afterwards
+
+	req := validDelegateDelayedLeaveRequest()
+	resp, err := handler.processDelegateDelayedLeave(&http.Request{}, &req)
+	if resp != nil {
+		t.Errorf("expected no response, got %v", resp)
+	}
+	var mErr *MatrixErrorResponse
+	if !errors.As(err, &mErr) {
+		t.Fatalf("expected MatrixErrorResponse, got %v", err)
+	}
+	if mErr.Status != http.StatusServiceUnavailable || mErr.ErrCode != "M_UNKNOWN" {
+		t.Errorf("expected 503 M_UNKNOWN, got %d %s", mErr.Status, mErr.ErrCode)
+	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

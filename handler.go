@@ -126,7 +126,7 @@ type addJobRequest struct {
 
 type addJobResult struct {
 	jobId UniqueID
-	ok    bool
+	err   error
 }
 
 // sfuEventRequest is sent by handleSfuWebhook to loop() for routing.
@@ -224,7 +224,7 @@ func (h *Handler) loop() {
 				slog.Error("Handler: failed to create delayed event job",
 					"room", req.params.LiveKitRoom,
 					"lkId", req.params.LiveKitIdentity, "err", err)
-				req.result <- addJobResult{ok: false}
+				req.result <- addJobResult{err: err}
 				continue
 			}
 
@@ -268,7 +268,7 @@ func (h *Handler) loop() {
 			}()
 			slog.Debug("Handler: job created",
 				"room", key.Room, "lkId", key.Identity, "jobId", job.JobId)
-			req.result <- addJobResult{jobId: job.JobId, ok: true}
+			req.result <- addJobResult{jobId: job.JobId}
 
 		// ── SFU webhook routing ──────────────────────────────────────────────
 		case ev := <-h.sfuEventCh:
@@ -317,9 +317,12 @@ func (h *Handler) Close() {
 	}
 }
 
-// addDelayedEventJob sends a set of job params to loop() and waits for the result.
-// loop() performs the monitor lookup and HandoverJob atomically.
-func (h *Handler) addDelayedEventJob(p DelayedEventJobParams) {
+// addDelayedEventJob sends a set of job params to loop() and waits for the
+// result. It returns:
+//   - nil on success,
+//   - the job-creation error on failure,
+//   - or context.Canceled when the handler has already shut down.
+func (h *Handler) addDelayedEventJob(p DelayedEventJobParams) error {
 	slog.Debug("Handler: adding delayed event job",
 		"room", p.LiveKitRoom,
 		"lkId", p.LiveKitIdentity,
@@ -331,14 +334,35 @@ func (h *Handler) addDelayedEventJob(p DelayedEventJobParams) {
 	case <-h.ctx.Done():
 		slog.Warn("Handler: addDelayedEventJob called after shutdown",
 			"room", p.LiveKitRoom)
-		return
+		return h.ctx.Err()
 	}
 	res := <-result
-	if !res.ok {
+	if res.err != nil {
 		slog.Error("Handler: job handover failed",
 			"room", p.LiveKitRoom,
 			"lkId", p.LiveKitIdentity,
-			"jobId", res.jobId)
+			"err", res.err)
+		return res.err
+	}
+	return nil
+}
+
+// matrixErrorForAddJob maps an addDelayedEventJob failure to the client
+// response:
+//   - shutdown → 503 M_UNKNOWN,
+//   - invalid job params → 400 M_BAD_JSON.
+func matrixErrorForAddJob(err error) *MatrixErrorResponse {
+	if errors.Is(err, context.Canceled) {
+		return &MatrixErrorResponse{
+			Status:  http.StatusServiceUnavailable,
+			ErrCode: "M_UNKNOWN",
+			Err:     "Service is shutting down",
+		}
+	}
+	return &MatrixErrorResponse{
+		Status:  http.StatusBadRequest,
+		ErrCode: "M_BAD_JSON",
+		Err:     err.Error(),
 	}
 }
 
@@ -423,13 +447,15 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
 				"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl)
-			h.addDelayedEventJob(DelayedEventJobParams{
+			if err := h.addDelayedEventJob(DelayedEventJobParams{
 				CsApiUrl:        req.DelayCsApiUrl,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
 				LiveKitIdentity: lkIdentity,
-			})
+			}); err != nil {
+				return nil, matrixErrorForAddJob(err)
+			}
 		}
 
 	}
@@ -493,13 +519,15 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
 				"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl)
-			h.addDelayedEventJob(DelayedEventJobParams{
+			if err := h.addDelayedEventJob(DelayedEventJobParams{
 				CsApiUrl:        req.DelayCsApiUrl,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
 				LiveKitIdentity: lkIdentity,
-			})
+			}); err != nil {
+				return nil, matrixErrorForAddJob(err)
+			}
 		}
 	}
 
@@ -550,13 +578,15 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 		"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
-	h.addDelayedEventJob(DelayedEventJobParams{
+	if err := h.addDelayedEventJob(DelayedEventJobParams{
 		CsApiUrl:        req.DelayCsApiUrl,
 		DelayId:         req.DelayId,
 		DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 		LiveKitRoom:     lkRoomAlias,
 		LiveKitIdentity: lkIdentity,
-	})
+	}); err != nil {
+		return nil, matrixErrorForAddJob(err)
+	}
 
 	return &DelegateDelayedLeaveResponse{}, nil
 }

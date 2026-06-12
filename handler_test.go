@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -263,16 +264,19 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 	)
 	handler.Close() // shut down loop() so ctx is cancelled
 
-	// Should return without blocking even though loop() is gone.
+	// Should return context.Canceled without blocking even though loop() is gone.
 	done := make(chan struct{})
 	go func() {
-		handler.addDelayedEventJob(DelayedEventJobParams{
+		err := handler.addDelayedEventJob(DelayedEventJobParams{
 			CsApiUrl:        "https://example.com",
 			DelayId:         "id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     "room",
 			LiveKitIdentity: "@user:example.com",
 		})
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled after shutdown, got %v", err)
+		}
 		close(done)
 	}()
 	select {
