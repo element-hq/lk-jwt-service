@@ -46,6 +46,9 @@ type SFURequest struct {
 	SlotID        string              `json:"slot_id"`
 	OpenIDToken   OpenIDTokenType     `json:"openid_token"`
 	Member        MatrixRTCMemberType `json:"member"`
+	// TODO: These were only supported in an earlier version of the MSC. Later versions
+	// split token request and disconnect delegation into separate endpoints. We should
+	// remove these parameters and the related code at some point.
 	DelayId       string              `json:"delay_id,omitempty"`
 	DelayTimeout  int                 `json:"delay_timeout,omitempty"`
 	DelayCsApiUrl string              `json:"delay_cs_api_url,omitempty"`
