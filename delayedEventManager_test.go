@@ -1,5 +1,4 @@
-// Copyright 2025 Element Creations Ltd.
-// Copyright 2025 New Vector Ltd.
+// Copyright 2026 Element Creations Ltd.
 //
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
@@ -13,8 +12,11 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,8 +48,9 @@ func newTestJob(t *testing.T, timeout time.Duration) *DelayedEventJob {
 	return job
 }
 
-// driveJobEvents starts loop() and sends events sequentially, pausing briefly
-// between each so loop() has time to process them.
+// driveJobEvents starts loop() and sends events sequentially. The
+// select+timeout bounds a send that would otherwise block on a full
+// EventChannel.
 func driveJobEvents(t *testing.T, job *DelayedEventJob, events ...DelayedEventSignal) {
 	t.Helper()
 	go job.loop()
@@ -57,6 +60,8 @@ func driveJobEvents(t *testing.T, job *DelayedEventJob, events ...DelayedEventSi
 		case <-time.After(time.Second):
 			t.Fatalf("timed out sending event %v", ev)
 		}
+		// Let the event settle: "whatever comes next" can act on the
+		// changes this event produced, not race past it.
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -115,9 +120,23 @@ func TestDelayedEventJob_String(t *testing.T) {
 	if s == "" || !strings.Contains(s, "DelayedEventJob") {
 		t.Errorf("String() = %q, want non-empty string containing 'DelayedEventJob'", s)
 	}
-	err := job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
+	job.Stop() // loop() was never started — Close() would time out on job.done
+}
+
+// ── FSM: table invariants ─────────────────────────────────────────────────────
+
+// TestFSMTables_InternalAndTransitionDisjoint asserts the FSM dispatch
+// invariant: no (state, event) pair may be registered both as an internal
+// action and as a transition — otherwise the internal-first dispatch order
+// in handleEvent would silently shadow the transition.
+func TestFSMTables_InternalAndTransitionDisjoint(t *testing.T) {
+	for state, events := range fsmInternalActions {
+		for event := range events {
+			if _, ok := fsmTransitions[state][event]; ok {
+				t.Errorf("FSM: (%s, %s) registered as both internal action and transition",
+					state, event)
+			}
+		}
 	}
 }
 
@@ -235,7 +254,7 @@ func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
 	job.EventChannel <- ParticipantConnected
 	time.Sleep(20 * time.Millisecond)
 	job.EventChannel <- DelayedEventTimedOut
-	job.Stop() // unblocks any in-progress HTTP calls
+	time.Sleep(20 * time.Millisecond)
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -256,7 +275,6 @@ func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	job.EventChannel <- DelayedEventNotFound
 	time.Sleep(20 * time.Millisecond)
-	job.Stop()
 	err := job.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -266,205 +284,120 @@ func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 	}
 }
 
+// TestDelayedEventJob_ResetWithExhaustedDeadline verifies the
+// startDelayedEventRestart contract for an already-expired deadline: no
+// homeserver call is made and DelayedEventTimedOut is emitted instead.
+// The method is called directly — loop() is not running — so the test is
+// fully deterministic.
+func TestDelayedEventJob_ResetWithExhaustedDeadline(t *testing.T) {
+	var calls atomic.Int32
+	original := ExecuteDelayedEventAction
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+		calls.Add(1)
+		return http.StatusOK, nil
+	}
+	t.Cleanup(func() { ExecuteDelayedEventAction = original })
+
+	job := newTestJob(t, 10*time.Second)
+	job.restartDeadline = time.Now().Add(-time.Second) // already expired
+
+	job.startDelayedEventRestart()
+
+	select {
+	case ev := <-job.EventChannel:
+		if ev != DelayedEventTimedOut {
+			t.Errorf("expected DelayedEventTimedOut, got %v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for DelayedEventTimedOut")
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("expected no homeserver call, got %d", n)
+	}
+	job.Stop() // loop() was never started — Close() would time out on job.done
+}
+
+// TestDelayedEventJob_ActionSendBoundedWhenNoTimeRemains verifies that when
+// Disconnected is reached without a restart deadline (waiting state timed out
+// before any connect), ActionSend is bounded by the one-second floor — even
+// against a failing homeserver — and still notifies doneCh instead of
+// retrying forever (backoff v5 treats MaxElapsedTime(0) as "retry forever").
+func TestDelayedEventJob_ActionSendBoundedWhenNoTimeRemains(t *testing.T) {
+	var calls atomic.Int32
+	original := ExecuteDelayedEventAction
+	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+		calls.Add(1)
+		return http.StatusInternalServerError, errors.New("homeserver down")
+	}
+	t.Cleanup(func() { ExecuteDelayedEventAction = original })
+
+	job, doneCh := newJobWithDoneCh(50 * time.Millisecond) // waiting timer fires quickly
+	go job.loop()
+
+	select {
+	case doneJob := <-doneCh:
+		if doneJob.state != Disconnected {
+			t.Errorf("expected Disconnected, got %v", doneJob.state)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for doneCh — ActionSend may be retrying forever")
+	}
+	// The one-second window allows 1-2 attempts (randomized first backoff
+	// interval); anything more means the elapsed-time bound is not applied.
+	if n := calls.Load(); n < 1 || n > 2 {
+		t.Errorf("expected 1-2 ActionSend attempts, got %d", n)
+	}
+	if err := job.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 // ── FSM: guard conditions ─────────────────────────────────────────────────────
 
-// TestDelayedEventJob_FSM_IgnoresWrongStateTransitions verifies that events
-// received in the wrong state are silently ignored (guard conditions hold).
+// TestDelayedEventJob_FSM_IgnoresWrongStateTransitions verifies every
+// (state, event) pair that is registered neither as a transition nor as an
+// internal action: the event must be ignored and the state stay unchanged.
+// Each pair runs against a fresh job, so every no-op is verified
+// individually — not just the sum of several no-ops.
 func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	mockExecOK(t)
 
-	// Test WaitingForInitialConnect state
-	job := newTestJob(t, 10*time.Second)
-	go job.loop()
-
-	// SFUParticipantGone in WaitingForInitialConnect → no-op.
-	job.EventChannel <- SFUParticipantGone
-	time.Sleep(20 * time.Millisecond)
-	// ParticipantDisconnectedIntentionally in WaitingForInitialConnect → no-op.
-	job.EventChannel <- ParticipantDisconnectedIntentionally
-	time.Sleep(20 * time.Millisecond)
-
-	job.Stop()
-	err := job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
+	// Event sequences that drive a fresh job into each state.
+	statePaths := map[DelayEventState][]DelayedEventSignal{
+		WaitingForInitialConnect: {},
+		Connected:                {ParticipantConnected},
+		Disconnected:             {ParticipantConnected, ParticipantDisconnectedIntentionally},
+		Aborted:                  {ParticipantConnectionAborted},
+		Replaced:                 {JobReplaced},
 	}
-	if job.state != DelayEventState(WaitingForInitialConnect) {
-		t.Errorf("expected state %v, got %v", DelayEventState(WaitingForInitialConnect), job.state)
+	allEvents := []DelayedEventSignal{
+		ParticipantConnected, ParticipantLookupSuccessful,
+		ParticipantDisconnectedIntentionally, ParticipantConnectionAborted,
+		DelayedEventReset, DelayedEventTimedOut, DelayedEventNotFound,
+		WaitingStateTimedOut, SFUNotAvailable, JobReplaced, SFUParticipantGone,
 	}
 
-	// Test Connected state
-	job = newTestJob(t, 10*time.Second)
-	go job.loop()
-	job.EventChannel <- ParticipantConnected // Transitioning to Connected
-	time.Sleep(20 * time.Millisecond)
-
-	// WaitingStateTimedOut in Connected → no-op.
-	job.EventChannel <- WaitingStateTimedOut
-	time.Sleep(20 * time.Millisecond)
-
-	job.Stop()
-	err = job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if job.state != DelayEventState(Connected) {
-		t.Errorf("expected state %v, got %v", DelayEventState(Connected), job.state)
-	}
-
-	// Test Aborted state
-	job = newTestJob(t, 10*time.Second)
-	go job.loop()
-	job.EventChannel <- ParticipantConnectionAborted // Transitioning to Aborted
-	time.Sleep(20 * time.Millisecond)
-
-	// WaitingStateTimedOut in Aborted → no-op.
-	job.EventChannel <- WaitingStateTimedOut
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantConnected in Aborted → no-op.
-	job.EventChannel <- ParticipantConnected
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantLookupSuccessful in Aborted → no-op.
-	job.EventChannel <- ParticipantLookupSuccessful
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventTimedOut in Aborted → no-op.
-	job.EventChannel <- DelayedEventTimedOut
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventNotFound in Aborted → no-op.
-	job.EventChannel <- DelayedEventNotFound
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventReset in Aborted → no-op.
-	job.EventChannel <- DelayedEventReset
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantDisconnectedIntentionally in Aborted → no-op.
-	job.EventChannel <- ParticipantDisconnectedIntentionally
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantConnectionAborted in Aborted → no-op.
-	job.EventChannel <- ParticipantConnectionAborted
-	time.Sleep(20 * time.Millisecond)
-
-	// SFUParticipantGone in Aborted → no-op.
-	job.EventChannel <- SFUParticipantGone
-	time.Sleep(20 * time.Millisecond)
-
-	job.Stop()
-	err = job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if job.state != DelayEventState(Aborted) {
-		t.Errorf("expected state %v, got %v", DelayEventState(Aborted), job.state)
-	}
-
-	// Test Replaced state
-	job = newTestJob(t, 10*time.Second)
-	go job.loop()
-	job.EventChannel <- JobReplaced // Transitioning to Replaced
-	time.Sleep(20 * time.Millisecond)
-
-	// WaitingStateTimedOut in Replaced → no-op.
-	job.EventChannel <- WaitingStateTimedOut
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantConnected in Replaced → no-op.
-	job.EventChannel <- ParticipantConnected
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantLookupSuccessful in Replaced → no-op.
-	job.EventChannel <- ParticipantLookupSuccessful
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventTimedOut in Replaced → no-op.
-	job.EventChannel <- DelayedEventTimedOut
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventNotFound in Replaced → no-op.
-	job.EventChannel <- DelayedEventNotFound
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventReset in Replaced → no-op.
-	job.EventChannel <- DelayedEventReset
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantDisconnectedIntentionally in Replaced → no-op.
-	job.EventChannel <- ParticipantDisconnectedIntentionally
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantConnectionAborted in Replaced → no-op.
-	job.EventChannel <- ParticipantConnectionAborted
-	time.Sleep(20 * time.Millisecond)
-
-	// SFUParticipantGone in Replaced → no-op.
-	job.EventChannel <- SFUParticipantGone
-	time.Sleep(20 * time.Millisecond)
-
-	job.Stop()
-	err = job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if job.state != DelayEventState(Replaced) {
-		t.Errorf("expected state %v, got %v", DelayEventState(Replaced), job.state)
-	}
-
-	// Test Disconnected state
-	job = newTestJob(t, 10*time.Second)
-	go job.loop()
-	job.EventChannel <- ParticipantConnected // Transitioning to Connected
-	time.Sleep(20 * time.Millisecond)
-	job.EventChannel <- ParticipantConnectionAborted // Transitioning to Disconnected
-	time.Sleep(20 * time.Millisecond)
-
-	// WaitingStateTimedOut in Disconnected → no-op.
-	job.EventChannel <- WaitingStateTimedOut
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantConnected in Disconnected → no-op.
-	job.EventChannel <- ParticipantConnected
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantLookupSuccessful in Disconnected → no-op.
-	job.EventChannel <- ParticipantLookupSuccessful
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventTimedOut in Disconnected → no-op.
-	job.EventChannel <- DelayedEventTimedOut
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventNotFound in Disconnected → no-op.
-	job.EventChannel <- DelayedEventNotFound
-	time.Sleep(20 * time.Millisecond)
-
-	// DelayedEventReset in Disconnected → no-op.
-	job.EventChannel <- DelayedEventReset
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantDisconnectedIntentionally in Disconnected → no-op.
-	job.EventChannel <- ParticipantDisconnectedIntentionally
-	time.Sleep(20 * time.Millisecond)
-
-	// ParticipantConnectionAborted in Disconnected → no-op.
-	job.EventChannel <- ParticipantConnectionAborted
-	time.Sleep(20 * time.Millisecond)
-
-	// SFUParticipantGone in Disconnected → no-op.
-	job.EventChannel <- SFUParticipantGone
-	time.Sleep(20 * time.Millisecond)
-
-	job.Stop()
-	err = job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if job.state != DelayEventState(Disconnected) {
-		t.Errorf("expected state %v, got %v", DelayEventState(Disconnected), job.state)
+	for state, path := range statePaths {
+		for _, event := range allEvents {
+			if _, ok := fsmTransitions[state][event]; ok {
+				continue // legal transition — covered by dedicated tests
+			}
+			if _, ok := fsmInternalActions[state][event]; ok {
+				continue // internal action — not a no-op
+			}
+			t.Run(fmt.Sprintf("%v in %v", event, state), func(t *testing.T) {
+				job := newTestJob(t, 10*time.Second)
+				events := append([]DelayedEventSignal{}, path...)
+				events = append(events, event)
+				driveJobEvents(t, job, events...)
+				if err := job.Close(); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				if job.state != state {
+					t.Errorf("expected state %v after %v, got %v", state, event, job.state)
+				}
+			})
+		}
 	}
 }
 
@@ -550,6 +483,7 @@ func TestDelayEventState_String(t *testing.T) {
 		{Connected, "Connected"},
 		{Disconnected, "Disconnected"},
 		{Aborted, "Aborted"},
+		{Aborted, "Aborted"},
 		{Replaced, "Replaced"},
 		{DelayEventState(99), "DelayEventState(99)"},
 	} {
@@ -587,7 +521,7 @@ func TestDelayedEventSignal_String(t *testing.T) {
 
 // TestDelayedEventJob_JobReplaced_SignalReceived verifies the normal path:
 // when JobReplaced is sent on EventChannel while loop() is running, the job
-// transitions to Replaced state and then exits cleanly via Cancel().
+// transitions to Replaced state and then exits cleanly via Stop().
 func TestDelayedEventJob_JobReplaced_SignalReceived(t *testing.T) {
 	job := newTestJob(t, 10*time.Second)
 	go job.loop()
@@ -642,18 +576,14 @@ func TestDelayedEventJob_JobReplaced_FullChannel(t *testing.T) {
 	}
 
 	// Now attempt the non-blocking JobReplaced send — must take the default branch.
-	sent := false
 	select {
 	case job.EventChannel <- JobReplaced:
-		sent = true // should NOT happen: channel is full
+		t.Error("expected JobReplaced to be dropped (default branch), but it was sent")
 	default:
 		// Expected: signal dropped because channel is full.
 	}
-	if sent {
-		t.Error("expected JobReplaced to be dropped (default branch), but it was sent")
-	}
 
-	// Even without the signal, Cancel() + Close() must complete cleanly.
+	// Even without the signal, Stop() + Close() must complete cleanly.
 	go job.loop() // start loop() so it can drain and exit
 	job.Stop()
 	done := make(chan struct{})
@@ -702,23 +632,6 @@ func TestDelayedEventJob_SFUParticipantGone_Connected(t *testing.T) {
 	}
 }
 
-// TestDelayedEventJob_SFUParticipantGone_WrongState verifies that
-// SFUParticipantGone in WaitingForInitialConnect is a no-op (guard condition).
-func TestDelayedEventJob_SFUParticipantGone_WrongState(t *testing.T) {
-	mockExecOK(t)
-	job := newTestJob(t, 10*time.Second)
-	go job.loop()
-
-	job.EventChannel <- SFUParticipantGone // should be ignored in WaitingForInitialConnect
-	time.Sleep(20 * time.Millisecond)
-
-	job.Stop()
-	err := job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-}
-
 // ── LiveKitRoomWorker ─────────────────────────────────────────────────────────
 
 // ── startParticipantLookup ────────────────────────────────────────────────────
@@ -760,6 +673,10 @@ func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
 	go job.loop()
+	// Joins loop() and the lookup goroutine on every exit path — including
+	// t.Fatal — before the LIFO cleanup above restores the real
+	// LiveKitParticipantExists, so no goroutine can race on the global mock.
+	t.Cleanup(func() { _ = job.Close() })
 	// sanityInterval == 0: one attempt only, no Phase 2.
 	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
 
@@ -769,7 +686,6 @@ func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 		t.Fatal("timed out waiting for Phase 1 ListParticipants call")
 	}
 
-	job.Stop()
 	if err := job.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -813,6 +729,9 @@ func TestParticipantLookup_Phase2_DetectsGoneParticipant(t *testing.T) {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
 	go job.loop()
+	// Joins all job goroutines on every exit path before the mock-restore
+	// cleanup runs (LIFO) — see TestParticipantLookup_Phase1_FindsParticipant.
+	t.Cleanup(func() { _ = job.Close() })
 	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, sanityInterval)
 
 	select {
@@ -870,6 +789,9 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
 	go job.loop()
+	// Joins all job goroutines on every exit path before the mock-restore
+	// cleanup runs (LIFO) — see TestParticipantLookup_Phase1_FindsParticipant.
+	t.Cleanup(func() { _ = job.Close() })
 	// sanityInterval == 0 disables Phase 2.
 	startParticipantLookup(job, LiveKitAuth{secret: "secret", key: "devkey", lkUrl: "ws://127.0.0.1:7880"}, 0)
 
@@ -877,13 +799,11 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 	select {
 	case <-phase1Done:
 	case <-time.After(5 * time.Second):
-		job.Stop()
 		t.Fatal("timed out waiting for Phase 1")
 	}
 
-	// Cancel the job and wait for Close() — this waits for backgroundWg which
-	// includes the lookup goroutine.  After this, callCount is safe to read.
-	job.Stop()
+	// Close() cancels the job and waits for backgroundWg, which includes the
+	// lookup goroutine. After this, callCount is safe to read.
 	if err := job.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
