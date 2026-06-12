@@ -618,7 +618,7 @@ func corsJSON(next http.HandlerFunc) http.HandlerFunc {
 func (h *Handler) prepareMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sfu/get", corsJSON(h.handle_legacy)) // Deprecated: pre-Matrix-2.0; remove once clients migrate to /get_token.
-	mux.HandleFunc("/get_token", corsJSON(h.handle))
+	mux.HandleFunc("/get_token", corsJSON(h.handleGetToken))
 	mux.HandleFunc("/delegate_delayed_leave", corsJSON(h.handleDelegateDelayedLeave))
 	mux.HandleFunc("/sfu_webhook", h.handleSfuWebhook)
 	mux.HandleFunc("/healthz", h.healthcheck)
@@ -672,7 +672,7 @@ func (h *Handler) handle_legacy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleGetToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
