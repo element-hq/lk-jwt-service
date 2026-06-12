@@ -92,7 +92,7 @@ func TestHandleGetToken_Success(t *testing.T) {
 	// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
 	body := marshalSFURequest(t, func(r *SFURequest) {
 		r.RoomID = "!roomid:example.com"
-		r.SlotID = "slot123"
+		r.SlotID = "slot1234"
 		r.OpenIDToken.MatrixServerName = matrixServerName
 		r.Member.ID = "memberABC"
 		r.Member.ClaimedUserID = claimedUserID
@@ -140,7 +140,7 @@ func TestHandleGetToken_Success(t *testing.T) {
 	}
 	// MSC-4195 room hash of ("!roomid:example.com", "slot123").
 	// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#test-vectors
-	const wantRoom = "AUDmNDQiVHmWYRE+rKBvieWX8AUSzepenuj6u+d/n9c"
+	const wantRoom = "O8437W3+jmzMVjoIP3tNwbm+XxHQk2iKpOA7aqw3qSc"
 	if got := claims["video"].(map[string]interface{})["room"]; got != wantRoom {
 		t.Errorf("room = %v, want %v", got, wantRoom)
 	}

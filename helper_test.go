@@ -101,8 +101,8 @@ func TestNewUniqueIDStringConversion(t *testing.T) {
 // spec proposal to ensure compliance with the expected hashing and encoding scheme.
 // https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
 func TestLiveKitRoomAliasFor_TestVector(t *testing.T) {
-	id := string(LiveKitRoomAliasFor("!roomid:example.com", "slot123"))
-	wantId := "AUDmNDQiVHmWYRE+rKBvieWX8AUSzepenuj6u+d/n9c"
+	id := string(LiveKitRoomAliasFor("!roomid:example.com", "slot1234"))
+	wantId := "O8437W3+jmzMVjoIP3tNwbm+XxHQk2iKpOA7aqw3qSc"
 	if id != wantId {
 		t.Errorf("LiveKitRoomAliasFor test vector mismatch: got %s, want %s", id, wantId)
 	}
