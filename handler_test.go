@@ -150,13 +150,15 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
-	handler.addDelayedEventJob(DelayedEventJobParams{
+	if err := handler.addDelayedEventJob(DelayedEventJobParams{
 		CsApiUrl:        "https://matrix.example.com",
 		DelayId:         "delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     LiveKitRoomAlias("test-room"),
 		LiveKitIdentity: LiveKitIdentity("@user:example.com"),
-	})
+	}); err != nil {
+		t.Fatalf("addDelayedEventJob: %v", err)
+	}
 	// No panic or deadlock = success.
 }
 
@@ -189,13 +191,15 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	room := LiveKitRoomAlias("loop-test-room")
 	identity := LiveKitIdentity("@loopuser:example.com")
 
-	handler.addDelayedEventJob(DelayedEventJobParams{
+	if err := handler.addDelayedEventJob(DelayedEventJobParams{
 		CsApiUrl:        "https://matrix.example.com",
 		DelayId:         "loop-delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     room,
 		LiveKitIdentity: identity,
-	})
+	}); err != nil {
+		t.Fatalf("addDelayedEventJob: %v", err)
+	}
 
 	time.Sleep(30 * time.Millisecond)
 	handler.sfuEventCh <- sfuEventRequest{
@@ -566,13 +570,15 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 	// Start three jobs in three different rooms — each spawns a room worker goroutine.
 	rooms := []LiveKitRoomAlias{"room-alpha", "room-beta", "room-gamma"}
 	for _, room := range rooms {
-		handler.addDelayedEventJob(DelayedEventJobParams{
+		if err := handler.addDelayedEventJob(DelayedEventJobParams{
 			CsApiUrl:        "https://matrix.example.com",
 			DelayId:         "delay-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
 			LiveKitIdentity: LiveKitIdentity("@user:example.com"),
-		})
+		}); err != nil {
+			t.Fatalf("addDelayedEventJob(%s): %v", room, err)
+		}
 	}
 
 	time.Sleep(50 * time.Millisecond)
@@ -614,13 +620,15 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 	room := LiveKitRoomAlias("donech-shutdown-room")
 	identity := LiveKitIdentity("@user:example.com")
 
-	handler.addDelayedEventJob(DelayedEventJobParams{
+	if err := handler.addDelayedEventJob(DelayedEventJobParams{
 		CsApiUrl:        "https://matrix.example.com",
 		DelayId:         "delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     room,
 		LiveKitIdentity: identity,
-	})
+	}); err != nil {
+		t.Fatalf("addDelayedEventJob: %v", err)
+	}
 
 	// Drive the job to Disconnected → ActionSend runs → doneCh signal → job removed.
 	time.Sleep(30 * time.Millisecond)
@@ -676,17 +684,21 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 	identity := LiveKitIdentity("@same-user:example.com")
 
 	// Create first job.
-	handler.addDelayedEventJob(DelayedEventJobParams{
+	if err := handler.addDelayedEventJob(DelayedEventJobParams{
 		CsApiUrl: "https://matrix.example.com", DelayId: "delay-1",
 		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity,
-	})
+	}); err != nil {
+		t.Fatalf("addDelayedEventJob(delay-1): %v", err)
+	}
 	time.Sleep(20 * time.Millisecond)
 
 	// Replace with second job for the same identity — first job gets JobReplaced.
-	handler.addDelayedEventJob(DelayedEventJobParams{
+	if err := handler.addDelayedEventJob(DelayedEventJobParams{
 		CsApiUrl: "https://matrix.example.com", DelayId: "delay-2",
 		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity,
-	})
+	}); err != nil {
+		t.Fatalf("addDelayedEventJob(delay-2): %v", err)
+	}
 	time.Sleep(100 * time.Millisecond)
 
 	done := make(chan struct{})
