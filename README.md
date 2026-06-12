@@ -126,6 +126,7 @@ Set environment variables to configure the service:
 | `LIVEKIT_JWT_PORT`                            | ⚠️ Deprecated Port to bind the server to                      | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_BIND` |         |
 | `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all — see security note below) | ✅ Yes                                               |         |
 | `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS`       | Interval (seconds) at which delegated-leave jobs re-check that a connected participant is still on the SFU. Guards against missed SFU webhooks. Unset/`0` disables the sanity check. | ❌ No                                                | `0` (disabled) |
+| `LIVEKIT_LOG_LEVEL`                           | One of `debug`, `info`, `warn`/`warning`, `error`             | ❌ No                                                | `info` |
 
 > [!WARNING]
 > **Restricting room creation** requires two pieces working together:
