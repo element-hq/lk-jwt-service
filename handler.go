@@ -522,10 +522,10 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 // ParticipantConnected SFU webhook has already happened, the participant-lookup
 // goroutine (startParticipantLookup) will use its
 // backoff to confirm presence.
-func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDelayedLeaveRequest) error {
+func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDelayedLeaveRequest) (*DelegateDelayedLeaveResponse, error) {
 	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
 	if err != nil {
-		return &MatrixErrorResponse{
+		return nil, &MatrixErrorResponse{
 			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
 			Err:     "The request could not be authorised.",
@@ -535,7 +535,7 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 	if req.Member.ClaimedUserID != userInfo.Sub {
 		slog.Warn("Handler: delegate_delayed_leave: ClaimedUserID does not match token subject",
 			"claimedUserId", req.Member.ClaimedUserID, "matrixId", userInfo.Sub)
-		return &MatrixErrorResponse{
+		return nil, &MatrixErrorResponse{
 			Status:  http.StatusUnauthorized,
 			ErrCode: "M_UNAUTHORIZED",
 			Err:     "The request could not be authorised.",
@@ -544,7 +544,7 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 
 	// Delayed event delegation is restricted to full-access homeservers.
 	if !h.isFullAccessUser(req.OpenIDToken.MatrixServerName) {
-		return &MatrixErrorResponse{
+		return nil, &MatrixErrorResponse{
 			Status:  http.StatusForbidden,
 			ErrCode: "M_FORBIDDEN",
 			Err:     "Delegation of delayed events is only supported for full access users",
@@ -567,7 +567,7 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 		LiveKitIdentity: lkIdentity,
 	})
 
-	return nil
+	return &DelegateDelayedLeaveResponse{}, nil
 }
 
 func (h *Handler) handleDelegateDelayedLeave(w http.ResponseWriter, r *http.Request) {
@@ -593,9 +593,15 @@ func (h *Handler) handleDelegateDelayedLeave(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := h.processDelegateDelayedLeave(r, &req); err != nil {
+	response, err := h.processDelegateDelayedLeave(r, &req)
+	if err != nil {
 		writeIfMatrixError(w, err)
 		return
+	}
+
+	if err := json.NewEncoder(w).Encode(&response); err != nil {
+		slog.Error("Handler: delegate_delayed_leave: failed to encode response",
+			"RemoteAddr", r.RemoteAddr, "err", err)
 	}
 
 	w.WriteHeader(http.StatusOK)

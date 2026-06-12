@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,8 +150,8 @@ func TestHandleDelegateDelayedLeave_Success(t *testing.T) {
 		t.Errorf("expected 200 for valid request, got %d", rr.Code)
 	}
 	// Response body should be empty (no JWT returned).
-	if rr.Body.Len() > 0 {
-		t.Errorf("expected empty response body, got: %s", rr.Body.String())
+	if strings.TrimSpace(rr.Body.String()) != "{}" {
+		t.Errorf("expected empty object in response body, got: %s", rr.Body.String())
 	}
 }
 
@@ -223,8 +224,12 @@ func TestProcessDelegateDelayedLeave_CreatesJob(t *testing.T) {
 
 	handler := newDelegateDelayedLeaveHandler(t) // registers handler.Close last → runs first
 	req := validDelegateDelayedLeaveRequest()
-	if err := handler.processDelegateDelayedLeave(&http.Request{}, &req); err != nil {
+	resp, err := handler.processDelegateDelayedLeave(&http.Request{}, &req)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("missing response")
 	}
 
 	if createRoomCalled {
