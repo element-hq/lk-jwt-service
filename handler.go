@@ -687,7 +687,7 @@ func sfuEventFromWebhook(event *livekit.WebhookEvent) (LiveKitRoomAlias, SFUMess
 	// https://docs.livekit.io/intro/basics/rooms-participants-tracks/webhooks-events/#webhook-events
 	roomAlias := LiveKitRoomAlias(event.Room.Name)
 	switch event.Event {
-	case "participant_joined":
+	case webhook.EventParticipantJoined:
 		slog.Debug("Handler: SFU participant joined",
 			"lkId", event.Participant.Identity, "room", event.Room.Name)
 		return roomAlias, SFUMessage{
@@ -695,7 +695,7 @@ func sfuEventFromWebhook(event *livekit.WebhookEvent) (LiveKitRoomAlias, SFUMess
 			LiveKitIdentity: LiveKitIdentity(event.Participant.Identity),
 		}, true
 
-	case "participant_left", "participant_connection_aborted":
+	case webhook.EventParticipantLeft, webhook.EventParticipantConnectionAborted:
 		msgType := ParticipantConnectionAborted
 		if event.Participant.DisconnectReason == livekit.DisconnectReason_CLIENT_INITIATED {
 			msgType = ParticipantDisconnectedIntentionally

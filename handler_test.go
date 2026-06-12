@@ -29,6 +29,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
+	"github.com/livekit/protocol/webhook"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -287,7 +288,7 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 // event produces a ParticipantConnected SFUMessage.
 func TestSfuEventFromWebhook_ParticipantJoined(t *testing.T) {
 	event := &livekit.WebhookEvent{
-		Event: "participant_joined",
+		Event: webhook.EventParticipantJoined,
 		Room:  &livekit.Room{Name: "test-room"},
 		Participant: &livekit.ParticipantInfo{
 			Identity: "@alice:example.com",
@@ -311,7 +312,7 @@ func TestSfuEventFromWebhook_ParticipantJoined(t *testing.T) {
 // TestSfuEventFromWebhook_ParticipantLeft_ClientInitiated verifies that
 // a client-initiated disconnect produces ParticipantDisconnectedIntentionally.
 func TestSfuEventFromWebhook_ParticipantLeft_ClientInitiated(t *testing.T) {
-	for _, eventType := range []string{"participant_left", "participant_connection_aborted"} {
+	for _, eventType := range []string{webhook.EventParticipantLeft, webhook.EventParticipantConnectionAborted} {
 		t.Run(eventType, func(t *testing.T) {
 			event := &livekit.WebhookEvent{
 				Event: eventType,
@@ -336,7 +337,7 @@ func TestSfuEventFromWebhook_ParticipantLeft_ClientInitiated(t *testing.T) {
 // non-client-initiated disconnect produces ParticipantConnectionAborted.
 func TestSfuEventFromWebhook_ParticipantLeft_NonClientReason(t *testing.T) {
 	event := &livekit.WebhookEvent{
-		Event: "participant_left",
+		Event: webhook.EventParticipantLeft,
 		Room:  &livekit.Room{Name: "test-room"},
 		Participant: &livekit.ParticipantInfo{
 			Identity:         "@carol:example.com",
@@ -355,7 +356,7 @@ func TestSfuEventFromWebhook_ParticipantLeft_NonClientReason(t *testing.T) {
 // TestSfuEventFromWebhook_UnknownEvent verifies that unknown event types
 // return ok=false and are not routed.
 func TestSfuEventFromWebhook_UnknownEvent(t *testing.T) {
-	for _, eventType := range []string{"room_started", "room_finished", "track_published", ""} {
+	for _, eventType := range []string{webhook.EventRoomStarted, webhook.EventRoomFinished, webhook.EventTrackPublished, ""} {
 		t.Run(eventType, func(t *testing.T) {
 			event := &livekit.WebhookEvent{
 				Event:       eventType,
@@ -422,7 +423,7 @@ func TestHandleSfuWebhook_ParticipantJoined(t *testing.T) {
 	defer h.cancel()
 
 	event := &livekit.WebhookEvent{
-		Event:       "participant_joined",
+		Event:       webhook.EventParticipantJoined,
 		Room:        &livekit.Room{Name: "test-room"},
 		Participant: &livekit.ParticipantInfo{Identity: "@alice:example.com"},
 	}
@@ -473,7 +474,7 @@ func TestHandleSfuWebhook_UnknownEvent(t *testing.T) {
 	defer h.cancel()
 
 	event := &livekit.WebhookEvent{
-		Event: "room_started",
+		Event: webhook.EventRoomStarted,
 		Room:  &livekit.Room{Name: "test-room"},
 	}
 	req := signedSfuWebhookRequest(t, key, secret, event)
@@ -502,7 +503,7 @@ func TestHandleSfuWebhook_ShutdownDrop(t *testing.T) {
 	}
 
 	event := &livekit.WebhookEvent{
-		Event:       "participant_joined",
+		Event:       webhook.EventParticipantJoined,
 		Room:        &livekit.Room{Name: "shutdown-room"},
 		Participant: &livekit.ParticipantInfo{Identity: "@x"},
 	}
