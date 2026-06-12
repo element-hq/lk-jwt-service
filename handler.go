@@ -352,16 +352,35 @@ func (h *Handler) isFullAccessUser(matrixServerName string) bool {
 	return slices.Contains(h.fullAccessHomeservers, matrixServerName)
 }
 
+func (h *Handler) verifyOpenIDToken(ctx context.Context, token OpenIDTokenType, claimedUserID string) (string, error) {
+	userInfo, err := exchangeOpenIdUserInfo(ctx, token, h.skipVerifyTLS)
+	if err != nil {
+		return "", &MatrixErrorResponse{
+			Status:  http.StatusUnauthorized,
+			ErrCode: "M_UNAUTHORIZED",
+			Err:     "The request could not be authorised.",
+		}
+	}
+
+	if claimedUserID != "" && claimedUserID != userInfo.Sub {
+		slog.Warn("Handler: ClaimedUserID does not match token subject",
+			"claimedUserId", claimedUserID, "matrixId", userInfo.Sub)
+		return "", &MatrixErrorResponse{
+			Status:  http.StatusUnauthorized,
+			ErrCode: "M_UNAUTHORIZED",
+			Err:     "The request could not be authorised.",
+		}
+	}
+
+	return userInfo.Sub, nil
+}
+
 // Deprecated: processLegacySFURequest serves the pre-Matrix-2.0 /sfu/get
 // endpoint. Remove once all in-the-wild clients have migrated to /get_token.
 func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest) (*SFUResponse, error) {
-	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	matrixID, err := h.verifyOpenIDToken(r.Context(), req.OpenIDToken, "")
 	if err != nil {
-		return nil, &MatrixErrorResponse{
-			Status:  http.StatusInternalServerError,
-			ErrCode: "M_LOOKUP_FAILED",
-			Err:     "Failed to look up user info from homeserver",
-		}
+		return nil, err
 	}
 
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
@@ -376,10 +395,10 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	slog.Debug("Handler: got Matrix user info",
-		"matrixId", userInfo.Sub,
+		"matrixId", matrixID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser])
 
-	lkIdentity := LiveKitIdentity(userInfo.Sub + ":" + req.DeviceID)
+	lkIdentity := LiveKitIdentity(matrixID + ":" + req.DeviceID)
 	slotId := "m.call#ROOM"
 	lkRoomAlias := LiveKitRoomAliasFor(req.Room, slotId)
 
@@ -393,7 +412,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	if isFullAccessUser {
-		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, matrixID, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
@@ -416,7 +435,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	slog.Info("Handler: generated Legacy SFU access token",
-		"matrixId", userInfo.Sub,
+		"matrixId", matrixID,
 		"claimedDeviceId", req.DeviceID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
 		"matrixRoom", req.Room,
@@ -428,23 +447,9 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 }
 
 func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFUResponse, error) {
-	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	matrixID, err := h.verifyOpenIDToken(r.Context(), req.OpenIDToken, req.Member.ClaimedUserID)
 	if err != nil {
-		return nil, &MatrixErrorResponse{
-			Status:  http.StatusUnauthorized,
-			ErrCode: "M_UNAUTHORIZED",
-			Err:     "The request could not be authorised.",
-		}
-	}
-
-	if req.Member.ClaimedUserID != userInfo.Sub {
-		slog.Warn("Handler: ClaimedUserID does not match token subject",
-			"claimedUserId", req.Member.ClaimedUserID, "matrixId", userInfo.Sub)
-		return nil, &MatrixErrorResponse{
-			Status:  http.StatusUnauthorized,
-			ErrCode: "M_UNAUTHORIZED",
-			Err:     "The request could not be authorised.",
-		}
+		return nil, err
 	}
 
 	isFullAccessUser := h.isFullAccessUser(req.OpenIDToken.MatrixServerName)
@@ -459,15 +464,15 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	slog.Debug("Handler: got Matrix user info",
-		"matrixId", userInfo.Sub,
+		"matrixId", matrixID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser])
 
-	lkIdentity := LiveKitIdentityFor(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
+	lkIdentity := LiveKitIdentityFor(matrixID, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
 	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
 	if err != nil {
-		slog.Error("Handler: error getting LiveKit token", "matrixId", userInfo.Sub, "err", err)
+		slog.Error("Handler: error getting LiveKit token", "matrixId", matrixID, "err", err)
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusInternalServerError,
 			ErrCode: "M_UNKNOWN",
@@ -476,7 +481,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	if isFullAccessUser {
-		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, userInfo.Sub, lkIdentity); err != nil {
+		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, matrixID, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
 				ErrCode: "M_UNKNOWN",
@@ -499,7 +504,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	slog.Info("Handler: generated SFU access token",
-		"matrixId", userInfo.Sub,
+		"matrixId", matrixID,
 		"claimedDeviceId", req.Member.ClaimedDeviceID,
 		"access", map[bool]string{true: "full", false: "restricted"}[isFullAccessUser],
 		"matrixRoom", req.RoomID,
@@ -523,23 +528,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 // goroutine (startParticipantLookup) will use its
 // backoff to confirm presence.
 func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDelayedLeaveRequest) (*DelegateDelayedLeaveResponse, error) {
-	userInfo, err := exchangeOpenIdUserInfo(r.Context(), req.OpenIDToken, h.skipVerifyTLS)
+	matrixID, err := h.verifyOpenIDToken(r.Context(), req.OpenIDToken, req.Member.ClaimedUserID)
 	if err != nil {
-		return nil, &MatrixErrorResponse{
-			Status:  http.StatusUnauthorized,
-			ErrCode: "M_UNAUTHORIZED",
-			Err:     "The request could not be authorised.",
-		}
-	}
-
-	if req.Member.ClaimedUserID != userInfo.Sub {
-		slog.Warn("Handler: delegate_delayed_leave: ClaimedUserID does not match token subject",
-			"claimedUserId", req.Member.ClaimedUserID, "matrixId", userInfo.Sub)
-		return nil, &MatrixErrorResponse{
-			Status:  http.StatusUnauthorized,
-			ErrCode: "M_UNAUTHORIZED",
-			Err:     "The request could not be authorised.",
-		}
+		return nil, err
 	}
 
 	// Delayed event delegation is restricted to full-access homeservers.
@@ -551,7 +542,7 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 		}
 	}
 
-	lkIdentity := LiveKitIdentityFor(userInfo.Sub, req.Member.ClaimedDeviceID, req.Member.ID)
+	lkIdentity := LiveKitIdentityFor(matrixID, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
 	slog.Info("Handler: scheduling delayed event job (delegate_delayed_leave)",
