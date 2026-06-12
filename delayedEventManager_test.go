@@ -483,7 +483,6 @@ func TestDelayEventState_String(t *testing.T) {
 		{Connected, "Connected"},
 		{Disconnected, "Disconnected"},
 		{Aborted, "Aborted"},
-		{Aborted, "Aborted"},
 		{Replaced, "Replaced"},
 		{DelayEventState(99), "DelayEventState(99)"},
 	} {
