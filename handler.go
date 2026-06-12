@@ -219,11 +219,7 @@ func (h *Handler) loop() {
 			}
 
 			jobs[key] = job
-			loopWg.Add(1)
-			go func() {
-				defer loopWg.Done()
-				job.loop()
-			}()
+
 			// Pull-based lookup (additionally to SFU webhook)
 			// Phase 1:
 			// - required for `handleDelegateDelayedLeave` as no SFU webhook is
@@ -236,7 +232,17 @@ func (h *Handler) loop() {
 			//   and cancels the job if not.
 			// - Mitigates the risk of "zombie" jobs that never receive the SFU disconnect webhook
 			//   (e.g. due transient SFU webhook failures)
+
+			// Started before loop() so that its backgroundWg.Add happens before
+			// loop() can reach backgroundWg.Wait.  Events it emits early are
+			// buffered by EventChannel until loop() starts consuming.
 			startParticipantLookup(job, h.liveKitAuth, h.sanityCheckInterval)
+
+			loopWg.Add(1)
+			go func() {
+				defer loopWg.Done()
+				job.loop()
+			}()
 			slog.Debug("Handler: job created",
 				"room", key.Room, "lkId", key.Identity, "jobId", job.JobId)
 			req.result <- addJobResult{jobId: job.JobId, ok: true}
