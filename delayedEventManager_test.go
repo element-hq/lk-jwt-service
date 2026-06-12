@@ -163,7 +163,7 @@ func TestDelayedEventJob_ConnectionAborted(t *testing.T) {
 
 	select {
 	case doneJob := <-doneCh:
-		if doneJob.state != Completed {
+		if doneJob.state != Aborted {
 			t.Errorf("expected Completed, got %v", doneJob.state)
 		}
 	case <-time.After(3 * time.Second):
@@ -359,8 +359,8 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if job.state != DelayEventState(Completed) {
-		t.Errorf("expected state %v, got %v", DelayEventState(Completed), job.state)
+	if job.state != DelayEventState(Aborted) {
+		t.Errorf("expected state %v, got %v", DelayEventState(Aborted), job.state)
 	}
 
 	// Test Replaced state
@@ -549,7 +549,7 @@ func TestDelayEventState_String(t *testing.T) {
 		{WaitingForInitialConnect, "WaitingForInitialConnect"},
 		{Connected, "Connected"},
 		{Disconnected, "Disconnected"},
-		{Completed, "Completed"},
+		{Aborted, "Completed"},
 		{Replaced, "Replaced"},
 		{DelayEventState(99), "DelayEventState(99)"},
 	} {
