@@ -153,19 +153,42 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 	return h
 }
 
-// loop is the sole owner of the jobs map — no locking needed.
+// loop is the Handler's actor goroutine: the sole owner of the jobs map
+// (no locking needed) and the single consumer of
+//
+//   - addJobCh:   job creation, replacing any active job for the same key
+//   - sfuEventCh: routing SFU webhook events to the job for (room, identity)
+//   - jobDoneCh:  cleaning up jobs that reached a terminal state
+//
+// Started once by NewHandler; runs until h.ctx is cancelled (Handler.Close),
+// then joins all job goroutines and closes h.loopDone.
 func (h *Handler) loop() {
 	defer close(h.loopDone)
 
 	jobs := make(map[jobKey]*DelayedEventJob)
 
-	// loopWg tracks all job.loop() goroutines spawned by loop().
-	// loopWg.Wait() in the ctx.Done() teardown path ensures no goroutine still
-	// references global function variables (e.g. LiveKitListParticipants,
-	// ExecuteDelayedEventAction) after Handler.Close() returns, which is
-	// required for test safety. Participant-lookup goroutines are tracked by
-	// job.backgroundWg and are therefore also waited on (loop() calls backgroundWg.Wait()
-	// before it returns).
+	// Concurrency model of this loop:
+	//
+	//   - loopWg: the single join point for all concurrency rooted in this loop
+	//       - directly: each job.loop() goroutine
+	//       - transitively:
+	//           - the participant-lookup, ActionRestart and ActionSend goroutines
+	//           - they funnel into job.backgroundWg, which job.loop() drains
+	//             before returning
+	//   - job teardown (replace / job done / shutdown) always via async
+	//     job.Stop() as this actor must never block.
+	//       - job.Stop() signals shutdown and is never directly acknowledged,
+	//         job completion surfaces only via the transitive loopWg accounting
+	//   - loop shutdown:
+	//       - async via h.ctx cancellation: this loop then runs
+	//         cancel all jobs → drain jobDoneCh → loopWg.Wait() → close
+	//         loopDone
+	//       - blocking via Handler.Close() (useful for tests)
+	//          - cancels h.ctx and
+	//          - waits for loopDone
+	//         Note: after it returns, no goroutine still references
+	//         swappable function pointers (e.g. LiveKitParticipantExists,
+	//         ExecuteDelayedEventAction)
 	var loopWg sync.WaitGroup
 
 	for {
@@ -270,7 +293,7 @@ func (h *Handler) loop() {
 			current, ok := jobs[key]
 			if !ok || current != doneJob {
 				// Stale signal from a replaced job — pointer equality guards this.
-				slog.Debug("Handler: ignoring stale doneCh signal",
+				slog.Debug("Handler: ignoring stale jobDoneCh signal",
 					"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 				break
 			}
