@@ -19,10 +19,8 @@ import (
 
 // DelayedEventsEndpoint is the Matrix CS-API path for delayed events.
 //
-// TODO(msc4140): switch to the stable path once MSC-4140 is merged into
-// the Matrix spec:
-//
-//	/_matrix/client/v1/delayed_events
+// TODO(MSC4140): Add a `/versions` check so that we can use the unstable or the stable
+// path (/_matrix/client/v1/delayed_events) depending on what the homeserver supports.
 //
 // See https://github.com/matrix-org/matrix-spec-proposals/pull/4140
 var DelayedEventsEndpoint = "/_matrix/client/unstable/org.matrix.msc4140/delayed_events"
