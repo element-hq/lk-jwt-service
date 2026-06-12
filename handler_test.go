@@ -322,12 +322,18 @@ func TestSfuEventFromWebhook_ParticipantLeft_ClientInitiated(t *testing.T) {
 					DisconnectReason: livekit.DisconnectReason_CLIENT_INITIATED,
 				},
 			}
-			_, msg, ok := sfuEventFromWebhook(event)
+			alias, msg, ok := sfuEventFromWebhook(event)
 			if !ok {
 				t.Fatalf("expected ok=true for %s", eventType)
 			}
+			if alias != LiveKitRoomAlias("test-room") {
+				t.Errorf("unexpected room alias: %v", alias)
+			}
 			if msg.Type != ParticipantDisconnectedIntentionally {
 				t.Errorf("expected ParticipantDisconnectedIntentionally, got %v", msg.Type)
+			}
+			if msg.LiveKitIdentity != "@bob:example.com" {
+				t.Errorf("unexpected identity: %v", msg.LiveKitIdentity)
 			}
 		})
 	}
@@ -344,12 +350,18 @@ func TestSfuEventFromWebhook_ParticipantLeft_NonClientReason(t *testing.T) {
 			DisconnectReason: livekit.DisconnectReason_SERVER_SHUTDOWN,
 		},
 	}
-	_, msg, ok := sfuEventFromWebhook(event)
+	alias, msg, ok := sfuEventFromWebhook(event)
 	if !ok {
 		t.Fatal("expected ok=true for participant_left")
 	}
+	if alias != LiveKitRoomAlias("test-room") {
+		t.Errorf("unexpected room alias: %v", alias)
+	}
 	if msg.Type != ParticipantConnectionAborted {
 		t.Errorf("expected ParticipantConnectionAborted, got %v", msg.Type)
+	}
+	if msg.LiveKitIdentity != "@carol:example.com" {
+		t.Errorf("unexpected identity: %v", msg.LiveKitIdentity)
 	}
 }
 
