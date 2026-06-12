@@ -1,3 +1,5 @@
 .vscode
 lk-jwt-service
+build/*
 lk-jwt-service-healthcheck
+coverage.out
