@@ -407,30 +407,26 @@ func (job *DelayedEventJob) loop() {
 	}
 }
 
-// Stop cancels the job's context. Non-blocking.
-//
-// Use Stop when signalling teardown to many jobs in parallel; afterwards wait
-// on the parent WaitGroup (e.g. loopWg in Handler.loop) for all loop()
-// goroutines to drain. For a single-job synchronous teardown — typically
-// tests — use Close instead. Safe to call concurrently and idempotent.
+// Stop tears the job down asynchronously: it signals shutdown and returns
+// immediately, without waiting for the job's goroutines to exit.
+// Idempotent and safe to call from any goroutine.
+// For a synchronous teardown, use Close.
 func (job *DelayedEventJob) Stop() {
 	job.cancel()
 }
 
-// Close cancels the job's context and waits for loop() to exit (bounded by a
-// 10-second safety timeout that logs a warning on overrun). Idempotent and
-// safe to call from any goroutine.
-//
-// The error return exists for io.Closer compatibility; this implementation
-// always returns nil. Prefer Stop + a shared WaitGroup when tearing down
-// many jobs — N concurrent Closes serialize on their own 10-second timeouts.
+// Close tears the job down synchronously: it signals shutdown and blocks
+// until all job goroutines have exited, bounded by a 10-second timeout.
+// It returns an error when that wait times out — also the case when loop()
+// was never started. Idempotent and safe to call from any goroutine.
+// For an asynchronous teardown, use Stop.
 func (job *DelayedEventJob) Close() error {
 	job.cancel()
 	select {
 	case <-job.done:
 	case <-time.After(10 * time.Second):
-		slog.Warn("Job: Close() timed out waiting for loop() to exit",
-			"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity, "jobId", job.JobId)
+		return fmt.Errorf("job %v (room %s, lkId %s): Close timed out waiting for loop() to exit",
+			job.JobId, job.LiveKitRoom, job.LiveKitIdentity)
 	}
 	slog.Debug("Job: closed", "room", job.LiveKitRoom, "lkId", job.LiveKitIdentity)
 	return nil
