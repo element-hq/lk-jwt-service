@@ -391,7 +391,7 @@ func (job *DelayedEventJob) loop() {
 			job.restartDeadline = newDeadline
 			if job.fsmTimerRestart == nil {
 				// First successful restart after entering Connected: create the
-				// timer (nil encodes "not running" — see # Timers above).
+				// timer (nil encodes "not running" — see # Timers below).
 				job.fsmTimerRestart = time.AfterFunc(job.delayRestartDuration(), func() {
 					select {
 					case job.EventChannel <- DelayedEventReset:
@@ -684,6 +684,7 @@ func (job *DelayedEventJob) handleStateExitAction(state DelayEventState, event D
 		// The waiting-state guard timer belongs to this state.
 		if job.fsmTimerWaitingState != nil {
 			job.fsmTimerWaitingState.Stop()
+			job.fsmTimerWaitingState = nil
 		}
 
 	case Connected:
