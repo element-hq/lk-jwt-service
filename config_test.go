@@ -21,7 +21,6 @@ func TestReadKeySecret(t *testing.T) {
 		env            map[string]string
 		expectedKey    string
 		expectedSecret string
-		err            bool
 	}{
 		{
 			name: "Read from env",
@@ -31,7 +30,6 @@ func TestReadKeySecret(t *testing.T) {
 			},
 			expectedKey:    "from_env_pheethiewixohp9eecheeGhuayeeph4l",
 			expectedSecret: "from_env_ahb8eiwae0viey7gee4ieNgahgeeQuie",
-			err:            false,
 		},
 		{
 			name: "Read from livekit keysecret",
