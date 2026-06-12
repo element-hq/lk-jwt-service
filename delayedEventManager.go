@@ -502,9 +502,9 @@ func (job *DelayedEventJob) stopTimers() {
 //	    |                 |             │ • Stop delayed-event timer      │
 //	    |                 |             └─────────────────────────────────┘
 //	    |                 |                          │
-//	    |                 | DelayedEventTimedOut,    │ DelayedEventTimedOut,
-//	    |                 | DelayedEventNotFound,    │ DelayedEventNotFound,
-//	    |                 | WaitingStateTimedOut     │ ParticipantDisconnectedIntentionally,
+//	    |                 | WaitingStateTimedOut     │ DelayedEventTimedOut,
+//	    |                 |                          │ DelayedEventNotFound,
+//	    |                 |                          │ ParticipantDisconnectedIntentionally,
 //	    |                 |                          │ ParticipantConnectionAborted,
 //	    |                 └──────────────────────────│ SFUParticipantGone
 //	    |                                            │
@@ -595,8 +595,6 @@ var fsmTransitions = map[DelayEventState]map[DelayedEventSignal]DelayEventState{
 		ParticipantConnected:         Connected,
 		ParticipantLookupSuccessful:  Connected,
 		ParticipantConnectionAborted: Aborted,
-		DelayedEventTimedOut:         Disconnected,
-		DelayedEventNotFound:         Disconnected,
 		WaitingStateTimedOut:         Disconnected,
 		JobReplaced:                  Replaced,
 	},
