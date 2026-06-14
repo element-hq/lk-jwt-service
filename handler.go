@@ -62,14 +62,14 @@ func writeIfMatrixError(w http.ResponseWriter, err error) bool {
 	return false
 }
 
-func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identity LiveKitIdentity) (string, error) {
+func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identity LiveKitIdentity, isFullAccessUser bool) (string, error) {
 	at := auth.NewAccessToken(apiKey, apiSecret)
 
 	canPublish := true
 	canSubscribe := true
 	grant := &auth.VideoGrant{
 		RoomJoin:     true,
-		RoomCreate:   false,
+		RoomCreate:   isFullAccessUser,
 		CanPublish:   &canPublish,
 		CanSubscribe: &canSubscribe,
 		Room:         string(room),
@@ -426,7 +426,7 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	slotId := "m.call#ROOM"
 	lkRoomAlias := LiveKitRoomAliasFor(req.Room, slotId)
 
-	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
+	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity, isFullAccessUser)
 	if err != nil {
 		return nil, &MatrixErrorResponse{
 			Status:  http.StatusInternalServerError,
@@ -496,7 +496,7 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	lkIdentity := LiveKitIdentityFor(matrixID, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
-	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity)
+	token, err := getJoinToken(h.liveKitAuth.key, h.liveKitAuth.secret, lkRoomAlias, lkIdentity, isFullAccessUser)
 	if err != nil {
 		slog.Error("Handler: error getting LiveKit token", "matrixId", matrixID, "err", err)
 		return nil, &MatrixErrorResponse{
