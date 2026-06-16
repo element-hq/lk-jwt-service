@@ -50,6 +50,17 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var store JobStore
+	if config.RedisURL != "" {
+		store, err = newRedisJobStore(config.RedisURL)
+		if err != nil {
+			log.Fatalf("Could not connect Redis store: %v", err)
+		}
+	} else {
+		slog.Warn("REDIS_URL not set. Using in-memory store.")
+		store = newMemoryJobStore()
+	}
+
 	handler := NewHandler(
 		LiveKitAuth{
 			key:          config.Key,
@@ -60,6 +71,7 @@ func main() {
 		config.SkipVerifyTLS,
 		config.FullAccessHomeservers,
 		config.SanityCheckInterval,
+		store,
 	)
 
 	sanityCheckIntervalDisplay := "disabled"

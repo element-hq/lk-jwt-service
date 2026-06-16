@@ -34,6 +34,10 @@ type Config struct {
 	// default) disables the sanity check entirely.
 	// Configure via LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS (unit: seconds).
 	SanityCheckInterval time.Duration
+	// Connection URL for the Redis job store. When empty, the service falls
+	// back to a non-persistent in-memory store.
+	// Configure via REDIS_URL (e.g. redis://localhost:6379).
+	RedisURL string
 }
 
 func readKeySecret() (string, string) {
@@ -134,5 +138,6 @@ func parseConfig() (*Config, error) {
 		FullAccessHomeservers: strings.Fields(strings.ReplaceAll(fullAccessHomeservers, ",", " ")),
 		LkJwtBind:             lkJwtBind,
 		SanityCheckInterval:   sanityCheckInterval,
+		RedisURL:              os.Getenv("REDIS_URL"),
 	}, nil
 }

@@ -1,0 +1,20 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  lk-jwt-service:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - redis
+    ports:
+      - "${LIVEKIT_JWT_BIND:-:8080}:8080"
+    environment:
+      REDIS_URL: redis://redis:6379
+      LIVEKIT_KEY: ${LIVEKIT_KEY}
+      LIVEKIT_SECRET: ${LIVEKIT_SECRET}
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_FULL_ACCESS_HOMESERVERS: ${LIVEKIT_FULL_ACCESS_HOMESERVERS}
+      LIVEKIT_LOG_LEVEL: ${LIVEKIT_LOG_LEVEL:-info}
+      LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS: ${LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS:-0}

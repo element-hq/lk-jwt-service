@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -110,6 +111,7 @@ type Handler struct {
 	// sanityCheckInterval is the period between room-worker sanity checks.
 	// Zero disables the sanity check.
 	sanityCheckInterval time.Duration
+	store               JobStore
 	// loopDone is closed when loop() has exited.
 	loopDone   chan struct{}
 	jobDoneCh  chan *DelayedEventJob
@@ -135,7 +137,9 @@ type sfuEventRequest struct {
 	msg       SFUMessage
 }
 
-func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration) *Handler {
+var errStorePersistFailed = errors.New("store: failed to persist job")
+
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, store JobStore) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
 		ctx:                   ctx,
@@ -144,6 +148,7 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		skipVerifyTLS:         skipVerifyTLS,
 		fullAccessHomeservers: fullAccessHomeservers,
 		sanityCheckInterval:   sanityCheckInterval,
+		store:                 store,
 		loopDone:              make(chan struct{}),
 		jobDoneCh:             make(chan *DelayedEventJob, 10),
 		addJobCh:              make(chan addJobRequest),
@@ -191,6 +196,38 @@ func (h *Handler) loop() {
 	//         ExecuteDelayedEventAction)
 	var loopWg sync.WaitGroup
 
+	// Startup recovery: reload jobs that were active before the last shutdown.
+	if persistedJobs, err := h.store.LoadAll(h.ctx); err != nil {
+		slog.Error("Handler: failed to load persisted jobs, starting with empty state", "err", err)
+	} else {
+		for _, pj := range persistedJobs {
+			remaining := time.Until(pj.CreatedAt.Add(pj.Params.DelayTimeout))
+			key := jobKey{Room: pj.Params.LiveKitRoom, Identity: pj.Params.LiveKitIdentity}
+			if remaining <= 0 {
+				slog.Info("Handler: skipping expired persisted job", "lkId", key.Identity)
+				if err := h.store.Delete(h.ctx, key.Identity); err != nil {
+					slog.Error("Handler: failed to delete expired persisted job", "lkId", key.Identity, "err", err)
+				}
+				continue
+			}
+			params := pj.Params
+			params.DelayTimeout = remaining
+			job, err := NewDelayedEventJob(h.ctx, params, h.jobDoneCh)
+			if err != nil {
+				slog.Error("Handler: failed to restore persisted job", "lkId", key.Identity, "err", err)
+				continue
+			}
+			jobs[key] = job
+			startParticipantLookup(job, h.liveKitAuth, h.sanityCheckInterval)
+			loopWg.Add(1)
+			go func() {
+				defer loopWg.Done()
+				job.loop()
+			}()
+			slog.Info("Handler: restored persisted job", "lkId", key.Identity, "remaining", remaining)
+		}
+	}
+
 	for {
 		select {
 		case <-h.ctx.Done():
@@ -225,6 +262,14 @@ func (h *Handler) loop() {
 					"room", req.params.LiveKitRoom,
 					"lkId", req.params.LiveKitIdentity, "err", err)
 				req.result <- addJobResult{err: err}
+				continue
+			}
+
+			pj := PersistedJob{Params: req.params, CreatedAt: time.Now()}
+			if err := h.store.Save(h.ctx, key.Identity, pj); err != nil {
+				slog.Error("Handler: failed to persist job",
+					"room", key.Room, "lkId", key.Identity, "err", err)
+				req.result <- addJobResult{err: fmt.Errorf("%w: %w", errStorePersistFailed, err)}
 				continue
 			}
 
@@ -300,6 +345,10 @@ func (h *Handler) loop() {
 			slog.Info("Handler: job done, cleaning up",
 				"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 			delete(jobs, key)
+			if err := h.store.Delete(h.ctx, key.Identity); err != nil {
+				slog.Error("Handler: failed to delete persisted job",
+					"room", key.Room, "lkId", key.Identity, "err", err)
+			}
 			doneJob.Stop()
 			// No Close() goroutine needed — doneJob.loop() exits on its own;
 			// loopWg.Wait() handles cleanup at shutdown.
@@ -350,6 +399,7 @@ func (h *Handler) addDelayedEventJob(p DelayedEventJobParams) error {
 // matrixErrorForAddJob maps an addDelayedEventJob failure to the client
 // response:
 //   - shutdown → 503 M_UNKNOWN,
+//   - store failure → 503 M_UNKNOWN,
 //   - invalid job params → 400 M_BAD_JSON.
 func matrixErrorForAddJob(err error) *MatrixErrorResponse {
 	if errors.Is(err, context.Canceled) {
@@ -357,6 +407,13 @@ func matrixErrorForAddJob(err error) *MatrixErrorResponse {
 			Status:  http.StatusServiceUnavailable,
 			ErrCode: "M_UNKNOWN",
 			Err:     "Service is shutting down",
+		}
+	}
+	if errors.Is(err, errStorePersistFailed) {
+		return &MatrixErrorResponse{
+			Status:  http.StatusServiceUnavailable,
+			ErrCode: "M_UNKNOWN",
+			Err:     "Failed to persist delayed event",
 		}
 	}
 	return &MatrixErrorResponse{
