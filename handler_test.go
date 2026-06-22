@@ -61,6 +61,7 @@ func TestIsFullAccessUser(t *testing.T) {
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true, []string{"example.com", "another.example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 	for _, tc := range []struct {
 		server string
@@ -114,6 +115,7 @@ func TestHandler_Close(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost"},
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 	done := make(chan struct{})
 	go func() { handler.Close(); close(done) }()
@@ -147,6 +149,7 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
@@ -185,6 +188,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
@@ -265,6 +269,7 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost"},
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 	handler.Close() // shut down loop() so ctx is cancelled
 
@@ -565,6 +570,7 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 
 	// Start three jobs in three different rooms — each spawns a room worker goroutine.
@@ -615,6 +621,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 
 	room := LiveKitRoomAlias("donech-shutdown-room")
@@ -678,6 +685,7 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 
 	room := LiveKitRoomAlias("replacement-room")

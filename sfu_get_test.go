@@ -96,6 +96,12 @@ func TestHandleSfuGet_Success(t *testing.T) {
 		return &fclient.UserInfo{Sub: claimedUserSub}, nil
 	}
 
+	originalResolveCsApiUrl := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolveCsApiUrl })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string) (string, error) {
+		return "matrix-client.example.org", nil
+	}
+
 	originalCreate := CreateLiveKitRoom
 	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 	var createCalled bool
@@ -108,6 +114,7 @@ func TestHandleSfuGet_Success(t *testing.T) {
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		false, []string{matrixServerName},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 	t.Cleanup(handler.Close)
 
@@ -184,22 +191,37 @@ func TestProcessLegacySFURequest(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@mock:example.com"}, nil
 	}
 
+	var failCsResolution bool
+	originalResolveCsApiUrl := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolveCsApiUrl })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string) (string, error) {
+		if failCsResolution {
+			return "", &MatrixErrorResponse{Status: http.StatusNotFound, ErrCode: "M_NOT_FOUND", Err: "unauthorised"}
+		}
+		return "matrix-client.example.org", nil
+	}
+
 	for _, tc := range []struct {
-		name                 string
-		matrixID             string
-		expectJoinTokenError bool
-		expectExchangeError  bool
-		expectCreateRoom     bool
-		expectError          bool
+		name                    string
+		matrixID                string
+		delayId                 string
+		delayTimeout            int
+		expectJoinTokenError    bool
+		expectExchangeError     bool
+		expectCsResolutionError bool
+		expectCreateRoom        bool
+		expectError             bool
 	}{
 		{name: "Full access — all OK", matrixID: "@user:example.com", expectCreateRoom: true},
 		{name: "Restricted — all OK", matrixID: "@user:other.com"},
 		{name: "Exchange fails", matrixID: "@user:example.com", expectExchangeError: true, expectError: true},
 		{name: "Token key empty", matrixID: "@user:example.com", expectJoinTokenError: true, expectError: true},
+		{name: "CS API resolution fails", matrixID: "@user:example.com", delayId: "did", delayTimeout: 1000, expectCsResolutionError: true, expectCreateRoom: true, expectError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calledCreateLiveKitRoom = false
 			failExchange = tc.expectExchangeError
+			failCsResolution = tc.expectCsResolutionError
 
 			apiKey := "the_api_key"
 			if tc.expectJoinTokenError {
@@ -209,11 +231,14 @@ func TestProcessLegacySFURequest(t *testing.T) {
 				LiveKitAuth{key: apiKey, secret: "secret", lkUrl: "wss://lk.local:8080/foo"},
 				false, []string{"example.com"},
 				0, // sanityCheckInterval disabled
+				map[string]string{},
 			)
 			req := &LegacySFURequest{
-				Room:        "!room:example.com",
-				OpenIDToken: OpenIDTokenType{AccessToken: "token", MatrixServerName: strings.Split(tc.matrixID, ":")[1]},
-				DeviceID:    "dev",
+				Room:         "!room:example.com",
+				OpenIDToken:  OpenIDTokenType{AccessToken: "token", MatrixServerName: strings.Split(tc.matrixID, ":")[1]},
+				DeviceID:     "dev",
+				DelayId:      tc.delayId,
+				DelayTimeout: tc.delayTimeout,
 			}
 			_, err := handler.processLegacySFURequest(&http.Request{}, req)
 			if tc.expectError && err == nil {

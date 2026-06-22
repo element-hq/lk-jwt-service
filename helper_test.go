@@ -22,6 +22,7 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/livekit/protocol/livekit"
+	"maunium.net/go/mautrix"
 )
 
 // ── NewUniqueID ───────────────────────────────────────────────────────────────
@@ -618,6 +619,70 @@ func TestExecuteDelayedEventAction_ContentType(t *testing.T) {
 	_, _ = ExecuteDelayedEventAction(ts.URL, "id", ActionRestart)
 	if capturedContentType != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %q", capturedContentType)
+	}
+}
+
+// ── resolveCsApiUrl ───────────────────────────────────────────────────────────
+
+func TestResolveCsApiUrl_OverrideUsed(t *testing.T) {
+	original := discoverClientAPI
+	discoverClientAPI = func(_ context.Context, _ string) (*mautrix.ClientWellKnown, error) {
+		t.Error("discoverClientAPI should not be called when an override is present")
+		return nil, nil
+	}
+	defer func() { discoverClientAPI = original }()
+
+	got, err := resolveCsApiUrl(
+		context.Background(),
+		"example.com",
+		map[string]string{"example.com": "https://matrix-client.example.com"},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "https://matrix-client.example.com" {
+		t.Errorf("got %q, want %q", got, "https://matrix-client.example.com")
+	}
+}
+
+func TestResolveCsApiUrl_WellKnownSuccess(t *testing.T) {
+	original := discoverClientAPI
+	discoverClientAPI = func(_ context.Context, serverName string) (*mautrix.ClientWellKnown, error) {
+		return &mautrix.ClientWellKnown{Homeserver: mautrix.HomeserverInfo{BaseURL: "https://matrix-client.example.com"}}, nil
+	}
+	defer func() { discoverClientAPI = original }()
+
+	got, err := resolveCsApiUrl(context.Background(), "example.com", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "https://matrix-client.example.com" {
+		t.Errorf("got %q, want %q", got, "https://matrix-client.example.com")
+	}
+}
+
+func TestResolveCsApiUrl_WellKnownEmptyBaseURL(t *testing.T) {
+	original := discoverClientAPI
+	discoverClientAPI = func(_ context.Context, _ string) (*mautrix.ClientWellKnown, error) {
+		return &mautrix.ClientWellKnown{Homeserver: mautrix.HomeserverInfo{BaseURL: ""}}, nil
+	}
+	defer func() { discoverClientAPI = original }()
+
+	_, err := resolveCsApiUrl(context.Background(), "example.com", nil)
+	if err == nil {
+		t.Fatal("expected error when well-known BaseURL is empty, got nil")
+	}
+}
+func TestResolveCsApiUrl_WellKnownNilResponse(t *testing.T) {
+	original := discoverClientAPI
+	discoverClientAPI = func(_ context.Context, _ string) (*mautrix.ClientWellKnown, error) {
+		return nil, nil
+	}
+	defer func() { discoverClientAPI = original }()
+
+	_, err := resolveCsApiUrl(context.Background(), "example.com", nil)
+	if err == nil {
+		t.Fatal("expected error for nil well-known response, got nil")
 	}
 }
 

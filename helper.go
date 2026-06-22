@@ -35,6 +35,7 @@ import (
 	"github.com/matrix-org/gomatrixserverlib/fclient"
 	"github.com/matrix-org/gomatrixserverlib/spec"
 	"github.com/twitchtv/twirp"
+	"maunium.net/go/mautrix"
 )
 
 // errParticipantAbsent is returned to backoff.Retry from
@@ -66,6 +67,30 @@ func NewUniqueID() UniqueID {
 	// ASCII/Unicode table (0-9 then A-V), the string comparison results will match
 	// the chronological order of your original timestamp.
 	return UniqueID(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
+}
+
+var discoverClientAPI = mautrix.DiscoverClientAPI
+
+// Given a server name and a map of overrides, try to resolve the URL of the Client-Server API.
+var resolveCsApiUrl = func(ctx context.Context, server_name string, csApiUrlOverrides map[string]string) (string, error) {
+	// Prefer explicit overrides.
+	url := csApiUrlOverrides[server_name]
+	if url != "" {
+		return url, nil
+	}
+
+	// If no override exists, try .well-known resolution.
+	wellKnown, err := discoverClientAPI(ctx, server_name)
+	if err == nil && wellKnown != nil && wellKnown.Homeserver.BaseURL != "" {
+		return wellKnown.Homeserver.BaseURL, nil
+	}
+
+	// We're out of options.
+	slog.Warn("Failed to resolve URL of Client-Server API", "server name", server_name)
+	if err == nil {
+		err = fmt.Errorf("no .well-known/matrix/client record found for %s", server_name)
+	}
+	return "", err
 }
 
 var exchangeOpenIdUserInfo = func(

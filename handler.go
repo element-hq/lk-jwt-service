@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -110,6 +111,7 @@ type Handler struct {
 	// sanityCheckInterval is the period between room-worker sanity checks.
 	// Zero disables the sanity check.
 	sanityCheckInterval time.Duration
+	csApiUrlOverrides   map[string]string
 	// loopDone is closed when loop() has exited.
 	loopDone   chan struct{}
 	jobDoneCh  chan *DelayedEventJob
@@ -135,7 +137,7 @@ type sfuEventRequest struct {
 	msg       SFUMessage
 }
 
-func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration) *Handler {
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]string) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
 		ctx:                   ctx,
@@ -148,6 +150,7 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		jobDoneCh:             make(chan *DelayedEventJob, 10),
 		addJobCh:              make(chan addJobRequest),
 		sfuEventCh:            make(chan sfuEventRequest, 200),
+		csApiUrlOverrides:     csApiUrlOverrides,
 	}
 	go h.loop()
 	return h
@@ -444,11 +447,21 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 			}
 		}
 		if delayedEventDelegationRequested {
+			// First resolve the location of the CS API.
+			csApiUrl, err := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides)
+			if err != nil {
+				return nil, &MatrixErrorResponse{
+					Status:  http.StatusInternalServerError,
+					ErrCode: "M_UNKNOWN",
+					Err:     fmt.Sprintf("Could not resolve location of Client-Server API for %s", req.OpenIDToken.MatrixServerName),
+				}
+			}
+
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
-				"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl)
+				"delayId", req.DelayId, "csApiUrl", csApiUrl)
 			if err := h.addDelayedEventJob(DelayedEventJobParams{
-				CsApiUrl:        req.DelayCsApiUrl,
+				CsApiUrl:        csApiUrl,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
@@ -516,11 +529,21 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 
 		if delayedEventDelegationRequested {
+			// First resolve the location of the CS API.
+			csApiUrl, err := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides)
+			if err != nil {
+				return nil, &MatrixErrorResponse{
+					Status:  http.StatusInternalServerError,
+					ErrCode: "M_UNKNOWN",
+					Err:     fmt.Sprintf("Could not resolve location of Client-Server API for %s", req.OpenIDToken.MatrixServerName),
+				}
+			}
+
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
-				"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl)
+				"delayId", req.DelayId, "csApiUrl", csApiUrl)
 			if err := h.addDelayedEventJob(DelayedEventJobParams{
-				CsApiUrl:        req.DelayCsApiUrl,
+				CsApiUrl:        csApiUrl,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
@@ -570,16 +593,26 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 		}
 	}
 
+	// Resolve the location of the CS API.
+	csApiUrl, err := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides)
+	if err != nil {
+		return nil, &MatrixErrorResponse{
+			Status:  http.StatusInternalServerError,
+			ErrCode: "M_UNKNOWN",
+			Err:     fmt.Sprintf("Could not resolve location of Client-Server API for %s", req.OpenIDToken.MatrixServerName),
+		}
+	}
+
 	lkIdentity := LiveKitIdentityFor(matrixID, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
 	slog.Info("Handler: scheduling delayed event job (delegate_delayed_leave)",
 		"room", lkRoomAlias, "lkId", lkIdentity,
-		"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl,
+		"delayId", req.DelayId, "csApiUrl", csApiUrl,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
 	if err := h.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl:        req.DelayCsApiUrl,
+		CsApiUrl:        csApiUrl,
 		DelayId:         req.DelayId,
 		DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 		LiveKitRoom:     lkRoomAlias,

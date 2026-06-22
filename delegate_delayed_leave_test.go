@@ -126,12 +126,40 @@ func TestHandleDelegateDelayedLeave_ExchangeError(t *testing.T) {
 	}
 }
 
-func TestHandleDelegateDelayedLeave_Success(t *testing.T) {
-	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
+func TestHandleDelegateDelayedLeave_CsApiResolutionError(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	originalResolveCsApiUrl := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolveCsApiUrl })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string) (string, error) {
+		return "", &MatrixErrorResponse{Status: http.StatusNotFound, ErrCode: "M_NOT_FOUND", Err: "no"}
+	}
+
+	handler := newDelegateDelayedLeaveHandler(t)
+	body := marshalDelegateDelayedLeaveRequest(t, nil)
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", body)
+	rr := httptest.NewRecorder()
+	handler.prepareMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 when exchange fails, got %d", rr.Code)
+	}
+}
+
+func TestHandleDelegateDelayedLeave_Success(t *testing.T) {
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	originalResolveCsApiUrl := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolveCsApiUrl })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string) (string, error) {
+		return "matrix-client.example.com", nil
 	}
 
 	originalLookup := LiveKitParticipantExists
@@ -159,11 +187,16 @@ func TestHandleDelegateDelayedLeave_Success(t *testing.T) {
 // TestHandleDelegateDelayedLeave_NoJWT verifies that the endpoint does NOT
 // return a JWT — differentiating it from /get_token.
 func TestHandleDelegateDelayedLeave_NoJWT(t *testing.T) {
-	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	originalResolveCsApiUrl := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolveCsApiUrl })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string) (string, error) {
+		return "matrix-client.example.com", nil
 	}
 
 	originalLookup := LiveKitParticipantExists
@@ -201,7 +234,6 @@ func TestHandleDelegateDelayedLeave_NoJWT(t *testing.T) {
 // to processDelegateDelayedLeave hands a job over to the monitor without
 // creating a LiveKit room or token.
 func TestProcessDelegateDelayedLeave_CreatesJob(t *testing.T) {
-	// LIFO: register restores FIRST (run last), handler.Close LAST (runs first).
 	originalCreate := CreateLiveKitRoom
 	t.Cleanup(func() { CreateLiveKitRoom = originalCreate })
 	createRoomCalled := false
@@ -214,6 +246,12 @@ func TestProcessDelegateDelayedLeave_CreatesJob(t *testing.T) {
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	originalResolveCsApiUrl := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolveCsApiUrl })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string) (string, error) {
+		return "matrix-client.example.com", nil
 	}
 
 	originalLookup := LiveKitParticipantExists
@@ -251,6 +289,12 @@ func TestProcessDelegateDelayedLeave_InvalidDelayTimeout(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
 	}
 
+	originalResolveCsApiUrl := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolveCsApiUrl })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string) (string, error) {
+		return "matrix-client.example.com", nil
+	}
+
 	handler := newDelegateDelayedLeaveHandler(t)
 	req := validDelegateDelayedLeaveRequest()
 	req.DelayTimeout = 0 // invalid — would be rejected by request parsing, too
@@ -279,6 +323,12 @@ func TestProcessDelegateDelayedLeave_AfterShutdown(t *testing.T) {
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
 	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
 		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	originalResolveCsApiUrl := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolveCsApiUrl })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string) (string, error) {
+		return "matrix-client.example.com", nil
 	}
 
 	handler := newDelegateDelayedLeaveHandler(t)
@@ -329,6 +379,7 @@ func newDelegateDelayedLeaveHandler(t *testing.T) *Handler {
 		false,
 		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]string{},
 	)
 	t.Cleanup(handler.Close)
 	return handler
