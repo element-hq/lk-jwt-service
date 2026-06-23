@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -69,19 +70,61 @@ func NewUniqueID() UniqueID {
 	return UniqueID(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }
 
+type csApiUrlCache struct {
+	mu      sync.RWMutex
+	entries map[string]csApiUrlCacheEntry
+}
+
+type csApiUrlCacheEntry struct {
+	url       string
+	expiresAt time.Time
+}
+
+func newCsApiUrlCache() *csApiUrlCache {
+	return &csApiUrlCache{entries: make(map[string]csApiUrlCacheEntry)}
+}
+
+func (c *csApiUrlCache) get(serverName string) string {
+	c.mu.RLock()
+	entry, ok := c.entries[serverName]
+	c.mu.RUnlock()
+	if !ok || time.Now().After(entry.expiresAt) {
+		return ""
+		// We don't evict the expired entry because it is extremely likely that the
+		// caller will re-resolve the URL and update the cache.
+	}
+	return entry.url
+}
+
+func (c *csApiUrlCache) set(serverName, url string, ttl time.Duration) {
+	c.mu.Lock()
+	c.entries[serverName] = csApiUrlCacheEntry{url: url, expiresAt: time.Now().Add(ttl)}
+	c.mu.Unlock()
+}
+
 var discoverClientAPI = mautrix.DiscoverClientAPI
 
 // Given a server name and a map of overrides, try to resolve the URL of the Client-Server API.
-var resolveCsApiUrl = func(ctx context.Context, server_name string, csApiUrlOverrides map[string]string) (string, error) {
+var resolveCsApiUrl = func(ctx context.Context, server_name string, overrides map[string]string, cache *csApiUrlCache) (string, error) {
 	// Prefer explicit overrides.
-	url := csApiUrlOverrides[server_name]
-	if url != "" {
+	if url := overrides[server_name]; url != "" {
 		return url, nil
 	}
 
-	// If no override exists, try .well-known resolution.
+	// Next, check the cache.
+	if cache != nil {
+		if url := cache.get(server_name); url != "" {
+			return url, nil
+		}
+	}
+
+	// Still nothing. Let's try .well-known resolution.
 	wellKnown, err := discoverClientAPI(ctx, server_name)
 	if err == nil && wellKnown != nil && wellKnown.Homeserver.BaseURL != "" {
+		if cache != nil {
+			// TODO: Read the TTL from cache-control headers once the SDK exposes them.
+			cache.set(server_name, wellKnown.Homeserver.BaseURL, 4*time.Hour)
+		}
 		return wellKnown.Homeserver.BaseURL, nil
 	}
 

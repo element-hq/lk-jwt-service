@@ -111,6 +111,7 @@ type Handler struct {
 	// Zero disables the sanity check.
 	sanityCheckInterval time.Duration
 	csApiUrlOverrides   map[string]string
+	csApiUrlCache       *csApiUrlCache
 	// loopDone is closed when loop() has exited.
 	loopDone   chan struct{}
 	jobDoneCh  chan *DelayedEventJob
@@ -150,6 +151,7 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		addJobCh:              make(chan addJobRequest),
 		sfuEventCh:            make(chan sfuEventRequest, 200),
 		csApiUrlOverrides:     csApiUrlOverrides,
+		csApiUrlCache:         newCsApiUrlCache(),
 	}
 	go h.loop()
 	return h
@@ -222,7 +224,7 @@ func (h *Handler) loop() {
 			key := jobKey{Room: req.params.LiveKitRoom, Identity: req.params.LiveKitIdentity}
 
 			job, err := NewDelayedEventJob(h.ctx, req.params, func(ctx context.Context, serverName string) (string, error) {
-				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides)
+				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
 			}, h.jobDoneCh)
 			if err != nil {
 				slog.Error("Handler: failed to create delayed event job",
