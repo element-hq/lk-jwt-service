@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -222,7 +221,9 @@ func (h *Handler) loop() {
 		case req := <-h.addJobCh:
 			key := jobKey{Room: req.params.LiveKitRoom, Identity: req.params.LiveKitIdentity}
 
-			job, err := NewDelayedEventJob(h.ctx, req.params, h.jobDoneCh)
+			job, err := NewDelayedEventJob(h.ctx, req.params, func(ctx context.Context, serverName string) (string, error) {
+				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides)
+			}, h.jobDoneCh)
 			if err != nil {
 				slog.Error("Handler: failed to create delayed event job",
 					"room", req.params.LiveKitRoom,
@@ -447,21 +448,11 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 			}
 		}
 		if delayedEventDelegationRequested {
-			// First resolve the location of the CS API.
-			csApiUrl, err := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides)
-			if err != nil {
-				return nil, &MatrixErrorResponse{
-					Status:  http.StatusInternalServerError,
-					ErrCode: "M_UNKNOWN",
-					Err:     fmt.Sprintf("Could not resolve location of Client-Server API for %s", req.OpenIDToken.MatrixServerName),
-				}
-			}
-
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
-				"delayId", req.DelayId, "csApiUrl", csApiUrl)
+				"delayId", req.DelayId, "MatrixServerName", req.OpenIDToken.MatrixServerName)
 			if err := h.addDelayedEventJob(DelayedEventJobParams{
-				CsApiUrl:        csApiUrl,
+				ServerName:      req.OpenIDToken.MatrixServerName,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
@@ -529,21 +520,11 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		}
 
 		if delayedEventDelegationRequested {
-			// First resolve the location of the CS API.
-			csApiUrl, err := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides)
-			if err != nil {
-				return nil, &MatrixErrorResponse{
-					Status:  http.StatusInternalServerError,
-					ErrCode: "M_UNKNOWN",
-					Err:     fmt.Sprintf("Could not resolve location of Client-Server API for %s", req.OpenIDToken.MatrixServerName),
-				}
-			}
-
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
-				"delayId", req.DelayId, "csApiUrl", csApiUrl)
+				"delayId", req.DelayId, "MatrixServerName", req.OpenIDToken.MatrixServerName)
 			if err := h.addDelayedEventJob(DelayedEventJobParams{
-				CsApiUrl:        csApiUrl,
+				ServerName:      req.OpenIDToken.MatrixServerName,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
@@ -593,26 +574,16 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 		}
 	}
 
-	// Resolve the location of the CS API.
-	csApiUrl, err := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides)
-	if err != nil {
-		return nil, &MatrixErrorResponse{
-			Status:  http.StatusInternalServerError,
-			ErrCode: "M_UNKNOWN",
-			Err:     fmt.Sprintf("Could not resolve location of Client-Server API for %s", req.OpenIDToken.MatrixServerName),
-		}
-	}
-
 	lkIdentity := LiveKitIdentityFor(matrixID, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
 	slog.Info("Handler: scheduling delayed event job (delegate_delayed_leave)",
 		"room", lkRoomAlias, "lkId", lkIdentity,
-		"delayId", req.DelayId, "csApiUrl", csApiUrl,
+		"delayId", req.DelayId, "MatrixServerName", req.OpenIDToken.MatrixServerName,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
 	if err := h.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl:        csApiUrl,
+		ServerName:      req.OpenIDToken.MatrixServerName,
 		DelayId:         req.DelayId,
 		DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 		LiveKitRoom:     lkRoomAlias,
