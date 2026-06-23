@@ -178,7 +178,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
 	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string, _ *csApiUrlCache) (string, error) {
 		resolveCalled.Store(true)
-		return "matrix-client.example.com", nil
+		return "https://matrix-client.example.com", nil
 	}
 
 	var execCalled atomic.Bool
@@ -627,7 +627,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
 	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string, _ *csApiUrlCache) (string, error) {
 		resolveCalled.Store(true)
-		return "matrix-client.example.com", nil
+		return "https://matrix-client.example.com", nil
 	}
 
 	var execCalled atomic.Bool
