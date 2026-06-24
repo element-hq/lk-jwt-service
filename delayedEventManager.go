@@ -432,7 +432,7 @@ func (job *DelayedEventJob) Close() error {
 
 func (job *DelayedEventJob) String() string {
 	return fmt.Sprintf(
-		"DelayedEventJob{Server: %s, DelayId: %s, DelayTimeout: %s, LiveKitRoom: %s, LiveKitIdentity: %s, State: %s}",
+		"DelayedEventJob{ServerName: %s, DelayId: %s, DelayTimeout: %s, LiveKitRoom: %s, LiveKitIdentity: %s, State: %s}",
 		job.ServerName, job.DelayId, job.DelayTimeout,
 		job.LiveKitRoom, job.LiveKitIdentity, job.state,
 	)
