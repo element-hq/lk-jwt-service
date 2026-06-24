@@ -122,7 +122,7 @@ var resolveCsApiUrl = func(ctx context.Context, server_name string, overrides ma
 	wellKnown, err := discoverClientAPI(ctx, server_name)
 	if err == nil && wellKnown != nil && wellKnown.Homeserver.BaseURL != "" {
 		if cache != nil {
-			// TODO: Read the TTL from cache-control headers once the SDK exposes them.
+			// TODO: Read the TTL from cache-control headers once the SDK exposes them and limit them to a minimum of say 1 hour to prevent DDos-ing
 			cache.set(server_name, wellKnown.Homeserver.BaseURL, 4*time.Hour)
 		}
 		return wellKnown.Homeserver.BaseURL, nil
