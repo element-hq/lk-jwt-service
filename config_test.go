@@ -358,6 +358,7 @@ func TestParseConfig(t *testing.T) {
 				return
 			}
 
+			// If any of the defaults change, the wantConfigs might need updating.
 			if !reflect.DeepEqual(got, tc.wantConfig) {
 				t.Errorf("Expected config: %v, got: %v", tc.wantConfig, got)
 				return
