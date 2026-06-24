@@ -223,7 +223,7 @@ func TestExecuteDelayedEventAction_Success(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	status, err := ExecuteDelayedEventAction(ts.URL, "delay-id-1", ActionRestart)
+	status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "delay-id-1", ActionRestart)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestExecuteDelayedEventAction_URLConstruction(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	_, _ = ExecuteDelayedEventAction(ts.URL, "myDelayID", ActionSend)
+	_, _ = ExecuteDelayedEventAction(CsApiUrl(ts.URL), "myDelayID", ActionSend)
 	expected := DelayedEventsEndpoint + "/myDelayID/" + string(ActionSend)
 	if capturedPath != expected {
 		t.Errorf("expected path %q, got %q", expected, capturedPath)
@@ -261,7 +261,7 @@ func TestExecuteDelayedEventAction_PathEscaping(t *testing.T) {
 	defer ts.Close()
 
 	maliciousID := "../../../admin"
-	_, _ = ExecuteDelayedEventAction(ts.URL, maliciousID, ActionSend)
+	_, _ = ExecuteDelayedEventAction(CsApiUrl(ts.URL), maliciousID, ActionSend)
 
 	// The path must not contain an unescaped ".." segment that would traverse
 	// outside the expected endpoint prefix.
@@ -283,7 +283,7 @@ func TestExecuteDelayedEventAction_404OnSend(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	status, err := ExecuteDelayedEventAction(ts.URL, "gone-id", ActionSend)
+	status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "gone-id", ActionSend)
 	if err != nil {
 		t.Fatalf("expected no error for ActionSend 404, got: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestExecuteDelayedEventAction_404OnRestart(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	status, err := ExecuteDelayedEventAction(ts.URL, "gone-id", ActionRestart)
+	status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "gone-id", ActionRestart)
 	if err == nil {
 		t.Fatal("expected errDelayedEventNotFound for 404 on ActionRestart, got nil")
 	}
@@ -344,7 +344,7 @@ func TestExecuteDelayedEventAction_RetryAfter_Formats(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+			status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionSend)
 			if err == nil {
 				t.Fatal("expected error for 429, got nil")
 			}
@@ -375,7 +375,7 @@ func TestExecuteDelayedEventAction_429WithoutRetryAfter(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+	status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionSend)
 	if err == nil {
 		t.Fatal("expected transient error for 429 without Retry-After, got nil")
 	}
@@ -453,7 +453,7 @@ func TestExecuteDelayedEventAction_429MatrixRetryAfterMs(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+			status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionSend)
 			if err == nil {
 				t.Fatal("expected error for 429, got nil")
 			}
@@ -484,7 +484,7 @@ func TestExecuteDelayedEventAction_502BadGateway(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+	status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionSend)
 	if err == nil {
 		t.Fatal("expected error for 502, got nil")
 	}
@@ -501,7 +501,7 @@ func TestExecuteDelayedEventAction_500InternalServerError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+	status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionSend)
 	if err == nil {
 		t.Fatal("expected error for 500, got nil")
 	}
@@ -529,7 +529,7 @@ func TestExecuteDelayedEventAction_5xxAreAllTransient(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+			status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionSend)
 			if err == nil {
 				t.Fatalf("expected transient error for %d, got nil", code)
 			}
@@ -572,7 +572,7 @@ func TestExecuteDelayedEventAction_UnknownStatusAreTransient(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			status, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+			status, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionSend)
 			if err == nil {
 				t.Fatalf("expected unexpected-status error for %d, got nil", code)
 			}
@@ -600,7 +600,7 @@ func TestExecuteDelayedEventAction_NetworkError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	ts.Close() // close immediately
 
-	_, err := ExecuteDelayedEventAction(ts.URL, "id", ActionSend)
+	_, err := ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionSend)
 	if err == nil {
 		t.Error("expected a network error, got nil")
 	}
@@ -616,7 +616,7 @@ func TestExecuteDelayedEventAction_ContentType(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	_, _ = ExecuteDelayedEventAction(ts.URL, "id", ActionRestart)
+	_, _ = ExecuteDelayedEventAction(CsApiUrl(ts.URL), "id", ActionRestart)
 	if capturedContentType != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %q", capturedContentType)
 	}
@@ -635,7 +635,7 @@ func TestResolveCsApiUrl_PrefersOverrideWithoutCache(t *testing.T) {
 	got, err := resolveCsApiUrl(
 		context.Background(),
 		"example.com",
-		map[string]string{"example.com": "https://matrix-client.example.com"},
+		map[string]CsApiUrl{"example.com": "https://matrix-client.example.com"},
 		nil,
 	)
 	if err != nil {
@@ -660,7 +660,7 @@ func TestResolveCsApiUrl_PrefersOverrideDespiteCache(t *testing.T) {
 	got, err := resolveCsApiUrl(
 		context.Background(),
 		"example.com",
-		map[string]string{"example.com": "https://matrix-client.example.com"},
+		map[string]CsApiUrl{"example.com": "https://matrix-client.example.com"},
 		cache,
 	)
 	if err != nil {
@@ -685,7 +685,7 @@ func TestResolveCsApiUrl_FallsBackToCacheWithoutOverrides(t *testing.T) {
 	got, err := resolveCsApiUrl(
 		context.Background(),
 		"example.com",
-		map[string]string{},
+		map[string]CsApiUrl{},
 		cache,
 	)
 	if err != nil {

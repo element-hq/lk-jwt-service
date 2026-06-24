@@ -108,7 +108,7 @@ func TestHandleSfuGet_Success(t *testing.T) {
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		false, []string{matrixServerName},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 	t.Cleanup(handler.Close)
 
@@ -212,7 +212,7 @@ func TestProcessLegacySFURequest(t *testing.T) {
 				LiveKitAuth{key: apiKey, secret: "secret", lkUrl: "wss://lk.local:8080/foo"},
 				false, []string{"example.com"},
 				0, // sanityCheckInterval disabled
-				map[string]string{},
+				map[string]CsApiUrl{},
 			)
 			req := &LegacySFURequest{
 				Room:         "!room:example.com",

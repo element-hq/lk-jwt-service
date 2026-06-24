@@ -270,7 +270,7 @@ func TestProcessSFURequest(t *testing.T) {
 				LiveKitAuth{key: apiKey, secret: "secret", lkUrl: "wss://lk.local:8080/foo"},
 				false, []string{"example.com"},
 				0, // sanityCheckInterval disabled
-				map[string]string{},
+				map[string]CsApiUrl{},
 			)
 			req := &SFURequest{
 				RoomID: "!room:example.com", SlotID: "slot",
@@ -337,7 +337,7 @@ func newGetTokenHandler(t *testing.T) *Handler {
 		false,
 		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 	t.Cleanup(handler.Close)
 	return handler

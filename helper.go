@@ -76,7 +76,7 @@ type csApiUrlCache struct {
 }
 
 type csApiUrlCacheEntry struct {
-	url       string
+	url       CsApiUrl
 	expiresAt time.Time
 }
 
@@ -84,7 +84,7 @@ func newCsApiUrlCache() *csApiUrlCache {
 	return &csApiUrlCache{entries: make(map[string]csApiUrlCacheEntry)}
 }
 
-func (c *csApiUrlCache) get(serverName string) string {
+func (c *csApiUrlCache) get(serverName string) CsApiUrl {
 	c.mu.RLock()
 	entry, ok := c.entries[serverName]
 	c.mu.RUnlock()
@@ -96,7 +96,7 @@ func (c *csApiUrlCache) get(serverName string) string {
 	return entry.url
 }
 
-func (c *csApiUrlCache) set(serverName, url string, ttl time.Duration) {
+func (c *csApiUrlCache) set(serverName string, url CsApiUrl, ttl time.Duration) {
 	c.mu.Lock()
 	c.entries[serverName] = csApiUrlCacheEntry{url: url, expiresAt: time.Now().Add(ttl)}
 	c.mu.Unlock()
@@ -104,8 +104,10 @@ func (c *csApiUrlCache) set(serverName, url string, ttl time.Duration) {
 
 var discoverClientAPI = mautrix.DiscoverClientAPI
 
+type CsApiUrl string
+
 // Given a server name and a map of overrides, try to resolve the URL of the Client-Server API.
-var resolveCsApiUrl = func(ctx context.Context, server_name string, overrides map[string]string, cache *csApiUrlCache) (string, error) {
+var resolveCsApiUrl = func(ctx context.Context, server_name string, overrides map[string]CsApiUrl, cache *csApiUrlCache) (CsApiUrl, error) {
 	// Prefer explicit overrides.
 	if url := overrides[server_name]; url != "" {
 		return url, nil
@@ -123,9 +125,9 @@ var resolveCsApiUrl = func(ctx context.Context, server_name string, overrides ma
 	if err == nil && wellKnown != nil && wellKnown.Homeserver.BaseURL != "" {
 		if cache != nil {
 			// TODO: Read the TTL from cache-control headers once the SDK exposes them and limit them to a minimum of say 1 hour to prevent DDos-ing
-			cache.set(server_name, wellKnown.Homeserver.BaseURL, 4*time.Hour)
+			cache.set(server_name, CsApiUrl(wellKnown.Homeserver.BaseURL), 4*time.Hour)
 		}
-		return wellKnown.Homeserver.BaseURL, nil
+		return CsApiUrl(wellKnown.Homeserver.BaseURL), nil
 	}
 
 	// We're out of options.
@@ -286,10 +288,10 @@ var LiveKitParticipantExists = func(
 //     (e.g. 408, 421, 423, 425 — genuinely retriable; also 1xx, 3xx)
 //
 // The status code is returned alongside err so callers can log it.
-var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action DelayEventAction) (int, error) {
+var ExecuteDelayedEventAction = func(csAPIURL CsApiUrl, delayID string, action DelayEventAction) (int, error) {
 	// url.JoinPath path-escapes delayID, preventing path-traversal attacks since
 	// delayID is attacker-controlled. action is a typed constant and safe.
-	endpoint, err := url.JoinPath(csAPIURL, DelayedEventsEndpoint, delayID, string(action))
+	endpoint, err := url.JoinPath(string(csAPIURL), DelayedEventsEndpoint, delayID, string(action))
 	if err != nil {
 		return 0, fmt.Errorf("ExecuteDelayedEventAction: invalid URL: %w", err)
 	}

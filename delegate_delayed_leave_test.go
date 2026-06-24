@@ -326,7 +326,7 @@ func newDelegateDelayedLeaveHandler(t *testing.T) *Handler {
 		false,
 		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 	t.Cleanup(handler.Close)
 	return handler

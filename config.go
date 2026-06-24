@@ -36,7 +36,7 @@ type Config struct {
 	SanityCheckInterval time.Duration
 	// Map of URLs for the Client-Server API keyed by server name. These will
 	// be preferred over .well-known resolution for the contained server names.
-	CsApiUrlOverrides map[string]string
+	CsApiUrlOverrides map[string]CsApiUrl
 }
 
 func readKeySecret() (string, string) {
@@ -84,15 +84,15 @@ func readKeySecret() (string, string) {
 	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
-func readCsApiUrlOverrides(raw string) (map[string]string, error) {
-	m := map[string]string{}
+func readCsApiUrlOverrides(raw string) (map[string]CsApiUrl, error) {
+	m := map[string]CsApiUrl{}
 	if raw != "" {
 		for _, entry := range strings.Split(raw, ",") {
 			server, url, ok := strings.Cut(entry, "=")
 			if !ok {
 				return nil, fmt.Errorf("invalid entry %q, expected server_name=url", entry)
 			}
-			m[server] = url
+			m[server] = CsApiUrl(url)
 		}
 	}
 	return m, nil

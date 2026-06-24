@@ -102,49 +102,49 @@ func TestReadCsApiUrlOverrides(t *testing.T) {
 	testCases := []struct {
 		name        string
 		env         string
-		expectedMap map[string]string
+		expectedMap map[string]CsApiUrl
 		expectedErr bool
 	}{
 		{
 			name:        "Empty",
 			env:         "",
-			expectedMap: map[string]string{},
+			expectedMap: map[string]CsApiUrl{},
 			expectedErr: false,
 		},
 		{
 			name:        "DNS name",
 			env:         "example.com=https://matrix-client.example.com",
-			expectedMap: map[string]string{"example.com": "https://matrix-client.example.com"},
+			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com"},
 			expectedErr: false,
 		},
 		{
 			name:        "DNS name with port",
 			env:         "example.com=https://matrix-client.example.com:1234",
-			expectedMap: map[string]string{"example.com": "https://matrix-client.example.com:1234"},
+			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com:1234"},
 			expectedErr: false,
 		},
 		{
 			name:        "IPv4",
 			env:         "192.168.1.100=https://matrix-client.example.com",
-			expectedMap: map[string]string{"192.168.1.100": "https://matrix-client.example.com"},
+			expectedMap: map[string]CsApiUrl{"192.168.1.100": "https://matrix-client.example.com"},
 			expectedErr: false,
 		},
 		{
 			name:        "IPv4 with port",
 			env:         "192.168.1.100:1234=https://matrix-client.example.com",
-			expectedMap: map[string]string{"192.168.1.100:1234": "https://matrix-client.example.com"},
+			expectedMap: map[string]CsApiUrl{"192.168.1.100:1234": "https://matrix-client.example.com"},
 			expectedErr: false,
 		},
 		{
 			name:        "IPv6",
 			env:         "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]=https://matrix-client.example.com",
-			expectedMap: map[string]string{"[2001:0db8:85a3:0000:0000:8a2e:0370:7334]": "https://matrix-client.example.com"},
+			expectedMap: map[string]CsApiUrl{"[2001:0db8:85a3:0000:0000:8a2e:0370:7334]": "https://matrix-client.example.com"},
 			expectedErr: false,
 		},
 		{
 			name:        "IPv6 with port",
 			env:         "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:1234=https://matrix-client.example.com",
-			expectedMap: map[string]string{"[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:1234": "https://matrix-client.example.com"},
+			expectedMap: map[string]CsApiUrl{"[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:1234": "https://matrix-client.example.com"},
 			expectedErr: false,
 		},
 		{
@@ -162,7 +162,7 @@ func TestReadCsApiUrlOverrides(t *testing.T) {
 		{
 			name:        "Two DNS names",
 			env:         "example.com=https://matrix-client.example.com,example.org=https://matrix-client.example.org",
-			expectedMap: map[string]string{"example.com": "https://matrix-client.example.com", "example.org": "https://matrix-client.example.org"},
+			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com", "example.org": "https://matrix-client.example.org"},
 			expectedErr: false,
 		},
 	}
@@ -203,7 +203,7 @@ func TestParseConfig(t *testing.T) {
 				SkipVerifyTLS:         false,
 				FullAccessHomeservers: []string{"*"},
 				LkJwtBind:             ":8080",
-				CsApiUrlOverrides:     map[string]string{},
+				CsApiUrlOverrides:     map[string]CsApiUrl{},
 			},
 		},
 		{
@@ -226,7 +226,7 @@ func TestParseConfig(t *testing.T) {
 				FullAccessHomeservers: []string{"example.com", "test.com"},
 				LkJwtBind:             ":9090",
 				SanityCheckInterval:   30 * time.Second,
-				CsApiUrlOverrides:     map[string]string{"matrix.com": "https://matrix-client.matrix.com"},
+				CsApiUrlOverrides:     map[string]CsApiUrl{"matrix.com": "https://matrix-client.matrix.com"},
 			},
 		},
 		{
@@ -245,7 +245,7 @@ func TestParseConfig(t *testing.T) {
 				SkipVerifyTLS:         false,
 				FullAccessHomeservers: []string{"*"},
 				LkJwtBind:             ":9090",
-				CsApiUrlOverrides:     map[string]string{},
+				CsApiUrlOverrides:     map[string]CsApiUrl{},
 			},
 		},
 		{
@@ -303,7 +303,7 @@ func TestParseConfig(t *testing.T) {
 				FullAccessHomeservers: []string{"*"},
 				LkJwtBind:             ":8080",
 				SanityCheckInterval:   0,
-				CsApiUrlOverrides:     map[string]string{},
+				CsApiUrlOverrides:     map[string]CsApiUrl{},
 			},
 		},
 		{

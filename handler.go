@@ -110,7 +110,7 @@ type Handler struct {
 	// sanityCheckInterval is the period between room-worker sanity checks.
 	// Zero disables the sanity check.
 	sanityCheckInterval time.Duration
-	csApiUrlOverrides   map[string]string
+	csApiUrlOverrides   map[string]CsApiUrl
 	csApiUrlCache       *csApiUrlCache
 	// loopDone is closed when loop() has exited.
 	loopDone   chan struct{}
@@ -137,7 +137,7 @@ type sfuEventRequest struct {
 	msg       SFUMessage
 }
 
-func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]string) *Handler {
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]CsApiUrl) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
 		ctx:                   ctx,
@@ -223,7 +223,7 @@ func (h *Handler) loop() {
 		case req := <-h.addJobCh:
 			key := jobKey{Room: req.params.LiveKitRoom, Identity: req.params.LiveKitIdentity}
 
-			job, err := NewDelayedEventJob(h.ctx, req.params, func(ctx context.Context, serverName string) (string, error) {
+			job, err := NewDelayedEventJob(h.ctx, req.params, func(ctx context.Context, serverName string) (CsApiUrl, error) {
 				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
 			}, h.jobDoneCh)
 			if err != nil {

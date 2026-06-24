@@ -62,7 +62,7 @@ func TestIsFullAccessUser(t *testing.T) {
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true, []string{"example.com", "another.example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 	for _, tc := range []struct {
 		server string
@@ -116,7 +116,7 @@ func TestHandler_Close(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost"},
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 	done := make(chan struct{})
 	go func() { handler.Close(); close(done) }()
@@ -144,7 +144,7 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
@@ -176,7 +176,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	var resolveCalled atomic.Bool
 	originalResolve := resolveCsApiUrl
 	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
-	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string, _ *csApiUrlCache) (string, error) {
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]CsApiUrl, _ *csApiUrlCache) (CsApiUrl, error) {
 		resolveCalled.Store(true)
 		return "https://matrix-client.example.com", nil
 	}
@@ -184,7 +184,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	var execCalled atomic.Bool
 	originalExec := ExecuteDelayedEventAction
 	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
 		execCalled.Store(true)
 		return http.StatusOK, nil
 	}
@@ -193,7 +193,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
@@ -280,7 +280,7 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost"},
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 	handler.Close() // shut down loop() so ctx is cancelled
 
@@ -581,7 +581,7 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 
 	// Start three jobs in three different rooms — each spawns a room worker goroutine.
@@ -625,7 +625,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 	var resolveCalled atomic.Bool
 	originalResolve := resolveCsApiUrl
 	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
-	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]string, _ *csApiUrlCache) (string, error) {
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]CsApiUrl, _ *csApiUrlCache) (CsApiUrl, error) {
 		resolveCalled.Store(true)
 		return "https://matrix-client.example.com", nil
 	}
@@ -633,7 +633,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 	var execCalled atomic.Bool
 	originalExec := ExecuteDelayedEventAction
 	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
 		execCalled.Store(true)
 		return http.StatusOK, nil
 	}
@@ -642,7 +642,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 
 	room := LiveKitRoomAlias("donech-shutdown-room")
@@ -707,7 +707,7 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]string{},
+		map[string]CsApiUrl{},
 	)
 
 	room := LiveKitRoomAlias("replacement-room")

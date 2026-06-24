@@ -268,7 +268,7 @@ type DelayedEventJob struct {
 	// keep using job.LiveKitRoom etc. without reaching through .Params.
 	JobId UniqueID
 	DelayedEventJobParams
-	lookupCsApiUrl func(context.Context, string) (string, error)
+	lookupCsApiUrl func(context.Context, string) (CsApiUrl, error)
 
 	// EventChannel is the only way to send input to the job from the outside.
 	// It is buffered so that senders are unlikely to block.
@@ -316,7 +316,7 @@ type DelayedEventJob struct {
 func NewDelayedEventJob(
 	parentCtx context.Context,
 	p DelayedEventJobParams,
-	lookupCsApiUrl func(context.Context, string) (string, error),
+	lookupCsApiUrl func(context.Context, string) (CsApiUrl, error),
 	doneCh chan<- *DelayedEventJob,
 ) (*DelayedEventJob, error) {
 	if p.DelayTimeout <= 0 {
