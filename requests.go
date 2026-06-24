@@ -38,8 +38,8 @@ type LegacySFURequest struct {
 	DeviceID     string          `json:"device_id"`
 	DelayId      string          `json:"delay_id,omitempty"`
 	DelayTimeout int             `json:"delay_timeout,omitempty"`
-	// Deprecated and ignored. Server discovery or explicit overrides via LIVEKIT_CS_API_URL_OVERRIDES
-	// should be used instead.
+	// Deprecated and ignored to allow transition. Server discovery or explicit overrides via
+	// LIVEKIT_CS_API_URL_OVERRIDES will be used instead.
 	DelayCsApiUrl string `json:"delay_cs_api_url,omitempty"`
 }
 
@@ -54,8 +54,8 @@ type SFURequest struct {
 	// remove these parameters and the related code at some point.
 	DelayId      string `json:"delay_id,omitempty"`
 	DelayTimeout int    `json:"delay_timeout,omitempty"`
-	// Deprecated and ignored. Server discovery or explicit overrides via LIVEKIT_CS_API_URL_OVERRIDES
-	// should be used instead.
+	// Deprecated and ignored to allow transition. Server discovery or explicit overrides via
+	// LIVEKIT_CS_API_URL_OVERRIDES will be used instead.
 	DelayCsApiUrl string `json:"delay_cs_api_url,omitempty"`
 }
 
@@ -80,8 +80,8 @@ type DelegateDelayedLeaveRequest struct {
 	Member       MatrixRTCMemberType `json:"member"`
 	DelayId      string              `json:"delay_id"`
 	DelayTimeout int                 `json:"delay_timeout"`
-	// Deprecated and ignored. Server discovery or explicit overrides via LIVEKIT_CS_API_URL_OVERRIDES
-	// should be used instead.
+	// Deprecated and ignored to allow transition. Server discovery or explicit overrides via
+	// LIVEKIT_CS_API_URL_OVERRIDES will be used instead.
 	DelayCsApiUrl string `json:"delay_cs_api_url"`
 }
 
