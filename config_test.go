@@ -165,6 +165,12 @@ func TestReadCsApiUrlOverrides(t *testing.T) {
 			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com", "example.org": "https://matrix-client.example.org"},
 			expectedErr: false,
 		},
+		{
+			name:        "Two DNS names with whitespace",
+			env:         " example.com = https://matrix-client.example.com , example.org = https://matrix-client.example.org ",
+			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com", "example.org": "https://matrix-client.example.org"},
+			expectedErr: false,
+		},
 	}
 
 	for _, tc := range testCases {
