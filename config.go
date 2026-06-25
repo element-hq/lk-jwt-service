@@ -92,7 +92,12 @@ func readCsApiUrlOverrides(raw string) (map[string]CsApiUrl, error) {
 			if !ok {
 				return nil, fmt.Errorf("invalid entry %q, expected server_name=url", entry)
 			}
-			m[strings.TrimSpace(server)] = CsApiUrl(strings.TrimSpace(url))
+			server = strings.TrimSpace(server)
+			url = strings.TrimSpace(url)
+			if server == "" || url == "" {
+				return nil, fmt.Errorf("invalid entry %q, expected server_name=url", entry)
+			}
+			m[server] = CsApiUrl(url)
 		}
 	}
 	return m, nil
