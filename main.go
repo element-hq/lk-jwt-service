@@ -60,6 +60,7 @@ func main() {
 		config.SkipVerifyTLS,
 		config.FullAccessHomeservers,
 		config.SanityCheckInterval,
+		config.CsApiUrlOverrides,
 	)
 
 	sanityCheckIntervalDisplay := "disabled"

@@ -53,8 +53,6 @@ func TestLegacySFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
 	}{
 		{"only delay_id", "did", 0, ""},
 		{"only timeout", "", 1000, ""},
-		{"only cs_api_url", "", 0, "https://example.com"},
-		{"delay_id + timeout", "did", 1000, ""},
 		{"delay_id + cs_api_url", "did", 0, "https://example.com"},
 		{"timeout + cs_api_url", "", 1000, "https://example.com"},
 	} {
@@ -71,6 +69,29 @@ func TestLegacySFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
 	}
 }
 
+func TestLegacySFURequest_Validate_CsApiUrlIgnored(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		delayID string
+		timeout int
+		csURL   string
+	}{
+		{"delay parameters but no url", "did", 1000, ""},
+		{"no delay parameters and no url", "", 0, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req := &LegacySFURequest{
+				Room: "!r:x", DeviceID: "DEVICE1234",
+				OpenIDToken: OpenIDTokenType{AccessToken: "tok", MatrixServerName: "x"},
+				DelayId:     c.delayID, DelayTimeout: c.timeout, DelayCsApiUrl: c.csURL,
+			}
+			if err := req.Validate(); err != nil {
+				t.Errorf("expected no validation error for delayed-event params without URL, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestSFURequest_Validate_DelayedEventPartialParams verifies that providing
 // only some delayed-event parameters returns M_BAD_JSON.
 func TestSFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
@@ -82,8 +103,6 @@ func TestSFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
 	}{
 		{"only delay_id", "did", 0, ""},
 		{"only timeout", "", 1000, ""},
-		{"only cs_api_url", "", 0, "https://example.com"},
-		{"delay_id + timeout", "did", 1000, ""},
 		{"delay_id + cs_api_url", "did", 0, "https://example.com"},
 		{"timeout + cs_api_url", "", 1000, "https://example.com"},
 	} {
@@ -96,6 +115,30 @@ func TestSFURequest_Validate_DelayedEventPartialParams(t *testing.T) {
 			}
 			if err := req.Validate(); err == nil {
 				t.Error("expected validation error for partial delayed-event params, got nil")
+			}
+		})
+	}
+}
+
+func TestSFURequest_Validate_CsApiUrlIgnored(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		delayID string
+		timeout int
+		csURL   string
+	}{
+		{"delay parameters but no url", "did", 1000, ""},
+		{"no delay parameters and no url", "", 0, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req := &SFURequest{
+				RoomID: "!r:x", SlotID: "s",
+				OpenIDToken: OpenIDTokenType{AccessToken: "tok", MatrixServerName: "x"},
+				Member:      MatrixRTCMemberType{ID: "id", ClaimedUserID: "@u:x", ClaimedDeviceID: "d"},
+				DelayId:     c.delayID, DelayTimeout: c.timeout, DelayCsApiUrl: c.csURL,
+			}
+			if err := req.Validate(); err != nil {
+				t.Errorf("expected no validation error for delayed-event params without URL, got: %v", err)
 			}
 		})
 	}
@@ -163,12 +206,19 @@ func TestDelegateDelayedLeaveRequest_Validate_MissingDelayedEventParams(t *testi
 		{"missing DelayId", func(r *DelegateDelayedLeaveRequest) { r.DelayId = "" }},
 		{"zero DelayTimeout", func(r *DelegateDelayedLeaveRequest) { r.DelayTimeout = 0 }},
 		{"negative DelayTimeout", func(r *DelegateDelayedLeaveRequest) { r.DelayTimeout = -1 }},
-		{"missing DelayCsApiUrl", func(r *DelegateDelayedLeaveRequest) { r.DelayCsApiUrl = "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := validDelegateDelayedLeaveRequest()
 			tc.mutate(&req)
 			assertValidationError(t, req.Validate(), "M_BAD_JSON")
 		})
+	}
+}
+
+func TestDelegateDelayedLeaveRequest_Validate_MissingCsApiUrlIgnored(t *testing.T) {
+	req := validDelegateDelayedLeaveRequest()
+	req.DelayCsApiUrl = ""
+	if err := req.Validate(); err != nil {
+		t.Errorf("expected no error for valid request without CS API URL, got: %v", err)
 	}
 }
