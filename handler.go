@@ -444,6 +444,9 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	if isFullAccessUser {
 		// If delegation is requested, verify that we can resolve the Client-Server API and fail the request otherwise.
 		// We do this before creating the LiveKit room so that we don't produce lingering rooms in the error case.
+		//
+		// TODO: This code is currently duplicated across the token endpoints and the delegation endpoint. This
+		// will be resolved ones the already deprecated delay parameters are removed from the token endpoints.
 		if delayedEventDelegationRequested {
 			if url, _ := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides, h.csApiUrlCache); url == "" {
 				return nil, &MatrixErrorResponse{
@@ -528,6 +531,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	if isFullAccessUser {
 		// If delegation is requested, verify that we can resolve the Client-Server API and fail the request otherwise.
 		// We do this before creating the LiveKit room so that we don't produce lingering rooms in the error case.
+		//
+		// TODO: This code is currently duplicated across the token endpoints and the delegation endpoint. This
+		// will be resolved ones the already deprecated delay parameters are removed from the token endpoints.
 		if delayedEventDelegationRequested {
 			if url, _ := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides, h.csApiUrlCache); url == "" {
 				return nil, &MatrixErrorResponse{
