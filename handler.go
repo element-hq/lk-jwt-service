@@ -442,6 +442,19 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	if isFullAccessUser {
+		// If delegation is requested, verify that we can resolve the Client-Server API and fail the request otherwise.
+		// We do this before creating the LiveKit room so that we don't produce lingering rooms in the error case.
+		if delayedEventDelegationRequested {
+			if url, _ := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides, h.csApiUrlCache); url == "" {
+				return nil, &MatrixErrorResponse{
+					Status:  http.StatusBadRequest,
+					ErrCode: "M_BAD_JSON",
+					Err:     "Unable to resolve client-server API",
+				}
+			}
+		}
+
+		// Now create the LiveKit room.
 		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, matrixID, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
@@ -513,6 +526,19 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	if isFullAccessUser {
+		// If delegation is requested, verify that we can resolve the Client-Server API and fail the request otherwise.
+		// We do this before creating the LiveKit room so that we don't produce lingering rooms in the error case.
+		if delayedEventDelegationRequested {
+			if url, _ := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides, h.csApiUrlCache); url == "" {
+				return nil, &MatrixErrorResponse{
+					Status:  http.StatusBadRequest,
+					ErrCode: "M_BAD_JSON",
+					Err:     "Unable to resolve client-server API",
+				}
+			}
+		}
+
+		// Now create the LiveKit room.
 		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, matrixID, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
@@ -578,6 +604,15 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 
 	lkIdentity := LiveKitIdentityFor(matrixID, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
+
+	// Verify that the Client-Server API can be resolved and prime the cache.
+	if url, _ := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides, h.csApiUrlCache); url == "" {
+		return nil, &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Unable to resolve client-server API",
+		}
+	}
 
 	slog.Info("Handler: scheduling delayed event job (delegate_delayed_leave)",
 		"room", lkRoomAlias, "lkId", lkIdentity,

@@ -185,24 +185,38 @@ func TestProcessLegacySFURequest(t *testing.T) {
 		return &fclient.UserInfo{Sub: "@mock:example.com"}, nil
 	}
 
+	var failResolution bool
+	originalResolve := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]CsApiUrl, _ *csApiUrlCache) (CsApiUrl, error) {
+		if failResolution {
+			return "", &MatrixErrorResponse{Status: http.StatusNotFound, ErrCode: "M_NOT_FOUND", Err: "no"}
+		}
+		return "https://matrix.example.com", nil
+	}
+
 	for _, tc := range []struct {
-		name                 string
-		matrixID             string
-		delayId              string
-		delayTimeout         int
-		expectJoinTokenError bool
-		expectExchangeError  bool
-		expectCreateRoom     bool
-		expectError          bool
+		name                  string
+		matrixID              string
+		delayId               string
+		delayTimeout          int
+		expectJoinTokenError  bool
+		expectExchangeError   bool
+		expectResolutionError bool
+		expectCreateRoom      bool
+		expectError           bool
 	}{
 		{name: "Full access — all OK", matrixID: "@user:example.com", expectCreateRoom: true},
 		{name: "Restricted — all OK", matrixID: "@user:other.com"},
 		{name: "Exchange fails", matrixID: "@user:example.com", expectExchangeError: true, expectError: true},
 		{name: "Token key empty", matrixID: "@user:example.com", expectJoinTokenError: true, expectError: true},
+		{name: "Delegation — all OK", matrixID: "@user:example.com", expectCreateRoom: true, delayId: "did", delayTimeout: 1000},
+		{name: "Delegation — resolution error", matrixID: "@user:example.com", expectCreateRoom: false, delayId: "did", delayTimeout: 1000, expectResolutionError: true, expectError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calledCreateLiveKitRoom = false
 			failExchange = tc.expectExchangeError
+			failResolution = tc.expectResolutionError
 
 			apiKey := "the_api_key"
 			if tc.expectJoinTokenError {

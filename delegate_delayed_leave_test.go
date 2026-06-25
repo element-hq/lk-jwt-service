@@ -126,6 +126,29 @@ func TestHandleDelegateDelayedLeave_ExchangeError(t *testing.T) {
 	}
 }
 
+func TestHandleDelegateDelayedLeave_CsApiUrlResolutionError(t *testing.T) {
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	originalResolve := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]CsApiUrl, _ *csApiUrlCache) (CsApiUrl, error) {
+		return "", &MatrixErrorResponse{Status: http.StatusNotFound, ErrCode: "M_NOT_FOUND", Err: "no"}
+	}
+
+	handler := newDelegateDelayedLeaveHandler(t)
+	body := marshalDelegateDelayedLeaveRequest(t, nil)
+	req := httptest.NewRequest("POST", "/delegate_delayed_leave", body)
+	rr := httptest.NewRecorder()
+	handler.prepareMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 when CS API URL resolution fails, got %d", rr.Code)
+	}
+}
+
 func TestHandleDelegateDelayedLeave_Success(t *testing.T) {
 	originalExchange := exchangeOpenIdUserInfo
 	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
@@ -326,7 +349,7 @@ func newDelegateDelayedLeaveHandler(t *testing.T) *Handler {
 		false,
 		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
-		map[string]CsApiUrl{},
+		map[string]CsApiUrl{"example.com": "https://matrix.example.com"},
 	)
 	t.Cleanup(handler.Close)
 	return handler
