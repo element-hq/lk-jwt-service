@@ -18,13 +18,14 @@ func main() {
 		lkJwtBind = "8080"
 	}
 
-	healthUrl := fmt.Sprintf("http://127.0.0.1:%s/healthz", lkJwtBind)
-	resp, err := http.Get(healthUrl)
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%s/healthz", lkJwtBind))
 	if err != nil {
+		fmt.Println("Connection error:", err)
 		os.Exit(1)
 	}
 
 	if resp.StatusCode != 200 {
+		fmt.Println("Healthcheck failed with status code", resp.StatusCode)
 		os.Exit(1)
 	}
 }
