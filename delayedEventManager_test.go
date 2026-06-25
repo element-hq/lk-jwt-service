@@ -357,11 +357,11 @@ func TestDelayedEventJob_ResetWithFailingCsApiUrlResolution(t *testing.T) {
 
 	select {
 	case ev := <-job.EventChannel:
-		if ev != DelayedEventNotFound {
-			t.Errorf("expected DelayedEventNotFound, got %v", ev)
+		if ev != CsApiUrlNotFound {
+			t.Errorf("expected CsApiUrlNotFound, got %v", ev)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for DelayedEventNotFound")
+		t.Fatal("timed out waiting for CsApiUrlNotFound")
 	}
 	job.Stop()
 }

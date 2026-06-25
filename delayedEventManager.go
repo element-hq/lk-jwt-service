@@ -69,6 +69,7 @@ const (
 	DelayedEventReset
 	DelayedEventTimedOut
 	DelayedEventNotFound
+	CsApiUrlNotFound
 	WaitingStateTimedOut
 	SFUNotAvailable
 	JobReplaced
@@ -94,6 +95,8 @@ func (s DelayedEventSignal) String() string {
 		return "DelayedEventTimedOut"
 	case DelayedEventNotFound:
 		return "DelayedEventNotFound"
+	case CsApiUrlNotFound:
+		return "CsApiUrlNotFound"
 	case WaitingStateTimedOut:
 		return "WaitingStateTimedOut"
 	case SFUNotAvailable:
@@ -502,8 +505,9 @@ func (job *DelayedEventJob) stopTimers() {
 //	    |                 |             │ • Stop delayed-event timer      │
 //	    |                 |             └─────────────────────────────────┘
 //	    |                 |                          │
-//	    |                 | WaitingStateTimedOut     │ DelayedEventTimedOut,
-//	    |                 |                          │ DelayedEventNotFound,
+//	    |                 | WaitingStateTimedOut     │ CsApiUrlNotFound,
+//	    |                 |                          │ DelayedEventTimedOut,
+//      |                 |                          | DelayedEventNotFound,
 //	    |                 |                          │ ParticipantDisconnectedIntentionally,
 //	    |                 |                          │ ParticipantConnectionAborted,
 //	    |                 └──────────────────────────│ SFUParticipantGone
@@ -581,10 +585,11 @@ func (job *DelayedEventJob) stopTimers() {
 //	    ▼
 //	job.EventChannel <- DelayedEventReset       (cycle repeats)
 //
-// The cycle ends when ActionRestart fails terminally: DelayedEventTimedOut
-// or DelayedEventNotFound is emitted instead of a new deadline, transitioning
-// Connected → Disconnected; the exit action stops the timer. Late results on
-// restartResultCh are discarded by loop()'s state != Connected guard.
+// The cycle ends when ActionRestart fails terminally: CsApiUrlNotFound,
+// DelayedEventTimedOut or DelayedEventNotFound is emitted instead of a new
+// deadline, transitioning Connected → Disconnected; the exit action stops
+// the timer. Late results on restartResultCh are discarded by loop()'s
+// state != Connected guard.
 
 // fsmTransitions maps state × event to the next state. Pairs not listed
 // here cause no state change (and therefore no exit/entry actions) — this
@@ -603,6 +608,7 @@ var fsmTransitions = map[DelayEventState]map[DelayedEventSignal]DelayEventState{
 		ParticipantConnectionAborted:         Disconnected,
 		DelayedEventTimedOut:                 Disconnected,
 		DelayedEventNotFound:                 Disconnected,
+		CsApiUrlNotFound:                     Disconnected,
 		SFUParticipantGone:                   Disconnected,
 		JobReplaced:                          Replaced,
 	},
@@ -817,6 +823,7 @@ func (job *DelayedEventJob) handleStateEntryAction(state DelayEventState, event 
 //   - success: new deadline on restartResultCh captured when
 //     ActionRestart succeeds (not when loop() reads it) so loop() latency
 //     cannot shrink the ActionSend window
+//   - client-server API resolution error: CsApiUrlNotFound on EventChannel
 //   - delayed event gone on the homeserver (404): DelayedEventNotFound
 //     on EventChannel
 //   - any other failure, including an already-exhausted deadline:
@@ -847,11 +854,11 @@ func (job *DelayedEventJob) startDelayedEventRestart() {
 		// Resolve the URL of the Client-Server API.
 		csApiUrl, err := job.lookupCsApiUrl(job.ctx, job.ServerName)
 		if err != nil {
-			slog.Info("Job: ActionRestart could not resolve Client-Server API URL — emitting DelayedEventNotFound",
+			slog.Info("Job: ActionRestart could not resolve Client-Server API URL — emitting CsApiUrlNotFound",
 				"room", job.LiveKitRoom, "lkId", job.LiveKitIdentity,
 				"delayId", job.DelayId, "jobId", job.JobId, "err", err)
 			select {
-			case job.EventChannel <- DelayedEventNotFound:
+			case job.EventChannel <- CsApiUrlNotFound:
 			case <-job.ctx.Done():
 			}
 			return
