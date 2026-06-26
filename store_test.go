@@ -27,7 +27,7 @@ func runStoreTests(t *testing.T, newStore func() store) {
 		LiveKitRoom:     LiveKitRoomAlias("!room:example.com"),
 		LiveKitIdentity: identity,
 	}
-	job := storedJob{Params: params, RestartedAt: time.Now().Truncate(time.Millisecond)}
+	job := storedJob{Params: params, RestartedAt: time.Now().UTC().Truncate(time.Millisecond)}
 
 	t.Run("TestLoadAllJobsOnEmptyStore", func(t *testing.T) {
 		store := newStore()
