@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -14,176 +15,180 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// ── shared test suite ─────────────────────────────────────────────────────────
-
-func runStoreTests(t *testing.T, store JobStore) {
+func runStoreTests(t *testing.T, newStore func() store) {
 	t.Helper()
 	ctx := context.Background()
 
-	identity := LiveKitIdentity("@user:example.com:device-id:member-id")
+	identity := LiveKitIdentity("@user:example.com")
 	params := DelayedEventJobParams{
-		DelayId:         "delay-1",
+		DelayId:         "id",
 		ServerName:      "example.com",
 		DelayTimeout:    30 * time.Second,
-		LiveKitRoom:     LiveKitRoomAlias("room-abc"),
+		LiveKitRoom:     LiveKitRoomAlias("!room:example.com"),
 		LiveKitIdentity: identity,
 	}
-	pj := PersistedJob{Params: params, CreatedAt: time.Now().Truncate(time.Millisecond)}
+	job := storedJob{Params: params, CreatedAt: time.Now().Truncate(time.Millisecond)}
 
-	t.Run("LoadAll_empty", func(t *testing.T) {
-		jobs, err := store.LoadAll(ctx)
+	t.Run("TestLoadAllJobsOnEmptyStore", func(t *testing.T) {
+		store := newStore()
+
+		// Load all jobs and check that the store is empty.
+		jobs, err := store.allJobs(ctx)
 		if err != nil {
-			t.Fatalf("LoadAll on empty store: %v", err)
+			t.Fatalf("getting all jobs failed: %v", err)
 		}
 		if len(jobs) != 0 {
 			t.Errorf("expected 0 jobs, got %d", len(jobs))
 		}
 	})
 
-	t.Run("Save_and_LoadAll", func(t *testing.T) {
-		if err := store.Save(ctx, identity, pj); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-		t.Cleanup(func() { _ = store.Delete(ctx, identity) })
+	t.Run("TestSaveJobOnEmptyStore", func(t *testing.T) {
+		store := newStore()
 
-		jobs, err := store.LoadAll(ctx)
+		// Save a job.
+		if err := store.saveJob(ctx, identity, job); err != nil {
+			t.Fatalf("Saving job failed: %v", err)
+		}
+
+		// Load all jobs and check that we get the saved job.
+		jobs, err := store.allJobs(ctx)
 		if err != nil {
-			t.Fatalf("LoadAll: %v", err)
+			t.Fatalf("getting all jobs failed: %v", err)
 		}
 		if len(jobs) != 1 {
 			t.Fatalf("expected 1 job, got %d", len(jobs))
 		}
 		got := jobs[0]
-		if got.Params.DelayId != pj.Params.DelayId {
-			t.Errorf("DelayId = %q, want %q", got.Params.DelayId, pj.Params.DelayId)
-		}
-		if got.Params.ServerName != pj.Params.ServerName {
-			t.Errorf("CsApiUrl = %q, want %q", got.Params.ServerName, pj.Params.ServerName)
-		}
-		if got.Params.DelayTimeout != pj.Params.DelayTimeout {
-			t.Errorf("DelayTimeout = %q, want %q", got.Params.DelayTimeout, pj.Params.DelayTimeout)
-		}
-		if got.Params.LiveKitRoom != pj.Params.LiveKitRoom {
-			t.Errorf("LiveKitRoom = %q, want %q", got.Params.LiveKitRoom, pj.Params.LiveKitRoom)
-		}
-		if got.Params.DelayTimeout != pj.Params.DelayTimeout {
-			t.Errorf("DelayTimeout = %v, want %v", got.Params.DelayTimeout, pj.Params.DelayTimeout)
-		}
-		if !got.CreatedAt.Equal(pj.CreatedAt) {
-			t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, pj.CreatedAt)
+		if !reflect.DeepEqual(job, got) {
+			t.Fatalf("expected %v, got %v", job, got)
 		}
 	})
 
-	t.Run("Save_overwrites", func(t *testing.T) {
-		if err := store.Save(ctx, identity, pj); err != nil {
-			t.Fatalf("Save first: %v", err)
-		}
-		t.Cleanup(func() { _ = store.Delete(ctx, identity) })
+	t.Run("TestSaveJobOverwrites", func(t *testing.T) {
+		store := newStore()
 
-		updated := pj
+		// Save a job.
+		if err := store.saveJob(ctx, identity, job); err != nil {
+			t.Fatalf("saving first job failed: %v", err)
+		}
+
+		// Save an updated job for the same identity.
+		updated := job
 		updated.Params.DelayId = "delay-updated"
-		if err := store.Save(ctx, identity, updated); err != nil {
-			t.Fatalf("Save second: %v", err)
+		if err := store.saveJob(ctx, identity, updated); err != nil {
+			t.Fatalf("saving second job failed second: %v", err)
 		}
 
-		jobs, err := store.LoadAll(ctx)
+		// Load all jobs and check that we get the updated job.
+		jobs, err := store.allJobs(ctx)
 		if err != nil {
-			t.Fatalf("LoadAll: %v", err)
+			t.Fatalf("getting all jobs failed: %v", err)
 		}
 		if len(jobs) != 1 {
 			t.Fatalf("expected 1 job after overwrite, got %d", len(jobs))
 		}
-		if jobs[0].Params.DelayId != "delay-updated" {
-			t.Errorf("overwrite did not take effect: got DelayId=%q", jobs[0].Params.DelayId)
+		got := jobs[0]
+		if !reflect.DeepEqual(updated, got) {
+			t.Fatalf("expected %v, got %v", updated, got)
 		}
 	})
 
-	t.Run("Delete", func(t *testing.T) {
+	t.Run("TestDeleteJob", func(t *testing.T) {
+		store := newStore()
+
+		// Save a job.
+		if err := store.saveJob(ctx, identity, job); err != nil {
+			t.Fatalf("saving first job failed: %v", err)
+		}
+
+		// Save another job.
 		identity2 := LiveKitIdentity("@other:example.com:device-id:member-id")
-		pj2 := pj
-		pj2.Params.LiveKitIdentity = identity2
-
-		if err := store.Save(ctx, identity, pj); err != nil {
-			t.Fatalf("Save first: %v", err)
-		}
-		if err := store.Save(ctx, identity2, pj2); err != nil {
-			t.Fatalf("Save second: %v", err)
-		}
-		t.Cleanup(func() {
-			_ = store.Delete(ctx, identity)
-			_ = store.Delete(ctx, identity2)
-		})
-
-		if err := store.Delete(ctx, identity); err != nil {
-			t.Fatalf("Delete: %v", err)
+		job2 := job
+		job2.Params.LiveKitIdentity = identity2
+		if err := store.saveJob(ctx, identity2, job2); err != nil {
+			t.Fatalf("saving second job failed: %v", err)
 		}
 
-		jobs, err := store.LoadAll(ctx)
+		// Delete the first job.
+		if err := store.deleteJob(ctx, identity); err != nil {
+			t.Fatalf("deleting first job failed: %v", err)
+		}
+
+		// Load all jobs and check that we still get the second job.
+		jobs, err := store.allJobs(ctx)
 		if err != nil {
-			t.Fatalf("LoadAll: %v", err)
+			t.Fatalf("getting all jobs failed: %v", err)
 		}
 		if len(jobs) != 1 {
 			t.Fatalf("expected 1 job after delete, got %d", len(jobs))
 		}
-		if jobs[0].Params.LiveKitIdentity != identity2 {
-			t.Errorf("wrong job remaining: got identity=%q", jobs[0].Params.LiveKitIdentity)
+		got := jobs[0]
+		if !reflect.DeepEqual(job2, got) {
+			t.Fatalf("expected %v, got %v", job2, got)
 		}
 	})
 
-	t.Run("Delete_missing_is_not_error", func(t *testing.T) {
-		if err := store.Delete(ctx, LiveKitIdentity("@nonexistent:example.com")); err != nil {
-			t.Errorf("Delete of missing key should not error, got: %v", err)
+	t.Run("TestDeleteMissingJob", func(t *testing.T) {
+		store := newStore()
+
+		// Delete a job that doesn't exist in the store.
+		if err := store.deleteJob(ctx, LiveKitIdentity("@nonexistent:example.com")); err != nil {
+			t.Errorf("deleting missing job failed: %v", err)
 		}
 	})
 }
 
-// ── memory store ──────────────────────────────────────────────────────────────
+// In-memory store tests
 
-func TestMemoryJobStore(t *testing.T) {
-	runStoreTests(t, newMemoryJobStore())
+func testInMemoryStore(t *testing.T) {
+	runStoreTests(t, newInMemoryStore)
 }
 
-// ── Redis store ───────────────────────────────────────────────────────────────
+// Redis store tests
 
-func newMiniredisStore(t *testing.T) JobStore {
+func newMiniRedisStore(t *testing.T) (store, *redis.Client) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	return &redisJobStore{client: client}
+	return &redisStore{client: client}, client
 }
 
-func TestRedisJobStore(t *testing.T) {
-	runStoreTests(t, newMiniredisStore(t))
+func testRedisStore(t *testing.T) {
+	runStoreTests(t, func() store {
+		store, _ := newMiniRedisStore(t)
+		return store
+	})
 }
 
-func TestRedisJobStore_SkipsUnparseableEntry(t *testing.T) {
-	mr := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	store := &redisJobStore{client: client}
+func testRedisStoreSkipsUnparseableEntry(t *testing.T) {
+	store, client := newMiniRedisStore(t)
 
+	// Save a corrupt JSON entry directly via the Redis client.
 	ctx := context.Background()
-	// Write a corrupt JSON entry directly via the Redis client.
 	if err := client.HSet(ctx, redisJobsHashKey, "@bad:identity", "not valid json").Err(); err != nil {
-		t.Fatalf("HSet: %v", err)
+		t.Fatalf("writing into store failed: %v", err)
 	}
-	// Write a valid entry alongside it.
+
+	// Save a valid entry alongside it.
 	identity := LiveKitIdentity("@good:example.com")
-	pj := PersistedJob{
+	job := storedJob{
 		Params:    DelayedEventJobParams{DelayId: "id", LiveKitIdentity: identity},
 		CreatedAt: time.Now(),
 	}
-	if err := store.Save(ctx, identity, pj); err != nil {
-		t.Fatalf("Save: %v", err)
+	if err := store.saveJob(ctx, identity, job); err != nil {
+		t.Fatalf("saving job failed: %v", err)
 	}
 
-	jobs, err := store.LoadAll(ctx)
+	// Load all jobs and check that we only get the valid entry.
+	jobs, err := store.allJobs(ctx)
 	if err != nil {
-		t.Fatalf("LoadAll should not fail on corrupt entries: %v", err)
+		t.Fatalf("getting all jobs failed: %v", err)
 	}
 	if len(jobs) != 1 {
 		t.Fatalf("expected 1 valid job, got %d", len(jobs))
 	}
-	if jobs[0].Params.DelayId != pj.Params.DelayId {
-		t.Fatalf("DelayId = %q, want %q", jobs[0].Params.DelayId, pj.Params.DelayId)
+	got := jobs[0]
+	if !reflect.DeepEqual(job, got) {
+		t.Fatalf("expected %v, got %v", job, got)
 	}
 }

@@ -113,7 +113,7 @@ type Handler struct {
 	sanityCheckInterval time.Duration
 	csApiUrlOverrides   map[string]CsApiUrl
 	csApiUrlCache       *csApiUrlCache
-	store               JobStore
+	store               store
 	// loopDone is closed when loop() has exited.
 	loopDone   chan struct{}
 	jobDoneCh  chan *DelayedEventJob
@@ -141,7 +141,7 @@ type sfuEventRequest struct {
 
 var errStorePersistFailed = errors.New("store: failed to persist job")
 
-func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]CsApiUrl, store JobStore) *Handler {
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]CsApiUrl, store store) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
 		ctx:                   ctx,
@@ -201,15 +201,15 @@ func (h *Handler) loop() {
 	var loopWg sync.WaitGroup
 
 	// Startup recovery: reload jobs that were active before the last shutdown.
-	if persistedJobs, err := h.store.LoadAll(h.ctx); err != nil {
+	if storedJobs, err := h.store.allJobs(h.ctx); err != nil {
 		slog.Error("Handler: failed to load persisted jobs, starting with empty state", "err", err)
 	} else {
-		for _, pj := range persistedJobs {
+		for _, pj := range storedJobs {
 			remaining := time.Until(pj.CreatedAt.Add(pj.Params.DelayTimeout))
 			key := jobKey{Room: pj.Params.LiveKitRoom, Identity: pj.Params.LiveKitIdentity}
 			if remaining <= 0 {
 				slog.Info("Handler: skipping expired persisted job", "lkId", key.Identity)
-				if err := h.store.Delete(h.ctx, key.Identity); err != nil {
+				if err := h.store.deleteJob(h.ctx, key.Identity); err != nil {
 					slog.Error("Handler: failed to delete expired persisted job", "lkId", key.Identity, "err", err)
 				}
 				continue
@@ -273,8 +273,8 @@ func (h *Handler) loop() {
 				continue
 			}
 
-			pj := PersistedJob{Params: req.params, CreatedAt: time.Now()}
-			if err := h.store.Save(h.ctx, key.Identity, pj); err != nil {
+			pj := storedJob{Params: req.params, CreatedAt: time.Now()}
+			if err := h.store.saveJob(h.ctx, key.Identity, pj); err != nil {
 				slog.Error("Handler: failed to persist job",
 					"room", key.Room, "lkId", key.Identity, "err", err)
 				req.result <- addJobResult{err: fmt.Errorf("%w: %w", errStorePersistFailed, err)}
@@ -353,7 +353,7 @@ func (h *Handler) loop() {
 			slog.Info("Handler: job done, cleaning up",
 				"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 			delete(jobs, key)
-			if err := h.store.Delete(h.ctx, key.Identity); err != nil {
+			if err := h.store.deleteJob(h.ctx, key.Identity); err != nil {
 				slog.Error("Handler: failed to delete persisted job",
 					"room", key.Room, "lkId", key.Identity, "err", err)
 			}

@@ -50,15 +50,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	var store JobStore
+	var store store
 	if config.RedisURL != "" {
-		store, err = newRedisJobStore(config.RedisURL)
+		store, err = newRedisStore(config.RedisURL)
 		if err != nil {
 			log.Fatalf("Could not connect Redis store: %v", err)
 		}
 	} else {
 		slog.Warn("LIVEKIT_REDIS_URL not set. Using in-memory store.")
-		store = newMemoryJobStore()
+		store = newInMemoryStore()
 	}
 
 	handler := NewHandler(

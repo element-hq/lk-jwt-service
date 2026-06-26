@@ -30,8 +30,8 @@ func TestHandler_Restore_ResumesLiveJobs(t *testing.T) {
 	identity := LiveKitIdentity("@restore-user:example.com:device:member")
 	room := LiveKitRoomAlias("restore-test-room")
 
-	store := newMemoryJobStore()
-	_ = store.Save(context.Background(), identity, PersistedJob{
+	store := newInMemoryStore()
+	_ = store.saveJob(context.Background(), identity, storedJob{
 		Params: DelayedEventJobParams{
 			DelayId:         "restore-delay-id",
 			ServerName:      "example.com",
@@ -70,7 +70,7 @@ func TestHandler_Restore_ResumesLiveJobs(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// After the job completes, the store entry should have been deleted.
-	jobs, err := store.LoadAll(context.Background())
+	jobs, err := store.allJobs(context.Background())
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
 	}
@@ -83,8 +83,8 @@ func TestHandler_Restore_SkipsExpiredJobs(t *testing.T) {
 	identity := LiveKitIdentity("@expired:example.com:device:member")
 	room := LiveKitRoomAlias("expired-room")
 
-	store := newMemoryJobStore()
-	_ = store.Save(context.Background(), identity, PersistedJob{
+	store := newInMemoryStore()
+	_ = store.saveJob(context.Background(), identity, storedJob{
 		Params: DelayedEventJobParams{
 			DelayId:         "expired-delay-id",
 			ServerName:      "example.com",
@@ -116,7 +116,7 @@ func TestHandler_Restore_SkipsExpiredJobs(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 
 	// The store entry must have been deleted during recovery.
-	jobs, err := store.LoadAll(context.Background())
+	jobs, err := store.allJobs(context.Background())
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
 	}
@@ -186,20 +186,20 @@ func TestHandler_SaveError_FailsRequest(t *testing.T) {
 
 type failingLoadStore struct{}
 
-func (s *failingLoadStore) Save(_ context.Context, _ LiveKitIdentity, _ PersistedJob) error {
+func (s *failingLoadStore) saveJob(_ context.Context, _ LiveKitIdentity, _ storedJob) error {
 	return nil
 }
-func (s *failingLoadStore) Delete(_ context.Context, _ LiveKitIdentity) error { return nil }
-func (s *failingLoadStore) LoadAll(_ context.Context) ([]PersistedJob, error) {
+func (s *failingLoadStore) deleteJob(_ context.Context, _ LiveKitIdentity) error { return nil }
+func (s *failingLoadStore) allJobs(_ context.Context) ([]storedJob, error) {
 	return nil, errors.New("simulated LoadAll failure")
 }
 
 type failingSaveStore struct{}
 
-func (s *failingSaveStore) Save(_ context.Context, _ LiveKitIdentity, _ PersistedJob) error {
+func (s *failingSaveStore) saveJob(_ context.Context, _ LiveKitIdentity, _ storedJob) error {
 	return errors.New("simulated Save failure")
 }
-func (s *failingSaveStore) Delete(_ context.Context, _ LiveKitIdentity) error { return nil }
-func (s *failingSaveStore) LoadAll(_ context.Context) ([]PersistedJob, error) {
+func (s *failingSaveStore) deleteJob(_ context.Context, _ LiveKitIdentity) error { return nil }
+func (s *failingSaveStore) allJobs(_ context.Context) ([]storedJob, error) {
 	return nil, nil
 }
