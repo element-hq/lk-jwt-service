@@ -11,7 +11,7 @@ services:
     ports:
       - "${LIVEKIT_JWT_BIND:-:8080}:8080"
     environment:
-      REDIS_URL: redis://redis:6379
+      LIVEKIT_REDIS_URL: redis://redis:6379
       LIVEKIT_KEY: ${LIVEKIT_KEY}
       LIVEKIT_SECRET: ${LIVEKIT_SECRET}
       LIVEKIT_URL: ${LIVEKIT_URL}

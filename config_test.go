@@ -235,7 +235,7 @@ func TestParseConfig(t *testing.T) {
 				"LIVEKIT_INSECURE_SKIP_VERIFY_TLS":      "YES_I_KNOW_WHAT_I_AM_DOING",
 				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "30",
 				"LIVEKIT_CS_API_URL_OVERRIDES":          "matrix.com=https://matrix-client.matrix.com",
-				"REDIS_URL":                             "localhost:6379",
+				"LIVEKIT_REDIS_URL":                     "localhost:6379",
 			},
 			wantConfig: &Config{
 				Key:                   "test_key",

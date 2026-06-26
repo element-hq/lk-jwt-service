@@ -57,7 +57,7 @@ func main() {
 			log.Fatalf("Could not connect Redis store: %v", err)
 		}
 	} else {
-		slog.Warn("REDIS_URL not set. Using in-memory store.")
+		slog.Warn("LIVEKIT_REDIS_URL not set. Using in-memory store.")
 		store = newMemoryJobStore()
 	}
 

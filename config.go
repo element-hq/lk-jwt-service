@@ -39,7 +39,7 @@ type Config struct {
 	CsApiUrlOverrides map[string]CsApiUrl
 	// Connection URL for the Redis job store. When empty, the service falls
 	// back to a non-persistent in-memory store.
-	// Configure via REDIS_URL (e.g. redis://localhost:6379).
+	// Configure via LIVEKIT_REDIS_URL (e.g. redis://localhost:6379).
 	RedisURL string
 }
 
@@ -166,6 +166,6 @@ func parseConfig() (*Config, error) {
 		LkJwtBind:             lkJwtBind,
 		SanityCheckInterval:   sanityCheckInterval,
 		CsApiUrlOverrides:     csApiUrlOverrides,
-		RedisURL:              os.Getenv("REDIS_URL"),
+		RedisURL:              os.Getenv("LIVEKIT_REDIS_URL"),
 	}, nil
 }
