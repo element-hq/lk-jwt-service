@@ -173,7 +173,7 @@ func TestRedisStoreSkipsUnparseableEntry(t *testing.T) {
 	identity := LiveKitIdentity("@good:example.com")
 	job := storedJob{
 		Params:    DelayedEventJobParams{DelayId: "id", LiveKitIdentity: identity},
-		CreatedAt: time.Now(),
+		CreatedAt: time.Now().Truncate(time.Millisecond),
 	}
 	if err := store.saveJob(ctx, identity, job); err != nil {
 		t.Fatalf("saving job failed: %v", err)
