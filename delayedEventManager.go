@@ -504,15 +504,18 @@ func (job *DelayedEventJob) stopTimers() {
 //	    |                 |             │ On Exit:                        │
 //	    |                 |             │ • Stop delayed-event timer      │
 //	    |                 |             └─────────────────────────────────┘
-//	    |                 |                          │
-//	    |                 | WaitingStateTimedOut     │ CsApiUrlNotFound,
-//	    |                 |                          │ DelayedEventTimedOut,
-//      |                 |                          | DelayedEventNotFound,
-//	    |                 |                          │ ParticipantDisconnectedIntentionally,
+//	    |                 |                          │       |
+//	    |                 | WaitingStateTimedOut     │ ParticipantDisconnectedIntentionally,
 //	    |                 |                          │ ParticipantConnectionAborted,
-//	    |                 └──────────────────────────│ SFUParticipantGone
-//	    |                                            │
-//	    | ParticipantConnectionAborted               │
+//      |                 |                          │ SFUParticipantGone
+//	    |                 |                          │       |
+//	    |                 |                          │       | CsApiUrlNotFound,
+//	    |                 |                          │       | DelayedEventTimedOut,
+//	    |                 └──────────────────────────|       | DelayedEventNotFound
+//	    |                                            │       │
+//	    | ParticipantConnectionAborted               │       │
+//	    |────────────────────────────────────────────⌒───────╯
+//	    │                                            │
 //	    ▼                                            ▼
 //	┌──────────────────────┐              ┌──────────────────────┐
 //	│ Aborted              │              │ Disconnected         │
@@ -587,7 +590,7 @@ func (job *DelayedEventJob) stopTimers() {
 //
 // The cycle ends when ActionRestart fails terminally: CsApiUrlNotFound,
 // DelayedEventTimedOut or DelayedEventNotFound is emitted instead of a new
-// deadline, transitioning Connected → Disconnected; the exit action stops
+// deadline, transitioning Connected → Aborted; the exit action stops
 // the timer. Late results on restartResultCh are discarded by loop()'s
 // state != Connected guard.
 
@@ -606,9 +609,9 @@ var fsmTransitions = map[DelayEventState]map[DelayedEventSignal]DelayEventState{
 	Connected: {
 		ParticipantDisconnectedIntentionally: Disconnected,
 		ParticipantConnectionAborted:         Disconnected,
-		DelayedEventTimedOut:                 Disconnected,
-		DelayedEventNotFound:                 Disconnected,
-		CsApiUrlNotFound:                     Disconnected,
+		DelayedEventTimedOut:                 Aborted,
+		DelayedEventNotFound:                 Aborted,
+		CsApiUrlNotFound:                     Aborted,
 		SFUParticipantGone:                   Disconnected,
 		JobReplaced:                          Replaced,
 	},

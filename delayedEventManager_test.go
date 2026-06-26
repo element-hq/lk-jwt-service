@@ -259,43 +259,75 @@ func TestDelayedEventJob_ParticipantDisconnected(t *testing.T) {
 	}
 }
 
-// TestDelayedEventJob_DelayedEventTimedOut verifies Connected → Disconnected
-// via DelayedEventTimedOut
 func TestDelayedEventJob_DelayedEventTimedOut(t *testing.T) {
-	mockExecOK(t)
-	job := newTestJob(t, 10*time.Millisecond)
+	job, doneCh := newJobWithDoneCh(time.Second)
+
+	// Prime the channel with our test events before starting
+	// the job's loop. This prevents the events added by the
+	// job itself from interferring with the test. They'll
+	// simply be discarded in the end.
+	job.EventChannel <- ParticipantConnected
+	job.EventChannel <- DelayedEventTimedOut
+
+	// Have the job process the events.
 	go job.loop()
 
-	job.EventChannel <- ParticipantConnected
-	time.Sleep(20 * time.Millisecond)
-	job.EventChannel <- DelayedEventTimedOut
-	time.Sleep(20 * time.Millisecond)
-	err := job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if job.state != DelayEventState(Disconnected) {
-		t.Errorf("expected state %v, got %v", DelayEventState(Disconnected), job.state)
+	// Wait for the job to abort.
+	select {
+	case doneJob := <-doneCh:
+		if doneJob.state != Aborted {
+			t.Errorf("expected Aborted, got %v", doneJob.state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for doneCh")
 	}
 }
 
-// TestDelayedEventJob_DelayedEventNotFound verifies Connected → Disconnected
-// via an explicit DelayedEventNotFound signal.
 func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
-	mockExecOK(t)
-	job := newTestJob(t, 10*time.Second)
+	job, doneCh := newJobWithDoneCh(time.Second)
+
+	// Prime the channel with our test events before starting
+	// the job's loop. This prevents the events added by the
+	// job itself from interferring with the test. They'll
+	// simply be discarded in the end.
+	job.EventChannel <- ParticipantConnected
+	job.EventChannel <- DelayedEventNotFound
+
+	// Have the job process the events.
 	go job.loop()
 
-	job.EventChannel <- ParticipantConnected
-	time.Sleep(20 * time.Millisecond)
-	job.EventChannel <- DelayedEventNotFound
-	time.Sleep(20 * time.Millisecond)
-	err := job.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
+	// Wait for the job to abort.
+	select {
+	case doneJob := <-doneCh:
+		if doneJob.state != Aborted {
+			t.Errorf("expected Aborted, got %v", doneJob.state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for doneCh")
 	}
-	if job.state != DelayEventState(Disconnected) {
-		t.Errorf("expected state %v, got %v", DelayEventState(Disconnected), job.state)
+}
+
+func TestDelayedEventJob_CsApiUrlNotFound(t *testing.T) {
+	job, doneCh := newJobWithDoneCh(time.Second)
+
+	// Prime the channel with our test events before starting
+	// the job's loop. This prevents the events added by the
+	// job itself from interferring with the test. They'll
+	// simply be discarded in the end.
+	job.EventChannel <- ParticipantConnected
+	job.EventChannel <- CsApiUrlNotFound
+
+	// Have the job process the events.
+	go job.loop()
+
+	// Wait for the job to abort.
+	select {
+	case doneJob := <-doneCh:
+		if doneJob.state != Aborted {
+			t.Errorf("expected Aborted, got %v", doneJob.state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for doneCh")
 	}
 }
 
@@ -495,11 +527,45 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 
 // ── FSM: ActionRestart outcomes ───────────────────────────────────────────────
 
-// TestDelayedEventJob_ActionRestart_404 verifies that the
-// errDelayedEventNotFound sentinel (returned by the helper for a 404 on
-// ActionRestart, wrapped in backoff.Permanent so backoff.Retry stops immediately)
-// causes DelayedEventNotFound to be fed back into the FSM, resulting in a
-// Disconnected signal on doneCh.
+func TestDelayedEventJob_ActionRestart_CsApiUrlNotFound(t *testing.T) {
+	doneCh := make(chan *DelayedEventJob, 5)
+	job, _ := NewDelayedEventJob(
+		context.Background(),
+		DelayedEventJobParams{
+			ServerName:      "example.com",
+			DelayId:         "id",
+			DelayTimeout:    10 * time.Second,
+			LiveKitRoom:     "room",
+			LiveKitIdentity: "identity",
+		},
+		func(_ context.Context, server_name string) (CsApiUrl, error) {
+			if server_name != "example.com" {
+				t.Errorf("Trying to resolve unexpected server name %v", server_name)
+			}
+			return "", &MatrixErrorResponse{Status: http.StatusNotFound, ErrCode: "M_NOT_FOUND", Err: "no"}
+		},
+		doneCh,
+	)
+	go job.loop()
+
+	// Connected triggers an immediate DelayedEventReset.
+	// Reset goroutine fails to resolve CS API URL → CsApiUrlNotFound → Aborted.
+	job.EventChannel <- ParticipantConnected
+
+	select {
+	case doneJob := <-doneCh:
+		if doneJob.state != Aborted {
+			t.Errorf("expected Aborted after ActionRestart 404, got %v", doneJob.state)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Aborted after ActionRestart 404")
+	}
+	err := job.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	original := ExecuteDelayedEventAction
 	ExecuteDelayedEventAction = func(csApiUrl CsApiUrl, _ string, action DelayEventAction) (int, error) {
@@ -517,16 +583,16 @@ func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	go job.loop()
 
 	// Connected triggers an immediate DelayedEventReset.
-	// Reset goroutine gets 404 → DelayedEventNotFound → Disconnected.
+	// Reset goroutine gets 404 → DelayedEventNotFound → Aborted.
 	job.EventChannel <- ParticipantConnected
 
 	select {
 	case doneJob := <-doneCh:
-		if doneJob.state != Disconnected {
-			t.Errorf("expected Disconnected after ActionRestart 404, got %v", doneJob.state)
+		if doneJob.state != Aborted {
+			t.Errorf("expected Aborted after ActionRestart 404, got %v", doneJob.state)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for Disconnected after ActionRestart 404")
+		t.Fatal("timed out waiting for Aborted after ActionRestart 404")
 	}
 	err := job.Close()
 	if err != nil {
@@ -534,9 +600,6 @@ func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	}
 }
 
-// TestDelayedEventJob_ActionRestart_Error verifies that an HTTP error from
-// ActionRestart causes DelayedEventTimedOut to be fed back into the FSM,
-// resulting in a Disconnected signal on doneCh.
 func TestDelayedEventJob_ActionRestart_Error(t *testing.T) {
 	original := ExecuteDelayedEventAction
 	ExecuteDelayedEventAction = func(csApiUrl CsApiUrl, _ string, action DelayEventAction) (int, error) {
@@ -558,11 +621,11 @@ func TestDelayedEventJob_ActionRestart_Error(t *testing.T) {
 
 	select {
 	case doneJob := <-doneCh:
-		if doneJob.state != Disconnected {
-			t.Errorf("expected Disconnected after ActionRestart error, got %v", doneJob.state)
+		if doneJob.state != Aborted {
+			t.Errorf("expected Aborted after ActionRestart error, got %v", doneJob.state)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for Disconnected after ActionRestart error")
+		t.Fatal("timed out waiting for Aborted after ActionRestart error")
 	}
 	err := job.Close()
 	if err != nil {
