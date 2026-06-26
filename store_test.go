@@ -140,7 +140,7 @@ func runStoreTests(t *testing.T, newStore func() store) {
 
 // In-memory store tests
 
-func testInMemoryStore(t *testing.T) {
+func TestInMemoryStore(t *testing.T) {
 	runStoreTests(t, newInMemoryStore)
 }
 
@@ -153,14 +153,14 @@ func newMiniRedisStore(t *testing.T) (store, *redis.Client) {
 	return &redisStore{client: client}, client
 }
 
-func testRedisStore(t *testing.T) {
+func TestRedisStore(t *testing.T) {
 	runStoreTests(t, func() store {
 		store, _ := newMiniRedisStore(t)
 		return store
 	})
 }
 
-func testRedisStoreSkipsUnparseableEntry(t *testing.T) {
+func TestRedisStoreSkipsUnparseableEntry(t *testing.T) {
 	store, client := newMiniRedisStore(t)
 
 	// Save a corrupt JSON entry directly via the Redis client.
