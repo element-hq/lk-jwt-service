@@ -150,13 +150,13 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		skipVerifyTLS:         skipVerifyTLS,
 		fullAccessHomeservers: fullAccessHomeservers,
 		sanityCheckInterval:   sanityCheckInterval,
-		store:                 store,
 		loopDone:              make(chan struct{}),
 		jobDoneCh:             make(chan *DelayedEventJob, 10),
 		addJobCh:              make(chan addJobRequest),
 		sfuEventCh:            make(chan sfuEventRequest, 200),
 		csApiUrlOverrides:     csApiUrlOverrides,
 		csApiUrlCache:         newCsApiUrlCache(),
+		store:                 store,
 	}
 	go h.loop()
 	return h
@@ -200,29 +200,38 @@ func (h *Handler) loop() {
 	//         ExecuteDelayedEventAction)
 	var loopWg sync.WaitGroup
 
-	// Startup recovery: reload jobs that were active before the last shutdown.
+	// Load any existing jobs from the store.
 	if storedJobs, err := h.store.allJobs(h.ctx); err != nil {
-		slog.Error("Handler: failed to load persisted jobs, starting with empty state", "err", err)
+		slog.Error("Handler: failed to load stored jobs", "err", err)
 	} else {
-		for _, pj := range storedJobs {
-			remaining := time.Until(pj.CreatedAt.Add(pj.Params.DelayTimeout))
-			key := jobKey{Room: pj.Params.LiveKitRoom, Identity: pj.Params.LiveKitIdentity}
+		for _, job := range storedJobs {
+			// Check if the job's delay timeout has already exceeded. If so, delete it from the store.
+			remaining := time.Until(job.CreatedAt.Add(job.Params.DelayTimeout))
 			if remaining <= 0 {
-				slog.Info("Handler: skipping expired persisted job", "lkId", key.Identity)
-				if err := h.store.deleteJob(h.ctx, key.Identity); err != nil {
-					slog.Error("Handler: failed to delete expired persisted job", "lkId", key.Identity, "err", err)
+				slog.Info("Handler: skipping expired stored job", "lkId", job.Params.LiveKitIdentity)
+				if err := h.store.deleteJob(h.ctx, job.Params.LiveKitIdentity); err != nil {
+					slog.Error("Handler: failed to delete expired stored job", "lkId", job.Params.LiveKitIdentity, "err", err)
 				}
 				continue
 			}
-			params := pj.Params
+
+			// Create a new job using the remaining timeout.
+			key := jobKey{Room: job.Params.LiveKitRoom, Identity: job.Params.LiveKitIdentity}
+			params := job.Params
 			params.DelayTimeout = remaining
 			job, err := NewDelayedEventJob(h.ctx, params, func(ctx context.Context, serverName string) (CsApiUrl, error) {
 				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
 			}, h.jobDoneCh)
+
+			// Gracefully ignore job creation failures but leave the job in the store for
+			// a potential future restart.
 			if err != nil {
-				slog.Error("Handler: failed to restore persisted job", "lkId", key.Identity, "err", err)
+				slog.Error("Handler: failed to create delayed event job from stored job",
+					"room", params.LiveKitRoom, "lkId", params.LiveKitIdentity, "err", err)
 				continue
 			}
+
+			// Store the job in the in-memory map and kick off its loop.
 			jobs[key] = job
 			startParticipantLookup(job, h.liveKitAuth, h.sanityCheckInterval)
 			loopWg.Add(1)
@@ -230,7 +239,8 @@ func (h *Handler) loop() {
 				defer loopWg.Done()
 				job.loop()
 			}()
-			slog.Info("Handler: restored persisted job", "lkId", key.Identity, "remaining", remaining)
+			slog.Debug("Handler: job created from stored job",
+				"room", key.Room, "lkId", key.Identity, "jobId", job.JobId)
 		}
 	}
 
@@ -262,6 +272,7 @@ func (h *Handler) loop() {
 		case req := <-h.addJobCh:
 			key := jobKey{Room: req.params.LiveKitRoom, Identity: req.params.LiveKitIdentity}
 
+			// Create a new job.
 			job, err := NewDelayedEventJob(h.ctx, req.params, func(ctx context.Context, serverName string) (CsApiUrl, error) {
 				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
 			}, h.jobDoneCh)
@@ -273,9 +284,10 @@ func (h *Handler) loop() {
 				continue
 			}
 
-			pj := storedJob{Params: req.params, CreatedAt: time.Now()}
-			if err := h.store.saveJob(h.ctx, key.Identity, pj); err != nil {
-				slog.Error("Handler: failed to persist job",
+			// Save the job in the store.
+			storedJob := storedJob{Params: req.params, CreatedAt: time.Now()}
+			if err := h.store.saveJob(h.ctx, key.Identity, storedJob); err != nil {
+				slog.Error("Handler: failed to store job",
 					"room", key.Room, "lkId", key.Identity, "err", err)
 				req.result <- addJobResult{err: fmt.Errorf("%w: %w", errStorePersistFailed, err)}
 				continue
