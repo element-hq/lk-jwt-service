@@ -23,7 +23,7 @@ func TestHandler_Restore_ResumesLiveJobs(t *testing.T) {
 
 	originalExec := ExecuteDelayedEventAction
 	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
 		return http.StatusOK, nil
 	}
 
@@ -34,7 +34,7 @@ func TestHandler_Restore_ResumesLiveJobs(t *testing.T) {
 	_ = store.Save(context.Background(), identity, PersistedJob{
 		Params: DelayedEventJobParams{
 			DelayId:         "restore-delay-id",
-			CsApiUrl:        "https://matrix.example.com",
+			ServerName:      "example.com",
 			DelayTimeout:    30 * time.Second,
 			LiveKitRoom:     room,
 			LiveKitIdentity: identity,
@@ -46,6 +46,7 @@ func TestHandler_Restore_ResumesLiveJobs(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		store,
 	)
 	t.Cleanup(handler.Close)
@@ -86,7 +87,7 @@ func TestHandler_Restore_SkipsExpiredJobs(t *testing.T) {
 	_ = store.Save(context.Background(), identity, PersistedJob{
 		Params: DelayedEventJobParams{
 			DelayId:         "expired-delay-id",
-			CsApiUrl:        "https://matrix.example.com",
+			ServerName:      "example.com",
 			DelayTimeout:    1 * time.Second,
 			LiveKitRoom:     room,
 			LiveKitIdentity: identity,
@@ -99,6 +100,7 @@ func TestHandler_Restore_SkipsExpiredJobs(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		store,
 	)
 	t.Cleanup(handler.Close)
@@ -135,13 +137,14 @@ func TestHandler_Restore_StoreError(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		&failingLoadStore{},
 	)
 	t.Cleanup(handler.Close)
 
 	// Handler must still accept new jobs despite the startup error.
 	err := handler.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl:        "https://matrix.example.com",
+		ServerName:      "example.com",
 		DelayId:         "new-delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     LiveKitRoomAlias("error-recovery-room"),
@@ -157,12 +160,13 @@ func TestHandler_SaveError_FailsRequest(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		&failingSaveStore{},
 	)
 	t.Cleanup(handler.Close)
 
 	err := handler.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl:        "https://matrix.example.com",
+		ServerName:      "example.com",
 		DelayId:         "save-fail-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     LiveKitRoomAlias("save-fail-room"),

@@ -34,6 +34,9 @@ type Config struct {
 	// default) disables the sanity check entirely.
 	// Configure via LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS (unit: seconds).
 	SanityCheckInterval time.Duration
+	// Map of URLs for the Client-Server API keyed by server name. These will
+	// be preferred over .well-known resolution for the contained server names.
+	CsApiUrlOverrides map[string]CsApiUrl
 	// Connection URL for the Redis job store. When empty, the service falls
 	// back to a non-persistent in-memory store.
 	// Configure via REDIS_URL (e.g. redis://localhost:6379).
@@ -85,6 +88,25 @@ func readKeySecret() (string, string) {
 	return strings.Trim(key, " \r\n"), strings.Trim(secret, " \r\n")
 }
 
+func readCsApiUrlOverrides(raw string) (map[string]CsApiUrl, error) {
+	m := map[string]CsApiUrl{}
+	if raw != "" {
+		for _, entry := range strings.Split(raw, ",") {
+			server, url, ok := strings.Cut(entry, "=")
+			if !ok {
+				return nil, fmt.Errorf("invalid entry %q, expected server_name=url", entry)
+			}
+			server = strings.TrimSpace(server)
+			url = strings.TrimSpace(url)
+			if server == "" || url == "" {
+				return nil, fmt.Errorf("invalid entry %q, expected server_name=url", entry)
+			}
+			m[server] = CsApiUrl(url)
+		}
+	}
+	return m, nil
+}
+
 func parseConfig() (*Config, error) {
 	skipVerifyTLS := os.Getenv("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING"
 	if skipVerifyTLS {
@@ -130,6 +152,11 @@ func parseConfig() (*Config, error) {
 		sanityCheckInterval = time.Duration(secs) * time.Second
 	}
 
+	csApiUrlOverrides, err := readCsApiUrlOverrides(os.Getenv("LIVEKIT_CS_API_URL_OVERRIDES"))
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing LIVEKIT_CS_API_URL_OVERRIDES: %w", err)
+	}
+
 	return &Config{
 		Key:                   key,
 		Secret:                secret,
@@ -138,6 +165,7 @@ func parseConfig() (*Config, error) {
 		FullAccessHomeservers: strings.Fields(strings.ReplaceAll(fullAccessHomeservers, ",", " ")),
 		LkJwtBind:             lkJwtBind,
 		SanityCheckInterval:   sanityCheckInterval,
+		CsApiUrlOverrides:     csApiUrlOverrides,
 		RedisURL:              os.Getenv("REDIS_URL"),
 	}, nil
 }

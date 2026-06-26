@@ -23,7 +23,7 @@ func runStoreTests(t *testing.T, store JobStore) {
 	identity := LiveKitIdentity("@user:example.com:device-id:member-id")
 	params := DelayedEventJobParams{
 		DelayId:         "delay-1",
-		CsApiUrl:        "https://matrix.example.com",
+		ServerName:      "example.com",
 		DelayTimeout:    30 * time.Second,
 		LiveKitRoom:     LiveKitRoomAlias("room-abc"),
 		LiveKitIdentity: identity,
@@ -57,8 +57,8 @@ func runStoreTests(t *testing.T, store JobStore) {
 		if got.Params.DelayId != pj.Params.DelayId {
 			t.Errorf("DelayId = %q, want %q", got.Params.DelayId, pj.Params.DelayId)
 		}
-		if got.Params.CsApiUrl != pj.Params.CsApiUrl {
-			t.Errorf("CsApiUrl = %q, want %q", got.Params.CsApiUrl, pj.Params.CsApiUrl)
+		if got.Params.ServerName != pj.Params.ServerName {
+			t.Errorf("CsApiUrl = %q, want %q", got.Params.ServerName, pj.Params.ServerName)
 		}
 		if got.Params.DelayTimeout != pj.Params.DelayTimeout {
 			t.Errorf("DelayTimeout = %q, want %q", got.Params.DelayTimeout, pj.Params.DelayTimeout)

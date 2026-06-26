@@ -34,18 +34,28 @@ func newTestJob(t *testing.T, timeout time.Duration) *DelayedEventJob {
 	job, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:        "https://matrix.example.com",
+			ServerName:      "example.com",
 			DelayId:         "test-delay-id",
 			DelayTimeout:    timeout,
 			LiveKitRoom:     LiveKitRoomAlias("test-room"),
 			LiveKitIdentity: LiveKitIdentity("@test:example.com"),
 		},
+		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		make(chan *DelayedEventJob, 20),
 	)
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
 	}
 	return job
+}
+
+func lookUpCsApiUrlFromOverrideOnly(serverNameOverride string, urlOverride string) func(context.Context, string) (CsApiUrl, error) {
+	return func(_ context.Context, serverName string) (CsApiUrl, error) {
+		if serverName == serverNameOverride {
+			return CsApiUrl(urlOverride), nil
+		}
+		return "", fmt.Errorf("trying to resolve CS-API URL for unexpected server name %s", serverName)
+	}
 }
 
 // driveJobEvents starts loop() and sends events sequentially. The
@@ -73,12 +83,13 @@ func newJobWithDoneCh(timeout time.Duration) (*DelayedEventJob, chan *DelayedEve
 	job, _ := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:        "https://example.com",
+			ServerName:      "example.com",
 			DelayId:         "id",
 			DelayTimeout:    timeout,
 			LiveKitRoom:     "room",
 			LiveKitIdentity: "identity",
 		},
+		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		doneCh,
 	)
 	return job, doneCh
@@ -89,7 +100,7 @@ func newJobWithDoneCh(timeout time.Duration) (*DelayedEventJob, chan *DelayedEve
 func mockExecOK(t *testing.T) {
 	t.Helper()
 	original := ExecuteDelayedEventAction
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
 		return http.StatusOK, nil
 	}
 	t.Cleanup(func() { ExecuteDelayedEventAction = original })
@@ -102,9 +113,13 @@ func TestDelayedEventJob_InvalidTimeout(t *testing.T) {
 	_, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl: "https://example.com", DelayId: "id",
-			DelayTimeout: 0, LiveKitRoom: "room", LiveKitIdentity: "identity",
+			ServerName:      "example.com",
+			DelayId:         "id",
+			DelayTimeout:    0,
+			LiveKitRoom:     "room",
+			LiveKitIdentity: "identity",
 		},
+		func(_ context.Context, _ string) (CsApiUrl, error) { return "", nil },
 		make(chan *DelayedEventJob, 1),
 	)
 	if err == nil {
@@ -292,7 +307,10 @@ func TestDelayedEventJob_DelayedEventNotFound(t *testing.T) {
 func TestDelayedEventJob_ResetWithExhaustedDeadline(t *testing.T) {
 	var calls atomic.Int32
 	original := ExecuteDelayedEventAction
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(csApiUrl CsApiUrl, _ string, _ DelayEventAction) (int, error) {
+		if csApiUrl != "https://matrix-client.example.com" {
+			t.Errorf("got unexpected client-server API URL %v", csApiUrl)
+		}
 		calls.Add(1)
 		return http.StatusOK, nil
 	}
@@ -317,6 +335,37 @@ func TestDelayedEventJob_ResetWithExhaustedDeadline(t *testing.T) {
 	job.Stop() // loop() was never started — Close() would time out on job.done
 }
 
+func TestDelayedEventJob_ResetWithFailingCsApiUrlResolution(t *testing.T) {
+	job, err := NewDelayedEventJob(
+		context.Background(),
+		DelayedEventJobParams{
+			ServerName:      "example.com",
+			DelayId:         "id",
+			DelayTimeout:    10 * time.Second,
+			LiveKitRoom:     "room",
+			LiveKitIdentity: "identity",
+		},
+		func(_ context.Context, _ string) (CsApiUrl, error) { return "", fmt.Errorf("M_NOT_FOUND") },
+		make(chan *DelayedEventJob, 5),
+	)
+	if err != nil {
+		t.Fatalf("NewDelayedEventJob: %v", err)
+	}
+	job.restartDeadline = time.Now().Add(time.Second)
+
+	job.startDelayedEventRestart()
+
+	select {
+	case ev := <-job.EventChannel:
+		if ev != CsApiUrlNotFound {
+			t.Errorf("expected CsApiUrlNotFound, got %v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for CsApiUrlNotFound")
+	}
+	job.Stop()
+}
+
 // TestDelayedEventJob_ActionSendBoundedWhenNoTimeRemains verifies that when
 // Disconnected is reached without a restart deadline (waiting state timed out
 // before any connect), ActionSend is bounded by the one-second floor — even
@@ -325,8 +374,11 @@ func TestDelayedEventJob_ResetWithExhaustedDeadline(t *testing.T) {
 func TestDelayedEventJob_ActionSendBoundedWhenNoTimeRemains(t *testing.T) {
 	var calls atomic.Int32
 	original := ExecuteDelayedEventAction
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(csApiUrl CsApiUrl, _ string, _ DelayEventAction) (int, error) {
 		calls.Add(1)
+		if csApiUrl != "https://matrix-client.example.com" {
+			t.Errorf("got unexpected client-server API URL %v", csApiUrl)
+		}
 		return http.StatusInternalServerError, errors.New("homeserver down")
 	}
 	t.Cleanup(func() { ExecuteDelayedEventAction = original })
@@ -346,6 +398,46 @@ func TestDelayedEventJob_ActionSendBoundedWhenNoTimeRemains(t *testing.T) {
 	// interval); anything more means the elapsed-time bound is not applied.
 	if n := calls.Load(); n < 1 || n > 2 {
 		t.Errorf("expected 1-2 ActionSend attempts, got %d", n)
+	}
+	if err := job.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestDelayedEventJob_ActionSendWithFailingCsApiUrlResolution(t *testing.T) {
+	var calls atomic.Int32
+	original := ExecuteDelayedEventAction
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
+		calls.Add(1)
+		return http.StatusInternalServerError, errors.New("homeserver down")
+	}
+	t.Cleanup(func() { ExecuteDelayedEventAction = original })
+
+	doneCh := make(chan *DelayedEventJob, 5)
+	job, _ := NewDelayedEventJob(
+		context.Background(),
+		DelayedEventJobParams{
+			ServerName:      "example.com",
+			DelayId:         "id",
+			DelayTimeout:    50 * time.Millisecond, // waiting timer fires quickly
+			LiveKitRoom:     "room",
+			LiveKitIdentity: "identity",
+		},
+		func(_ context.Context, _ string) (CsApiUrl, error) { return "", fmt.Errorf("M_NOT_FOUND") },
+		doneCh,
+	)
+	go job.loop()
+
+	select {
+	case doneJob := <-doneCh:
+		if doneJob.state != Disconnected {
+			t.Errorf("expected Disconnected, got %v", doneJob.state)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for doneCh — ActionSend may be retrying forever")
+	}
+	if n := calls.Load(); n > 0 {
+		t.Errorf("expected no ActionSend attempts, got %d", n)
 	}
 	if err := job.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -410,7 +502,10 @@ func TestDelayedEventJob_FSM_IgnoresWrongStateTransitions(t *testing.T) {
 // Disconnected signal on doneCh.
 func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 	original := ExecuteDelayedEventAction
-	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(csApiUrl CsApiUrl, _ string, action DelayEventAction) (int, error) {
+		if csApiUrl != "https://matrix-client.example.com" {
+			t.Errorf("got unexpected client-server API URL %v", csApiUrl)
+		}
 		if action == ActionRestart {
 			return http.StatusNotFound, backoff.Permanent(errDelayedEventNotFound)
 		}
@@ -444,7 +539,10 @@ func TestDelayedEventJob_ActionRestart_404(t *testing.T) {
 // resulting in a Disconnected signal on doneCh.
 func TestDelayedEventJob_ActionRestart_Error(t *testing.T) {
 	original := ExecuteDelayedEventAction
-	ExecuteDelayedEventAction = func(_ string, _ string, action DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(csApiUrl CsApiUrl, _ string, action DelayEventAction) (int, error) {
+		if csApiUrl != "https://matrix-client.example.com" {
+			t.Errorf("got unexpected client-server API URL %v", csApiUrl)
+		}
 		if action == ActionRestart {
 			return 0, context.DeadlineExceeded
 		}
@@ -660,12 +758,13 @@ func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 	job, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:        "https://example.com",
+			ServerName:      "example.com",
 			DelayId:         "phase1-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
 			LiveKitIdentity: identity,
 		},
+		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		doneCh,
 	)
 	if err != nil {
@@ -716,12 +815,13 @@ func TestParticipantLookup_Phase2_DetectsGoneParticipant(t *testing.T) {
 	job, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:        "https://example.com",
+			ServerName:      "example.com",
 			DelayId:         "phase2-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
 			LiveKitIdentity: identity,
 		},
+		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		doneCh,
 	)
 	if err != nil {
@@ -776,12 +876,13 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 	job, err := NewDelayedEventJob(
 		context.Background(),
 		DelayedEventJobParams{
-			CsApiUrl:        "https://example.com",
+			ServerName:      "example.com",
 			DelayId:         "disabled-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
 			LiveKitIdentity: identity,
 		},
+		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		doneCh,
 	)
 	if err != nil {

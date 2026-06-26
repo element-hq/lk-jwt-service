@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -35,6 +36,7 @@ import (
 	"github.com/matrix-org/gomatrixserverlib/fclient"
 	"github.com/matrix-org/gomatrixserverlib/spec"
 	"github.com/twitchtv/twirp"
+	"maunium.net/go/mautrix"
 )
 
 // errParticipantAbsent is returned to backoff.Retry from
@@ -66,6 +68,74 @@ func NewUniqueID() UniqueID {
 	// ASCII/Unicode table (0-9 then A-V), the string comparison results will match
 	// the chronological order of your original timestamp.
 	return UniqueID(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
+}
+
+type csApiUrlCache struct {
+	mu      sync.RWMutex
+	entries map[string]csApiUrlCacheEntry
+}
+
+type csApiUrlCacheEntry struct {
+	url       CsApiUrl
+	expiresAt time.Time
+}
+
+func newCsApiUrlCache() *csApiUrlCache {
+	return &csApiUrlCache{entries: make(map[string]csApiUrlCacheEntry)}
+}
+
+func (c *csApiUrlCache) get(serverName string) CsApiUrl {
+	c.mu.RLock()
+	entry, ok := c.entries[serverName]
+	c.mu.RUnlock()
+	if !ok || time.Now().After(entry.expiresAt) {
+		return ""
+		// We don't evict the expired entry because it is extremely likely that the
+		// caller will re-resolve the URL and update the cache.
+	}
+	return entry.url
+}
+
+func (c *csApiUrlCache) set(serverName string, url CsApiUrl, ttl time.Duration) {
+	c.mu.Lock()
+	c.entries[serverName] = csApiUrlCacheEntry{url: url, expiresAt: time.Now().Add(ttl)}
+	c.mu.Unlock()
+}
+
+var discoverClientAPI = mautrix.DiscoverClientAPI
+
+type CsApiUrl string
+
+// Given a server name and a map of overrides, try to resolve the URL of the Client-Server API.
+var resolveCsApiUrl = func(ctx context.Context, server_name string, overrides map[string]CsApiUrl, cache *csApiUrlCache) (CsApiUrl, error) {
+	// Prefer explicit overrides.
+	if url := overrides[server_name]; url != "" {
+		return url, nil
+	}
+
+	// Next, check the cache.
+	if cache != nil {
+		if url := cache.get(server_name); url != "" {
+			return url, nil
+		}
+	}
+
+	// Still nothing. Let's try .well-known resolution.
+	wellKnown, err := discoverClientAPI(ctx, server_name)
+	if err == nil && wellKnown != nil && wellKnown.Homeserver.BaseURL != "" {
+		if cache != nil {
+			// TODO: Read the TTL from cache-control headers once the SDK exposes them and limit them to a minimum of say 1 hour to prevent DDos-ing
+			cache.set(server_name, CsApiUrl(wellKnown.Homeserver.BaseURL), 4*time.Hour)
+		}
+		return CsApiUrl(wellKnown.Homeserver.BaseURL), nil
+	}
+
+	// We're out of options.
+	slog.Warn("Failed to resolve URL of Client-Server API", "server name", server_name)
+	if err == nil {
+		err = fmt.Errorf("no .well-known/matrix/client record found for %s", server_name)
+	}
+	return "", err
 }
 
 var exchangeOpenIdUserInfo = func(
@@ -218,10 +288,10 @@ var LiveKitParticipantExists = func(
 //     (e.g. 408, 421, 423, 425 — genuinely retriable; also 1xx, 3xx)
 //
 // The status code is returned alongside err so callers can log it.
-var ExecuteDelayedEventAction = func(csAPIURL string, delayID string, action DelayEventAction) (int, error) {
+var ExecuteDelayedEventAction = func(csAPIURL CsApiUrl, delayID string, action DelayEventAction) (int, error) {
 	// url.JoinPath path-escapes delayID, preventing path-traversal attacks since
 	// delayID is attacker-controlled. action is a typed constant and safe.
-	endpoint, err := url.JoinPath(csAPIURL, DelayedEventsEndpoint, delayID, string(action))
+	endpoint, err := url.JoinPath(string(csAPIURL), DelayedEventsEndpoint, delayID, string(action))
 	if err != nil {
 		return 0, fmt.Errorf("ExecuteDelayedEventAction: invalid URL: %w", err)
 	}

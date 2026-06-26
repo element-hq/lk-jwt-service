@@ -33,12 +33,14 @@ type OpenIDTokenType struct {
 // pre-Matrix-2.0 endpoint. Remove once all in-the-wild clients have
 // migrated to /get_token (SFURequest).
 type LegacySFURequest struct {
-	Room          string          `json:"room"`
-	OpenIDToken   OpenIDTokenType `json:"openid_token"`
-	DeviceID      string          `json:"device_id"`
-	DelayId       string          `json:"delay_id,omitempty"`
-	DelayTimeout  int             `json:"delay_timeout,omitempty"`
-	DelayCsApiUrl string          `json:"delay_cs_api_url,omitempty"`
+	Room         string          `json:"room"`
+	OpenIDToken  OpenIDTokenType `json:"openid_token"`
+	DeviceID     string          `json:"device_id"`
+	DelayId      string          `json:"delay_id,omitempty"`
+	DelayTimeout int             `json:"delay_timeout,omitempty"`
+	// Deprecated and ignored to allow transition. Server discovery or explicit overrides via
+	// LIVEKIT_CS_API_URL_OVERRIDES will be used instead.
+	DelayCsApiUrl string `json:"delay_cs_api_url,omitempty"`
 }
 
 type SFURequest struct {
@@ -46,11 +48,14 @@ type SFURequest struct {
 	SlotID      string              `json:"slot_id"`
 	OpenIDToken OpenIDTokenType     `json:"openid_token"`
 	Member      MatrixRTCMemberType `json:"member"`
+	// Deprecated.
 	// TODO: These were only supported in an earlier version of the MSC. Later versions
 	// split token request and disconnect delegation into separate endpoints. We should
 	// remove these parameters and the related code at some point.
-	DelayId       string `json:"delay_id,omitempty"`
-	DelayTimeout  int    `json:"delay_timeout,omitempty"`
+	DelayId      string `json:"delay_id,omitempty"`
+	DelayTimeout int    `json:"delay_timeout,omitempty"`
+	// Deprecated and ignored to allow transition. Server discovery or explicit overrides via
+	// LIVEKIT_CS_API_URL_OVERRIDES will be used instead.
 	DelayCsApiUrl string `json:"delay_cs_api_url,omitempty"`
 }
 
@@ -69,13 +74,15 @@ type SFUResponse struct {
 // so the participant-lookup goroutine uses its backoff to confirm presence
 // rather than waiting for the webhook (which has already fired).
 type DelegateDelayedLeaveRequest struct {
-	RoomID        string              `json:"room_id"`
-	SlotID        string              `json:"slot_id"`
-	OpenIDToken   OpenIDTokenType     `json:"openid_token"`
-	Member        MatrixRTCMemberType `json:"member"`
-	DelayId       string              `json:"delay_id"`
-	DelayTimeout  int                 `json:"delay_timeout"`
-	DelayCsApiUrl string              `json:"delay_cs_api_url"`
+	RoomID       string              `json:"room_id"`
+	SlotID       string              `json:"slot_id"`
+	OpenIDToken  OpenIDTokenType     `json:"openid_token"`
+	Member       MatrixRTCMemberType `json:"member"`
+	DelayId      string              `json:"delay_id"`
+	DelayTimeout int                 `json:"delay_timeout"`
+	// Deprecated and ignored to allow transition. Server discovery or explicit overrides via
+	// LIVEKIT_CS_API_URL_OVERRIDES will be used instead.
+	DelayCsApiUrl string `json:"delay_cs_api_url"`
 }
 
 func (r *DelegateDelayedLeaveRequest) Validate() error {
@@ -100,11 +107,11 @@ func (r *DelegateDelayedLeaveRequest) Validate() error {
 			Err:     "The request body `openid_token` is missing `access_token` or `matrix_server_name`",
 		}
 	}
-	if r.DelayId == "" || r.DelayTimeout <= 0 || r.DelayCsApiUrl == "" {
+	if r.DelayId == "" || r.DelayTimeout <= 0 {
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
-			Err:     "The request body is missing `delay_id`, `delay_timeout` or `delay_cs_api_url`",
+			Err:     "The request body is missing `delay_id` or `delay_timeout`",
 		}
 	}
 	return nil
@@ -149,18 +156,17 @@ func (r *SFURequest) Validate() error {
 		}
 	}
 
-	allDelayedEventParamsPresent := r.DelayId != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
-	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
+	allDelayedEventParamsPresent := r.DelayId != "" && r.DelayTimeout > 0
+	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0
 	if atLeastOneDelayedEventParamPresent && !allDelayedEventParamsPresent {
 		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
 			"delayId", r.DelayId,
 			"delayTimeout", r.DelayTimeout,
-			"csApiUrl", r.DelayCsApiUrl,
 		)
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
-			Err:     "The request body is missing `delay_id`, `delay_timeout` or `delay_cs_api_url`",
+			Err:     "The request body is missing `delay_id` or `delay_timeout`",
 		}
 	}
 
@@ -182,18 +188,17 @@ func (r *LegacySFURequest) Validate() error {
 			Err:     "Missing OpenID token parameters",
 		}
 	}
-	allDelayedEventParamsPresent := r.DelayId != "" && r.DelayTimeout > 0 && r.DelayCsApiUrl != ""
-	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0 || r.DelayCsApiUrl != ""
+	allDelayedEventParamsPresent := r.DelayId != "" && r.DelayTimeout > 0
+	atLeastOneDelayedEventParamPresent := r.DelayId != "" || r.DelayTimeout > 0
 	if atLeastOneDelayedEventParamPresent && !allDelayedEventParamsPresent {
 		slog.Error("Handler -> SFURequest: Missing delayed event delegation parameters",
 			"delayId", r.DelayId,
 			"delayTimeout", r.DelayTimeout,
-			"csApiUrl", r.DelayCsApiUrl,
 		)
 		return &MatrixErrorResponse{
 			Status:  http.StatusBadRequest,
 			ErrCode: "M_BAD_JSON",
-			Err:     "The request body is missing `delay_id`, `delay_timeout` or `delay_cs_api_url`",
+			Err:     "The request body is missing `delay_id` or `delay_timeout`",
 		}
 	}
 	return nil

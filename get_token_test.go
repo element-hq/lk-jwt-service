@@ -217,6 +217,31 @@ func TestHandleGetToken_ExchangeError(t *testing.T) {
 	}
 }
 
+func TestHandleGetToken_CsApiUrlResolutionError(t *testing.T) {
+	originalExchange := exchangeOpenIdUserInfo
+	t.Cleanup(func() { exchangeOpenIdUserInfo = originalExchange })
+	exchangeOpenIdUserInfo = func(_ context.Context, _ OpenIDTokenType, _ bool) (*fclient.UserInfo, error) {
+		return &fclient.UserInfo{Sub: "@user:example.com"}, nil
+	}
+
+	originalResolve := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]CsApiUrl, _ *csApiUrlCache) (CsApiUrl, error) {
+		return "", &MatrixErrorResponse{Status: http.StatusNotFound, ErrCode: "M_NOT_FOUND", Err: "no"}
+	}
+
+	handler := newGetTokenHandler(t)
+	req := httptest.NewRequest("POST", "/get_token", marshalSFURequest(t, func(r *SFURequest) {
+		r.DelayId = "did"
+		r.DelayTimeout = 1000
+	}))
+	rr := httptest.NewRecorder()
+	handler.prepareMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 when CS API URL resolution fails, got %d", rr.Code)
+	}
+}
+
 func TestProcessSFURequest(t *testing.T) {
 	var calledCreateLiveKitRoom bool
 	originalCreate := CreateLiveKitRoom
@@ -240,25 +265,41 @@ func TestProcessSFURequest(t *testing.T) {
 		return &fclient.UserInfo{Sub: exchangeMatrixID}, nil
 	}
 
+	var failResolution bool
+	originalResolve := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]CsApiUrl, _ *csApiUrlCache) (CsApiUrl, error) {
+		if failResolution {
+			return "", &MatrixErrorResponse{Status: http.StatusNotFound, ErrCode: "M_NOT_FOUND", Err: "no"}
+		}
+		return "https://matrix.example.com", nil
+	}
+
 	for _, tc := range []struct {
-		name                 string
-		matrixID             string
-		claimedMatrixID      string
-		expectJoinTokenError bool
-		expectExchangeError  bool
-		expectCreateRoom     bool
-		expectError          bool
+		name                  string
+		matrixID              string
+		claimedMatrixID       string
+		delayId               string
+		delayTimeout          int
+		expectJoinTokenError  bool
+		expectExchangeError   bool
+		expectResolutionError bool
+		expectCreateRoom      bool
+		expectError           bool
 	}{
 		{name: "Full access — all OK", matrixID: "@user:example.com", claimedMatrixID: "@user:example.com", expectCreateRoom: true},
 		{name: "Restricted — all OK", matrixID: "@user:other.com", claimedMatrixID: "@user:other.com"},
 		{name: "Exchange fails", matrixID: "@user:example.com", claimedMatrixID: "@user:example.com", expectExchangeError: true, expectError: true},
 		{name: "Token key empty", matrixID: "@user:example.com", claimedMatrixID: "@user:example.com", expectJoinTokenError: true, expectError: true},
 		{name: "ClaimedUserID mismatch", matrixID: "@user:example.com", claimedMatrixID: "@user:faked.com", expectError: true},
+		{name: "Delegation — all OK", matrixID: "@user:example.com", claimedMatrixID: "@user:example.com", expectCreateRoom: true, delayId: "did", delayTimeout: 1000},
+		{name: "Delegation — resolution error", matrixID: "@user:example.com", claimedMatrixID: "@user:example.com", expectCreateRoom: false, delayId: "did", delayTimeout: 1000, expectResolutionError: true, expectError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calledCreateLiveKitRoom = false
 			failExchange = tc.expectExchangeError
 			exchangeMatrixID = tc.matrixID
+			failResolution = tc.expectResolutionError
 
 			apiKey := "the_api_key"
 			if tc.expectJoinTokenError {
@@ -268,12 +309,15 @@ func TestProcessSFURequest(t *testing.T) {
 				LiveKitAuth{key: apiKey, secret: "secret", lkUrl: "wss://lk.local:8080/foo"},
 				false, []string{"example.com"},
 				0, // sanityCheckInterval disabled
-			newMemoryJobStore(),
+				map[string]CsApiUrl{},
+				newMemoryJobStore(),
 			)
 			req := &SFURequest{
 				RoomID: "!room:example.com", SlotID: "slot",
-				OpenIDToken: OpenIDTokenType{AccessToken: "token", MatrixServerName: strings.Split(tc.claimedMatrixID, ":")[1]},
-				Member:      MatrixRTCMemberType{ID: "device", ClaimedUserID: tc.claimedMatrixID, ClaimedDeviceID: "dev"},
+				OpenIDToken:  OpenIDTokenType{AccessToken: "token", MatrixServerName: strings.Split(tc.claimedMatrixID, ":")[1]},
+				Member:       MatrixRTCMemberType{ID: "device", ClaimedUserID: tc.claimedMatrixID, ClaimedDeviceID: "dev"},
+				DelayId:      tc.delayId,
+				DelayTimeout: tc.delayTimeout,
 			}
 			_, err := handler.processSFURequest(&http.Request{}, req)
 			if tc.expectError && err == nil {
@@ -333,6 +377,7 @@ func newGetTokenHandler(t *testing.T) *Handler {
 		false,
 		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 	t.Cleanup(handler.Close)

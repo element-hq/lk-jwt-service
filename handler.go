@@ -111,6 +111,8 @@ type Handler struct {
 	// sanityCheckInterval is the period between room-worker sanity checks.
 	// Zero disables the sanity check.
 	sanityCheckInterval time.Duration
+	csApiUrlOverrides   map[string]CsApiUrl
+	csApiUrlCache       *csApiUrlCache
 	store               JobStore
 	// loopDone is closed when loop() has exited.
 	loopDone   chan struct{}
@@ -139,7 +141,7 @@ type sfuEventRequest struct {
 
 var errStorePersistFailed = errors.New("store: failed to persist job")
 
-func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, store JobStore) *Handler {
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]CsApiUrl, store JobStore) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
 		ctx:                   ctx,
@@ -153,6 +155,8 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		jobDoneCh:             make(chan *DelayedEventJob, 10),
 		addJobCh:              make(chan addJobRequest),
 		sfuEventCh:            make(chan sfuEventRequest, 200),
+		csApiUrlOverrides:     csApiUrlOverrides,
+		csApiUrlCache:         newCsApiUrlCache(),
 	}
 	go h.loop()
 	return h
@@ -212,7 +216,9 @@ func (h *Handler) loop() {
 			}
 			params := pj.Params
 			params.DelayTimeout = remaining
-			job, err := NewDelayedEventJob(h.ctx, params, h.jobDoneCh)
+			job, err := NewDelayedEventJob(h.ctx, params, func(ctx context.Context, serverName string) (CsApiUrl, error) {
+				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
+			}, h.jobDoneCh)
 			if err != nil {
 				slog.Error("Handler: failed to restore persisted job", "lkId", key.Identity, "err", err)
 				continue
@@ -256,7 +262,9 @@ func (h *Handler) loop() {
 		case req := <-h.addJobCh:
 			key := jobKey{Room: req.params.LiveKitRoom, Identity: req.params.LiveKitIdentity}
 
-			job, err := NewDelayedEventJob(h.ctx, req.params, h.jobDoneCh)
+			job, err := NewDelayedEventJob(h.ctx, req.params, func(ctx context.Context, serverName string) (CsApiUrl, error) {
+				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
+			}, h.jobDoneCh)
 			if err != nil {
 				slog.Error("Handler: failed to create delayed event job",
 					"room", req.params.LiveKitRoom,
@@ -493,6 +501,22 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 	}
 
 	if isFullAccessUser {
+		// If delegation is requested, verify that we can resolve the Client-Server API and fail the request otherwise.
+		// We do this before creating the LiveKit room so that we don't produce lingering rooms in the error case.
+		//
+		// TODO: This code is currently duplicated across the token endpoints and the delegation endpoint. This
+		// will be resolved ones the already deprecated delay parameters are removed from the token endpoints.
+		if delayedEventDelegationRequested {
+			if url, _ := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides, h.csApiUrlCache); url == "" {
+				return nil, &MatrixErrorResponse{
+					Status:  http.StatusBadRequest,
+					ErrCode: "M_BAD_JSON",
+					Err:     "Unable to resolve client-server API",
+				}
+			}
+		}
+
+		// Now create the LiveKit room.
 		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, matrixID, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
@@ -503,9 +527,9 @@ func (h *Handler) processLegacySFURequest(r *http.Request, req *LegacySFURequest
 		if delayedEventDelegationRequested {
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
-				"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl)
+				"delayId", req.DelayId, "MatrixServerName", req.OpenIDToken.MatrixServerName)
 			if err := h.addDelayedEventJob(DelayedEventJobParams{
-				CsApiUrl:        req.DelayCsApiUrl,
+				ServerName:      req.OpenIDToken.MatrixServerName,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
@@ -564,6 +588,22 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 	}
 
 	if isFullAccessUser {
+		// If delegation is requested, verify that we can resolve the Client-Server API and fail the request otherwise.
+		// We do this before creating the LiveKit room so that we don't produce lingering rooms in the error case.
+		//
+		// TODO: This code is currently duplicated across the token endpoints and the delegation endpoint. This
+		// will be resolved ones the already deprecated delay parameters are removed from the token endpoints.
+		if delayedEventDelegationRequested {
+			if url, _ := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides, h.csApiUrlCache); url == "" {
+				return nil, &MatrixErrorResponse{
+					Status:  http.StatusBadRequest,
+					ErrCode: "M_BAD_JSON",
+					Err:     "Unable to resolve client-server API",
+				}
+			}
+		}
+
+		// Now create the LiveKit room.
 		if err := CreateLiveKitRoom(r.Context(), &h.liveKitAuth, lkRoomAlias, matrixID, lkIdentity); err != nil {
 			return nil, &MatrixErrorResponse{
 				Status:  http.StatusInternalServerError,
@@ -575,9 +615,9 @@ func (h *Handler) processSFURequest(r *http.Request, req *SFURequest) (*SFURespo
 		if delayedEventDelegationRequested {
 			slog.Info("Handler: scheduling delayed event job",
 				"room", lkRoomAlias, "lkId", lkIdentity,
-				"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl)
+				"delayId", req.DelayId, "MatrixServerName", req.OpenIDToken.MatrixServerName)
 			if err := h.addDelayedEventJob(DelayedEventJobParams{
-				CsApiUrl:        req.DelayCsApiUrl,
+				ServerName:      req.OpenIDToken.MatrixServerName,
 				DelayId:         req.DelayId,
 				DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 				LiveKitRoom:     lkRoomAlias,
@@ -630,13 +670,22 @@ func (h *Handler) processDelegateDelayedLeave(r *http.Request, req *DelegateDela
 	lkIdentity := LiveKitIdentityFor(matrixID, req.Member.ClaimedDeviceID, req.Member.ID)
 	lkRoomAlias := LiveKitRoomAliasFor(req.RoomID, req.SlotID)
 
+	// Verify that the Client-Server API can be resolved and prime the cache.
+	if url, _ := resolveCsApiUrl(r.Context(), req.OpenIDToken.MatrixServerName, h.csApiUrlOverrides, h.csApiUrlCache); url == "" {
+		return nil, &MatrixErrorResponse{
+			Status:  http.StatusBadRequest,
+			ErrCode: "M_BAD_JSON",
+			Err:     "Unable to resolve client-server API",
+		}
+	}
+
 	slog.Info("Handler: scheduling delayed event job (delegate_delayed_leave)",
 		"room", lkRoomAlias, "lkId", lkIdentity,
-		"delayId", req.DelayId, "csApiUrl", req.DelayCsApiUrl,
+		"delayId", req.DelayId, "MatrixServerName", req.OpenIDToken.MatrixServerName,
 		"RemoteAddr", r.RemoteAddr, "Origin", r.Header.Get("Origin"))
 
 	if err := h.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl:        req.DelayCsApiUrl,
+		ServerName:      req.OpenIDToken.MatrixServerName,
 		DelayId:         req.DelayId,
 		DelayTimeout:    time.Duration(req.DelayTimeout) * time.Millisecond,
 		LiveKitRoom:     lkRoomAlias,

@@ -4,11 +4,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// config_test.go: tests for parseConfig + readKeySecret (config.go).
-
 package main
 
 import (
+	"maps"
 	"os"
 	"reflect"
 	"testing"
@@ -99,6 +98,107 @@ func TestReadKeySecret(t *testing.T) {
 	}
 }
 
+func TestReadCsApiUrlOverrides(t *testing.T) {
+	testCases := []struct {
+		name        string
+		env         string
+		expectedMap map[string]CsApiUrl
+		expectedErr bool
+	}{
+		{
+			name:        "Empty",
+			env:         "",
+			expectedMap: map[string]CsApiUrl{},
+			expectedErr: false,
+		},
+		{
+			name:        "DNS name",
+			env:         "example.com=https://matrix-client.example.com",
+			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com"},
+			expectedErr: false,
+		},
+		{
+			name:        "DNS name with port",
+			env:         "example.com=https://matrix-client.example.com:1234",
+			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com:1234"},
+			expectedErr: false,
+		},
+		{
+			name:        "IPv4",
+			env:         "192.168.1.100=https://matrix-client.example.com",
+			expectedMap: map[string]CsApiUrl{"192.168.1.100": "https://matrix-client.example.com"},
+			expectedErr: false,
+		},
+		{
+			name:        "IPv4 with port",
+			env:         "192.168.1.100:1234=https://matrix-client.example.com",
+			expectedMap: map[string]CsApiUrl{"192.168.1.100:1234": "https://matrix-client.example.com"},
+			expectedErr: false,
+		},
+		{
+			name:        "IPv6",
+			env:         "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]=https://matrix-client.example.com",
+			expectedMap: map[string]CsApiUrl{"[2001:0db8:85a3:0000:0000:8a2e:0370:7334]": "https://matrix-client.example.com"},
+			expectedErr: false,
+		},
+		{
+			name:        "IPv6 with port",
+			env:         "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:1234=https://matrix-client.example.com",
+			expectedMap: map[string]CsApiUrl{"[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:1234": "https://matrix-client.example.com"},
+			expectedErr: false,
+		},
+		{
+			name:        "Invalid value at the start",
+			env:         "example.com",
+			expectedMap: nil,
+			expectedErr: true,
+		},
+		{
+			name:        "Invalid value at the end",
+			env:         "example.com=https://matrix-client.example.com,example.com",
+			expectedMap: nil,
+			expectedErr: true,
+		},
+		{
+			name:        "Empty key",
+			env:         "=https://matrix-client.example.com",
+			expectedMap: nil,
+			expectedErr: true,
+		},
+		{
+			name:        "Empty value",
+			env:         "example.com=",
+			expectedMap: nil,
+			expectedErr: true,
+		},
+		{
+			name:        "Two DNS names",
+			env:         "example.com=https://matrix-client.example.com,example.org=https://matrix-client.example.org",
+			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com", "example.org": "https://matrix-client.example.org"},
+			expectedErr: false,
+		},
+		{
+			name:        "Two DNS names with whitespace",
+			env:         " example.com = https://matrix-client.example.com , example.org = https://matrix-client.example.org ",
+			expectedMap: map[string]CsApiUrl{"example.com": "https://matrix-client.example.com", "example.org": "https://matrix-client.example.org"},
+			expectedErr: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actualMap, actualErr := readCsApiUrlOverrides(tc.env)
+			if !maps.Equal(tc.expectedMap, actualMap) || tc.expectedErr && actualErr == nil {
+				t.Errorf("Expected map: %v, error: %v, got map: %v, error: %v",
+					tc.expectedMap,
+					tc.expectedErr,
+					actualMap,
+					actualErr)
+			}
+		})
+	}
+}
+
 func TestParseConfig(t *testing.T) {
 	testCases := []struct {
 		name       string
@@ -121,17 +221,21 @@ func TestParseConfig(t *testing.T) {
 				SkipVerifyTLS:         false,
 				FullAccessHomeservers: []string{"*"},
 				LkJwtBind:             ":8080",
+				CsApiUrlOverrides:     map[string]CsApiUrl{},
 			},
 		},
 		{
 			name: "Full config with all options",
 			env: map[string]string{
-				"LIVEKIT_KEY":                      "test_key",
-				"LIVEKIT_SECRET":                   "test_secret",
-				"LIVEKIT_URL":                      "wss://test.livekit.cloud",
-				"LIVEKIT_FULL_ACCESS_HOMESERVERS":  "example.com, test.com",
-				"LIVEKIT_JWT_BIND":                 ":9090",
-				"LIVEKIT_INSECURE_SKIP_VERIFY_TLS": "YES_I_KNOW_WHAT_I_AM_DOING",
+				"LIVEKIT_KEY":                           "test_key",
+				"LIVEKIT_SECRET":                        "test_secret",
+				"LIVEKIT_URL":                           "wss://test.livekit.cloud",
+				"LIVEKIT_FULL_ACCESS_HOMESERVERS":       "example.com, test.com",
+				"LIVEKIT_JWT_BIND":                      ":9090",
+				"LIVEKIT_INSECURE_SKIP_VERIFY_TLS":      "YES_I_KNOW_WHAT_I_AM_DOING",
+				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "30",
+				"LIVEKIT_CS_API_URL_OVERRIDES":          "matrix.com=https://matrix-client.matrix.com",
+				"REDIS_URL":                             "localhost:6379",
 			},
 			wantConfig: &Config{
 				Key:                   "test_key",
@@ -140,6 +244,9 @@ func TestParseConfig(t *testing.T) {
 				SkipVerifyTLS:         true,
 				FullAccessHomeservers: []string{"example.com", "test.com"},
 				LkJwtBind:             ":9090",
+				SanityCheckInterval:   30 * time.Second,
+				CsApiUrlOverrides:     map[string]CsApiUrl{"matrix.com": "https://matrix-client.matrix.com"},
+				RedisURL:              "localhost:6379",
 			},
 		},
 		{
@@ -158,6 +265,7 @@ func TestParseConfig(t *testing.T) {
 				SkipVerifyTLS:         false,
 				FullAccessHomeservers: []string{"*"},
 				LkJwtBind:             ":9090",
+				CsApiUrlOverrides:     map[string]CsApiUrl{},
 			},
 		},
 		{
@@ -189,24 +297,6 @@ func TestParseConfig(t *testing.T) {
 			wantErrMsg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together",
 		},
 		{
-			name: "Sanity check interval configured",
-			env: map[string]string{
-				"LIVEKIT_KEY":                           "test_key",
-				"LIVEKIT_SECRET":                        "test_secret",
-				"LIVEKIT_URL":                           "wss://test.livekit.cloud",
-				"LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS": "30",
-				"LIVEKIT_FULL_ACCESS_HOMESERVERS":       "*",
-			},
-			wantConfig: &Config{
-				Key:                   "test_key",
-				Secret:                "test_secret",
-				LkUrl:                 "wss://test.livekit.cloud",
-				FullAccessHomeservers: []string{"*"},
-				LkJwtBind:             ":8080",
-				SanityCheckInterval:   30 * time.Second,
-			},
-		},
-		{
 			name: "Sanity check interval invalid",
 			env: map[string]string{
 				"LIVEKIT_KEY":                           "test_key",
@@ -233,6 +323,7 @@ func TestParseConfig(t *testing.T) {
 				FullAccessHomeservers: []string{"*"},
 				LkJwtBind:             ":8080",
 				SanityCheckInterval:   0,
+				CsApiUrlOverrides:     map[string]CsApiUrl{},
 			},
 		},
 		{
@@ -281,26 +372,10 @@ func TestParseConfig(t *testing.T) {
 				return
 			}
 
-			if got.Key != tc.wantConfig.Key {
-				t.Errorf("Key = %q, want %q", got.Key, tc.wantConfig.Key)
-			}
-			if got.Secret != tc.wantConfig.Secret {
-				t.Errorf("Secret = %q, want %q", got.Secret, tc.wantConfig.Secret)
-			}
-			if got.LkUrl != tc.wantConfig.LkUrl {
-				t.Errorf("LkUrl = %q, want %q", got.LkUrl, tc.wantConfig.LkUrl)
-			}
-			if got.SkipVerifyTLS != tc.wantConfig.SkipVerifyTLS {
-				t.Errorf("SkipVerifyTLS = %v, want %v", got.SkipVerifyTLS, tc.wantConfig.SkipVerifyTLS)
-			}
-			if !reflect.DeepEqual(got.FullAccessHomeservers, tc.wantConfig.FullAccessHomeservers) {
-				t.Errorf("FullAccessHomeservers = %v, want %v", got.FullAccessHomeservers, tc.wantConfig.FullAccessHomeservers)
-			}
-			if got.LkJwtBind != tc.wantConfig.LkJwtBind {
-				t.Errorf("JwtBind = %q, want %q", got.LkJwtBind, tc.wantConfig.LkJwtBind)
-			}
-			if got.SanityCheckInterval != tc.wantConfig.SanityCheckInterval {
-				t.Errorf("SanityCheckInterval = %v, want %v", got.SanityCheckInterval, tc.wantConfig.SanityCheckInterval)
+			// If any of the defaults change, the wantConfigs might need updating.
+			if !reflect.DeepEqual(got, tc.wantConfig) {
+				t.Errorf("Expected config: %v, got: %v", tc.wantConfig, got)
+				return
 			}
 		})
 	}

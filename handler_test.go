@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,6 +62,7 @@ func TestIsFullAccessUser(t *testing.T) {
 		LiveKitAuth{secret: "testSecret", key: "testKey", lkUrl: "wss://lk.local:8080/foo"},
 		true, []string{"example.com", "another.example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 	for _, tc := range []struct {
@@ -115,6 +117,7 @@ func TestHandler_Close(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost"},
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 	done := make(chan struct{})
@@ -139,22 +142,17 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 		return false, ctx.Err()
 	}
 
-	originalExec := ExecuteDelayedEventAction
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
-		return http.StatusOK, nil
-	}
-
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
 	if err := handler.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl:        "https://matrix.example.com",
+		ServerName:      "example.com",
 		DelayId:         "delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     LiveKitRoomAlias("test-room"),
@@ -178,9 +176,19 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 		return false, ctx.Err()
 	}
 
+	var resolveCalled atomic.Bool
+	originalResolve := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]CsApiUrl, _ *csApiUrlCache) (CsApiUrl, error) {
+		resolveCalled.Store(true)
+		return "https://matrix-client.example.com", nil
+	}
+
+	var execCalled atomic.Bool
 	originalExec := ExecuteDelayedEventAction
 	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
+		execCalled.Store(true)
 		return http.StatusOK, nil
 	}
 
@@ -188,6 +196,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
@@ -196,7 +205,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 	identity := LiveKitIdentity("@loopuser:example.com")
 
 	if err := handler.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl:        "https://matrix.example.com",
+		ServerName:      "example.com",
 		DelayId:         "loop-delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     room,
@@ -216,6 +225,12 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 		msg:       SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity},
 	}
 	time.Sleep(200 * time.Millisecond)
+	if !resolveCalled.Load() {
+		t.Error("expected CS API resolution to be called")
+	}
+	if !execCalled.Load() {
+		t.Error("expected delayed event action to be called")
+	}
 	// No assertion beyond no deadlock/panic — loop() cleans up internally.
 }
 
@@ -269,6 +284,7 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost"},
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 	handler.Close() // shut down loop() so ctx is cancelled
@@ -277,7 +293,7 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		err := handler.addDelayedEventJob(DelayedEventJobParams{
-			CsApiUrl:        "https://example.com",
+			ServerName:      "example.com",
 			DelayId:         "id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     "room",
@@ -570,6 +586,7 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 
@@ -577,7 +594,7 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 	rooms := []LiveKitRoomAlias{"room-alpha", "room-beta", "room-gamma"}
 	for _, room := range rooms {
 		if err := handler.addDelayedEventJob(DelayedEventJobParams{
-			CsApiUrl:        "https://matrix.example.com",
+			ServerName:      "example.com",
 			DelayId:         "delay-id",
 			DelayTimeout:    10 * time.Second,
 			LiveKitRoom:     room,
@@ -611,9 +628,19 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 		return false, ctx.Err()
 	}
 
+	var resolveCalled atomic.Bool
+	originalResolve := resolveCsApiUrl
+	t.Cleanup(func() { resolveCsApiUrl = originalResolve })
+	resolveCsApiUrl = func(_ context.Context, _ string, _ map[string]CsApiUrl, _ *csApiUrlCache) (CsApiUrl, error) {
+		resolveCalled.Store(true)
+		return "https://matrix-client.example.com", nil
+	}
+
+	var execCalled atomic.Bool
 	originalExec := ExecuteDelayedEventAction
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec }) // runs last
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
+		execCalled.Store(true)
 		return http.StatusOK, nil
 	}
 
@@ -621,6 +648,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 
@@ -628,7 +656,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 	identity := LiveKitIdentity("@user:example.com")
 
 	if err := handler.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl:        "https://matrix.example.com",
+		ServerName:      "example.com",
 		DelayId:         "delay-id",
 		DelayTimeout:    10 * time.Second,
 		LiveKitRoom:     room,
@@ -661,6 +689,13 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("handler.Close() blocked after doneCh — backgroundWg not properly tracked")
 	}
+
+	if !resolveCalled.Load() {
+		t.Error("expected CS API resolution to be called")
+	}
+	if !execCalled.Load() {
+		t.Error("expected delayed event action to be called")
+	}
 }
 
 // TestHandler_loop_JobReplacement_NoDeadlock verifies that replacing a job for
@@ -675,16 +710,11 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 		return false, ctx.Err()
 	}
 
-	originalExec := ExecuteDelayedEventAction
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ string, _ string, _ DelayEventAction) (int, error) {
-		return http.StatusOK, nil
-	}
-
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
 		newMemoryJobStore(),
 	)
 
@@ -693,7 +723,7 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 
 	// Create first job.
 	if err := handler.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl: "https://matrix.example.com", DelayId: "delay-1",
+		ServerName: "example.com", DelayId: "delay-1",
 		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity,
 	}); err != nil {
 		t.Fatalf("addDelayedEventJob(delay-1): %v", err)
@@ -702,7 +732,7 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 
 	// Replace with second job for the same identity — first job gets JobReplaced.
 	if err := handler.addDelayedEventJob(DelayedEventJobParams{
-		CsApiUrl: "https://matrix.example.com", DelayId: "delay-2",
+		ServerName: "example.com", DelayId: "delay-2",
 		DelayTimeout: 10 * time.Second, LiveKitRoom: room, LiveKitIdentity: identity,
 	}); err != nil {
 		t.Fatalf("addDelayedEventJob(delay-2): %v", err)
