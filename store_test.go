@@ -27,7 +27,7 @@ func runStoreTests(t *testing.T, newStore func() store) {
 		LiveKitRoom:     LiveKitRoomAlias("!room:example.com"),
 		LiveKitIdentity: identity,
 	}
-	job := storedJob{Params: params, CreatedAt: time.Now().Truncate(time.Millisecond)}
+	job := storedJob{Params: params, RestartedAt: time.Now().Truncate(time.Millisecond)}
 
 	t.Run("TestLoadAllJobsOnEmptyStore", func(t *testing.T) {
 		store := newStore()
@@ -172,8 +172,8 @@ func TestRedisStoreSkipsUnparseableEntry(t *testing.T) {
 	// Save a valid entry alongside it.
 	identity := LiveKitIdentity("@good:example.com")
 	job := storedJob{
-		Params:    DelayedEventJobParams{DelayId: "id", LiveKitIdentity: identity},
-		CreatedAt: time.Now().Truncate(time.Millisecond),
+		Params:      DelayedEventJobParams{DelayId: "id", LiveKitIdentity: identity},
+		RestartedAt: time.Now().Truncate(time.Millisecond),
 	}
 	if err := store.saveJob(ctx, identity, job); err != nil {
 		t.Fatalf("saving job failed: %v", err)

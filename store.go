@@ -18,9 +18,12 @@ import (
 )
 
 // A stored job.
+//
+// The fields on this struct are exported so that we can serialise
+// them, e.g. to JSON.
 type storedJob struct {
-	Params    DelayedEventJobParams
-	CreatedAt time.Time
+	Params      DelayedEventJobParams
+	RestartedAt time.Time
 }
 
 // Interface for storage backends.

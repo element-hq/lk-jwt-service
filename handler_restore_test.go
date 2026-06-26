@@ -39,7 +39,7 @@ func TestHandler_Restore_ResumesLiveJobs(t *testing.T) {
 			LiveKitRoom:     room,
 			LiveKitIdentity: identity,
 		},
-		CreatedAt: time.Now(),
+		RestartedAt: time.Now(),
 	})
 
 	handler := NewHandler(
@@ -93,7 +93,7 @@ func TestHandler_Restore_SkipsExpiredJobs(t *testing.T) {
 			LiveKitIdentity: identity,
 		},
 		// CreatedAt far enough in the past that DelayTimeout has elapsed.
-		CreatedAt: time.Now().Add(-2 * time.Second),
+		RestartedAt: time.Now().Add(-2 * time.Second),
 	})
 
 	handler := NewHandler(
