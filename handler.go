@@ -241,7 +241,7 @@ func (h *Handler) loop() {
 				continue
 			}
 
-			// Store the job in the in-memory map and kick off its loop.
+			// Store the job in the handlers local map and kick off its loop.
 			jobs[key] = job
 			startParticipantLookup(job, h.liveKitAuth, h.sanityCheckInterval)
 			loopWg.Add(1)
