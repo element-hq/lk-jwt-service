@@ -900,17 +900,19 @@ func (job *DelayedEventJob) startDelayedEventRestart() {
 				"status", status, "err", err)
 			signal = DelayedEventTimedOut
 		default:
+			restartedAd := time.Now()
+			newDeadline := restartedAd.Add(job.DelayTimeout)
+
 			// Report success to handler.loop() so that it can update the
 			// stored job.
 			select {
-			case job.restartedCh <- jobRestartedRequest{params: job.DelayedEventJobParams, restartedAt: time.Now()}:
+			case job.restartedCh <- jobRestartedRequest{params: job.DelayedEventJobParams, restartedAt: restartedAd}:
 			case <-job.ctx.Done():
 				return
 			}
 
 			// Report success to loop() via restartResultCh; loop() will extend
 			// the deadline and re-arm fsmTimerRestart.
-			newDeadline := time.Now().Add(job.DelayTimeout)
 			slog.Debug("Job: ActionRestart ok", "room", job.LiveKitRoom,
 				"lkId", job.LiveKitIdentity,
 				"next reset in", job.delayRestartDuration())
