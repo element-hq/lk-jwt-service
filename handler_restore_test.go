@@ -305,16 +305,6 @@ func (s *notifyingStore) deleteJob(ctx context.Context, identity LiveKitIdentity
 	return err
 }
 
-type failingLoadStore struct{}
-
-func (s *failingLoadStore) saveJob(_ context.Context, _ LiveKitIdentity, _ storedJob) error {
-	return nil
-}
-func (s *failingLoadStore) deleteJob(_ context.Context, _ LiveKitIdentity) error { return nil }
-func (s *failingLoadStore) allJobs(_ context.Context) ([]storedJob, error) {
-	return nil, errors.New("simulated LoadAll failure")
-}
-
 // A store that fails on any operation.
 type failingStore struct{}
 
