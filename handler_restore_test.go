@@ -186,6 +186,39 @@ func TestHandler_Restore_GracefullyIgnoresStoreErrors(t *testing.T) {
 	}
 }
 
+func TestHandler_Restore_GracefullyIgnoresMissingStore(t *testing.T) {
+	// Block the job to be added on phase one so that it doesn't go off
+	// do anything for the sake of the test.
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+
+	// Kick off the handler without a store.
+	handler := NewHandler(
+		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
+		false, []string{"example.com"},
+		0, // sanityCheckInterval disabled
+		map[string]CsApiUrl{},
+		nil,
+	)
+	t.Cleanup(handler.Close)
+
+	// The handler should still accept new jobs.
+	err := handler.addDelayedEventJob(DelayedEventJobParams{
+		ServerName:      "example.com",
+		DelayId:         "new-delay-id",
+		DelayTimeout:    10 * time.Second,
+		LiveKitRoom:     LiveKitRoomAlias("error-recovery-room"),
+		LiveKitIdentity: LiveKitIdentity("@user:example.com:device:member"),
+	})
+	if err != nil {
+		t.Fatalf("addDelayedEventJob failed: %v", err)
+	}
+}
+
 func TestHandler_Restore_SavesNewJobs(t *testing.T) {
 	// Set up an empty store.
 	store := newNotifyingStore()

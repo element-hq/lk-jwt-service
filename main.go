@@ -58,7 +58,7 @@ func main() {
 		}
 	} else {
 		slog.Warn("LIVEKIT_REDIS_URL not set. Using in-memory store.")
-		store = newInMemoryStore()
+		store = nil
 	}
 
 	handler := NewHandler(
