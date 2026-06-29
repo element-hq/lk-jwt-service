@@ -149,8 +149,6 @@ type sfuEventRequest struct {
 	msg       SFUMessage
 }
 
-var errStorePersistFailed = errors.New("store: failed to persist job")
-
 func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]CsApiUrl, store store) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
@@ -451,13 +449,6 @@ func matrixErrorForAddJob(err error) *MatrixErrorResponse {
 			Status:  http.StatusServiceUnavailable,
 			ErrCode: "M_UNKNOWN",
 			Err:     "Service is shutting down",
-		}
-	}
-	if errors.Is(err, errStorePersistFailed) {
-		return &MatrixErrorResponse{
-			Status:  http.StatusServiceUnavailable,
-			ErrCode: "M_UNKNOWN",
-			Err:     "Failed to persist delayed event",
 		}
 	}
 	return &MatrixErrorResponse{
