@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -117,7 +116,10 @@ type Handler struct {
 	csApiUrlCache       *csApiUrlCache
 	store               store
 	// loopDone is closed when loop() has exited.
-	loopDone       chan struct{}
+	loopDone chan struct{}
+	// Channel that is closed once start-up recovery of previously stored
+	// jobs is complete.
+	recoveryDone   chan struct{}
 	jobDoneCh      chan *DelayedEventJob
 	jobRestartedCh chan jobRestartedRequest
 	addJobCh       chan addJobRequest
@@ -159,6 +161,7 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		fullAccessHomeservers: fullAccessHomeservers,
 		sanityCheckInterval:   sanityCheckInterval,
 		loopDone:              make(chan struct{}),
+		recoveryDone:          make(chan struct{}),
 		jobDoneCh:             make(chan *DelayedEventJob, 10),
 		jobRestartedCh:        make(chan jobRestartedRequest, 10),
 		addJobCh:              make(chan addJobRequest),
@@ -256,6 +259,8 @@ func (h *Handler) loop() {
 		}
 	}
 
+	close(h.recoveryDone)
+
 	for {
 		select {
 		case <-h.ctx.Done():
@@ -296,16 +301,6 @@ func (h *Handler) loop() {
 				continue
 			}
 
-			// Save the job in the store. We assume the delayed event was restarted
-			// just before the request came in because that is our best guess.
-			storedJob := storedJob{Params: req.params, RestartedAt: time.Now()}
-			if err := h.store.saveJob(h.ctx, key.Identity, storedJob); err != nil {
-				slog.Error("Handler: failed to store job",
-					"room", key.Room, "lkId", key.Identity, "err", err)
-				req.result <- addJobResult{err: fmt.Errorf("%w: %w", errStorePersistFailed, err)}
-				continue
-			}
-
 			if existing, ok := jobs[key]; ok {
 				slog.Info("Handler: replacing existing job",
 					"room", key.Room, "lkId", key.Identity,
@@ -320,6 +315,14 @@ func (h *Handler) loop() {
 			}
 
 			jobs[key] = job
+
+			// Save the job in the store. We assume the delayed event was restarted
+			// just before the request came in because that is our best guess.
+			storedJob := storedJob{Params: req.params, RestartedAt: time.Now()}
+			if err := h.store.saveJob(h.ctx, key.Identity, storedJob); err != nil {
+				slog.Error("Handler: failed to store job",
+					"room", key.Room, "lkId", key.Identity, "err", err)
+			}
 
 			// Pull-based lookup (additionally to SFU webhook)
 			// Phase 1:

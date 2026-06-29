@@ -13,24 +13,11 @@ import (
 	"time"
 )
 
-func TestHandler_Restore_ResumesLiveJobs(t *testing.T) {
-	originalLookup := LiveKitParticipantExists
-	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
-	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
-		<-ctx.Done()
-		return false, ctx.Err()
-	}
-
-	originalExec := ExecuteDelayedEventAction
-	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
-	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
-		return http.StatusOK, nil
-	}
-
-	identity := LiveKitIdentity("@restore-user:example.com:device:member")
-	room := LiveKitRoomAlias("restore-test-room")
-
-	store := newInMemoryStore()
+func TestHandler_Restore_ResumesSavedJob(t *testing.T) {
+	// Set up the store with a single saved job.
+	identity := LiveKitIdentity("@user:example.com")
+	room := LiveKitRoomAlias("test-room")
+	store := newNotifyingStore()
 	_ = store.saveJob(context.Background(), identity, storedJob{
 		Params: DelayedEventJobParams{
 			DelayId:         "restore-delay-id",
@@ -42,47 +29,73 @@ func TestHandler_Restore_ResumesLiveJobs(t *testing.T) {
 		RestartedAt: time.Now(),
 	})
 
+	// Block the job to be added on phase one so that we can emit our
+	// own events for the test.
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+
+	// Mock all delayed event requests to succeed.
+	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
+		return http.StatusOK, nil
+	}
+
+	// Kick off the handler.
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
-		false, []string{"example.com"},
+		false,
+		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
 		store,
 	)
 	t.Cleanup(handler.Close)
 
-	// Give loop() time to run startup recovery.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for startup recovery to complete.
+	select {
+	case <-handler.recoveryDone:
+		jobs, err := store.allJobs(context.Background())
+		if err != nil {
+			t.Fatal("could not load jobs from store")
+		}
+		// Our job should still be in the store.
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job in the store, found %d", len(jobs))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for handler to complete recovery")
+	}
 
-	// The restored job must be routable — send it a connect event followed by
-	// a disconnect so it completes its full lifecycle without deadlocking.
+	// Simulate a connect and disconnect cycle for the LiveKit identity.
 	handler.sfuEventCh <- sfuEventRequest{
 		roomAlias: room,
 		msg:       SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity},
 	}
-	time.Sleep(30 * time.Millisecond)
 	handler.sfuEventCh <- sfuEventRequest{
 		roomAlias: room,
 		msg:       SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity},
 	}
 
-	// Wait for the job to finish and be cleaned up (delete from store).
-	time.Sleep(200 * time.Millisecond)
-
-	// After the job completes, the store entry should have been deleted.
-	jobs, err := store.allJobs(context.Background())
-	if err != nil {
-		t.Fatalf("LoadAll: %v", err)
-	}
-	if len(jobs) != 0 {
-		t.Errorf("expected store to be empty after job completion, got %d entries", len(jobs))
+	// Wait for the job to finish and be deleted from the store.
+	select {
+	case actualIdentity := <-store.deletedCh:
+		if actualIdentity != identity {
+			t.Fatalf("expected delete for %v, observed delete for %v", identity, actualIdentity)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for job to be deleted from store")
 	}
 }
 
-func TestHandler_Restore_SkipsExpiredJobs(t *testing.T) {
-	identity := LiveKitIdentity("@expired:example.com:device:member")
-	room := LiveKitRoomAlias("expired-room")
-
+func TestHandler_Restore_PurgesExpiredJobs(t *testing.T) {
+	// Set up the store with an expired job.
+	identity := LiveKitIdentity("@user:example.com")
+	room := LiveKitRoomAlias("test-room")
 	store := newInMemoryStore()
 	_ = store.saveJob(context.Background(), identity, storedJob{
 		Params: DelayedEventJobParams{
@@ -92,40 +105,55 @@ func TestHandler_Restore_SkipsExpiredJobs(t *testing.T) {
 			LiveKitRoom:     room,
 			LiveKitIdentity: identity,
 		},
-		// CreatedAt far enough in the past that DelayTimeout has elapsed.
 		RestartedAt: time.Now().Add(-2 * time.Second),
 	})
 
+	// Verify that LiveKitParticipantExists is never called.
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
+		t.Fatal("should not call LiveKitParticipantExists")
+		return false, ctx.Err()
+	}
+
+	// Verify that ExecuteDelayedEventAction is never called.
+	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
+		t.Fatal("should not call ExecuteDelayedEventAction")
+		return http.StatusOK, nil
+	}
+
+	// Kick off the handler.
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
-		false, []string{"example.com"},
+		false,
+		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
 		store,
 	)
 	t.Cleanup(handler.Close)
 
-	// Give loop() time to run startup recovery and clean up the expired entry.
-	time.Sleep(50 * time.Millisecond)
-
-	// Expired job must not be routable.
-	handler.sfuEventCh <- sfuEventRequest{
-		roomAlias: room,
-		msg:       SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity},
-	}
-	time.Sleep(30 * time.Millisecond)
-
-	// The store entry must have been deleted during recovery.
-	jobs, err := store.allJobs(context.Background())
-	if err != nil {
-		t.Fatalf("LoadAll: %v", err)
-	}
-	if len(jobs) != 0 {
-		t.Errorf("expected expired job to be deleted from store, got %d entries", len(jobs))
+	// Wait for startup recovery to complete.
+	select {
+	case <-handler.recoveryDone:
+		jobs, err := store.allJobs(context.Background())
+		if err != nil {
+			t.Fatal("could not load jobs from store")
+		}
+		// Our job should have been deleted from the store.
+		if len(jobs) != 0 {
+			t.Fatalf("expected 0 jobs in the store, found %d", len(jobs))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for handler to complete recovery")
 	}
 }
 
-func TestHandler_Restore_StoreError(t *testing.T) {
+func TestHandler_Restore_GracefullyIgnoresStoreErrors(t *testing.T) {
+	// Block the job to be added on phase one so that it doesn't go off
+	// do anything for the sake of the test.
 	originalLookup := LiveKitParticipantExists
 	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
 	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
@@ -133,16 +161,17 @@ func TestHandler_Restore_StoreError(t *testing.T) {
 		return false, ctx.Err()
 	}
 
+	// Kick off the handler with a store that always fails.
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
-		&failingLoadStore{},
+		&failingStore{},
 	)
 	t.Cleanup(handler.Close)
 
-	// Handler must still accept new jobs despite the startup error.
+	// The handler should still accept new jobs.
 	err := handler.addDelayedEventJob(DelayedEventJobParams{
 		ServerName:      "example.com",
 		DelayId:         "new-delay-id",
@@ -151,38 +180,130 @@ func TestHandler_Restore_StoreError(t *testing.T) {
 		LiveKitIdentity: LiveKitIdentity("@user:example.com:device:member"),
 	})
 	if err != nil {
-		t.Fatalf("addDelayedEventJob after store error: %v", err)
+		t.Fatalf("addDelayedEventJob failed: %v", err)
 	}
 }
 
-func TestHandler_SaveError_FailsRequest(t *testing.T) {
+func TestHandler_Restore_SavesNewJobs(t *testing.T) {
+	// Set up an empty store.
+	store := newNotifyingStore()
+
+	// Block the job to be added on phase one so that we can emit our
+	// own events for the test.
+	originalLookup := LiveKitParticipantExists
+	t.Cleanup(func() { LiveKitParticipantExists = originalLookup })
+	LiveKitParticipantExists = func(ctx context.Context, _ LiveKitAuth, _ LiveKitRoomAlias, _ LiveKitIdentity) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+
+	// Mock all delayed event requests to succeed.
+	originalExec := ExecuteDelayedEventAction
+	t.Cleanup(func() { ExecuteDelayedEventAction = originalExec })
+	ExecuteDelayedEventAction = func(_ CsApiUrl, _ string, _ DelayEventAction) (int, error) {
+		return http.StatusOK, nil
+	}
+
+	// Kick off the handler.
 	handler := NewHandler(
 		LiveKitAuth{key: "key", secret: "secret", lkUrl: "ws://localhost:7880"},
-		false, []string{"example.com"},
+		false,
+		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
-		&failingSaveStore{},
+		store,
 	)
 	t.Cleanup(handler.Close)
 
-	err := handler.addDelayedEventJob(DelayedEventJobParams{
-		ServerName:      "example.com",
-		DelayId:         "save-fail-id",
-		DelayTimeout:    10 * time.Second,
-		LiveKitRoom:     LiveKitRoomAlias("save-fail-room"),
-		LiveKitIdentity: LiveKitIdentity("@user:example.com:device:member"),
-	})
-	if !errors.Is(err, errStorePersistFailed) {
-		t.Fatalf("expected errStorePersistFailed, got: %v", err)
+	// Wait for startup recovery to complete.
+	select {
+	case <-handler.recoveryDone:
+		jobs, err := store.allJobs(context.Background())
+		if err != nil {
+			t.Fatal("could not load jobs from store")
+		}
+		// Our job should still be in the store.
+		if len(jobs) != 0 {
+			t.Fatalf("expected 0 jobs in the store, found %d", len(jobs))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for handler to complete recovery")
 	}
 
-	mErr := matrixErrorForAddJob(err)
-	if mErr.Status != http.StatusServiceUnavailable || mErr.ErrCode != "M_UNKNOWN" {
-		t.Errorf("expected 503 M_UNKNOWN, got %d %s", mErr.Status, mErr.ErrCode)
+	// Add a new job.
+	identity := LiveKitIdentity("@user:example.com")
+	room := LiveKitRoomAlias("test-room")
+	err := handler.addDelayedEventJob(DelayedEventJobParams{
+		ServerName:      "example.com",
+		DelayId:         "new-delay-id",
+		DelayTimeout:    10 * time.Second,
+		LiveKitRoom:     room,
+		LiveKitIdentity: identity,
+	})
+	if err != nil {
+		t.Fatalf("addDelayedEventJob failed: %v", err)
+	}
+
+	// Wait for the job to be saved into the store.
+	select {
+	case actualIdentity := <-store.savedCh:
+		if actualIdentity != identity {
+			t.Fatalf("expected save for %v, observed save for %v", identity, actualIdentity)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for job to be saved into the store")
+	}
+
+	// Simulate a connect and disconnect cycle for the LiveKit identity.
+	handler.sfuEventCh <- sfuEventRequest{
+		roomAlias: room,
+		msg:       SFUMessage{Type: ParticipantConnected, LiveKitIdentity: identity},
+	}
+	handler.sfuEventCh <- sfuEventRequest{
+		roomAlias: room,
+		msg:       SFUMessage{Type: ParticipantDisconnectedIntentionally, LiveKitIdentity: identity},
+	}
+
+	// Wait for the job to finish and be deleted from the store.
+	select {
+	case actualIdentity := <-store.deletedCh:
+		if actualIdentity != identity {
+			t.Fatalf("expected delete for %v, observed delete for %v", identity, actualIdentity)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for job to be deleted from store")
 	}
 }
 
-// ── stub stores ───────────────────────────────────────────────────────────────
+// An in-memory store that notifies about job save and deletion.
+type notifyingStore struct {
+	store
+	savedCh   chan LiveKitIdentity
+	deletedCh chan LiveKitIdentity
+}
+
+func newNotifyingStore() *notifyingStore {
+	return &notifyingStore{
+		store:     newInMemoryStore(),
+		savedCh:   make(chan LiveKitIdentity, 10),
+		deletedCh: make(chan LiveKitIdentity, 10)}
+}
+
+func (s *notifyingStore) saveJob(ctx context.Context, identity LiveKitIdentity, job storedJob) error {
+	err := s.store.saveJob(ctx, identity, job)
+	if err == nil {
+		s.savedCh <- identity
+	}
+	return err
+}
+
+func (s *notifyingStore) deleteJob(ctx context.Context, identity LiveKitIdentity) error {
+	err := s.store.deleteJob(ctx, identity)
+	if err == nil {
+		s.deletedCh <- identity
+	}
+	return err
+}
 
 type failingLoadStore struct{}
 
@@ -194,12 +315,16 @@ func (s *failingLoadStore) allJobs(_ context.Context) ([]storedJob, error) {
 	return nil, errors.New("simulated LoadAll failure")
 }
 
-type failingSaveStore struct{}
+// A store that fails on any operation.
+type failingStore struct{}
 
-func (s *failingSaveStore) saveJob(_ context.Context, _ LiveKitIdentity, _ storedJob) error {
-	return errors.New("simulated Save failure")
+func (s *failingStore) saveJob(_ context.Context, _ LiveKitIdentity, _ storedJob) error {
+	return errors.New("failed")
 }
-func (s *failingSaveStore) deleteJob(_ context.Context, _ LiveKitIdentity) error { return nil }
-func (s *failingSaveStore) allJobs(_ context.Context) ([]storedJob, error) {
-	return nil, nil
+func (s *failingStore) deleteJob(_ context.Context, _ LiveKitIdentity) error {
+	return errors.New("failed")
+}
+
+func (s *failingStore) allJobs(_ context.Context) ([]storedJob, error) {
+	return nil, errors.New("failed")
 }
