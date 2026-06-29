@@ -222,8 +222,8 @@ func (h *Handler) loop() {
 			remaining := time.Until(storedJob.RestartedAt.Add(storedJob.Params.DelayTimeout))
 			if remaining <= 0 {
 				slog.Info("Handler: skipping expired stored job", "lkId", key.Identity)
-				if err := h.store.deleteJob(h.ctx, key.Identity); err != nil {
-					slog.Error("Handler: failed to delete expired stored job", "lkId", key.Identity, "err", err)
+				if err := h.store.deleteJob(h.ctx, key); err != nil {
+					slog.Error("Handler: failed to delete expired stored job", "key", key, "err", err)
 				}
 				continue
 			}
@@ -314,9 +314,8 @@ func (h *Handler) loop() {
 			// Save the job in the store. We assume the delayed event was restarted
 			// just before the request came in because that is our best guess.
 			storedJob := storedJob{Params: req.params, RestartedAt: time.Now()}
-			if err := h.store.saveJob(h.ctx, key.Identity, storedJob); err != nil {
-				slog.Error("Handler: failed to store job",
-					"room", key.Room, "lkId", key.Identity, "err", err)
+			if err := h.store.saveJob(h.ctx, key, storedJob); err != nil {
+				slog.Error("Handler: failed to store job", "key", key, "err", err)
 			}
 
 			// Pull-based lookup (additionally to SFU webhook)
@@ -375,9 +374,8 @@ func (h *Handler) loop() {
 			slog.Info("Handler: job done, cleaning up",
 				"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 			delete(jobs, key)
-			if err := h.store.deleteJob(h.ctx, key.Identity); err != nil {
-				slog.Error("Handler: failed to delete persisted job",
-					"room", key.Room, "lkId", key.Identity, "err", err)
+			if err := h.store.deleteJob(h.ctx, key); err != nil {
+				slog.Error("Handler: failed to delete persisted job", "key", key, "err", err)
 			}
 			doneJob.Stop()
 			// No Close() goroutine needed — doneJob.loop() exits on its own;
@@ -391,9 +389,8 @@ func (h *Handler) loop() {
 				break
 			}
 			storedJob := storedJob{Params: req.job.DelayedEventJobParams, RestartedAt: req.restartedAt}
-			if err := h.store.saveJob(h.ctx, key.Identity, storedJob); err != nil {
-				slog.Error("Handler: failed to update stored job",
-					"room", key.Room, "lkId", key.Identity, "err", err)
+			if err := h.store.saveJob(h.ctx, key, storedJob); err != nil {
+				slog.Error("Handler: failed to update stored job", "key", key, "err", err)
 			}
 		}
 	}

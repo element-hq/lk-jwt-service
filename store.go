@@ -32,13 +32,13 @@ type store interface {
 	//
 	// The caller is responsible for ensuring thread-safety when calling this and
 	// other store methods.
-	saveJob(ctx context.Context, identity LiveKitIdentity, job storedJob) error
+	saveJob(ctx context.Context, key jobKey, job storedJob) error
 
 	// Remove the entry for the given identity from the store. A missing entry is not an error.
 	//
 	// The caller is responsible for ensuring thread-safety when calling this and
 	// other store methods.
-	deleteJob(ctx context.Context, identity LiveKitIdentity) error
+	deleteJob(ctx context.Context, key jobKey) error
 
 	// Retrieve all jobs in the store.
 	//
@@ -49,22 +49,22 @@ type store interface {
 
 // An in-memory storage backend without persistency.
 type inMemoryStore struct {
-	jobs map[LiveKitIdentity]storedJob
+	jobs map[jobKey]storedJob
 }
 
 func newInMemoryStore() store {
-	store := &inMemoryStore{jobs: make(map[LiveKitIdentity]storedJob)}
+	store := &inMemoryStore{jobs: make(map[jobKey]storedJob)}
 	slog.Info("store: created new in-memory store")
 	return store
 }
 
-func (s *inMemoryStore) saveJob(_ context.Context, identity LiveKitIdentity, job storedJob) error {
-	s.jobs[identity] = job
+func (s *inMemoryStore) saveJob(_ context.Context, key jobKey, job storedJob) error {
+	s.jobs[key] = job
 	return nil
 }
 
-func (s *inMemoryStore) deleteJob(_ context.Context, identity LiveKitIdentity) error {
-	delete(s.jobs, identity)
+func (s *inMemoryStore) deleteJob(_ context.Context, key jobKey) error {
+	delete(s.jobs, key)
 	return nil
 }
 
@@ -94,16 +94,20 @@ func newRedisStore(redisURL string) (store, error) {
 	return &redisStore{client: client}, nil
 }
 
-func (s *redisStore) saveJob(ctx context.Context, identity LiveKitIdentity, job storedJob) error {
+func (s *redisStore) keyToString(key jobKey) string {
+	return string(marshalStrings([]string{string(key.Room), string(key.Identity)}))
+}
+
+func (s *redisStore) saveJob(ctx context.Context, key jobKey, job storedJob) error {
 	data, err := json.Marshal(job)
 	if err != nil {
 		return fmt.Errorf("store: failed marshalling job: %w", err)
 	}
-	return s.client.HSet(ctx, redisJobsHashKey, string(identity), data).Err()
+	return s.client.HSet(ctx, redisJobsHashKey, s.keyToString(key), data).Err()
 }
 
-func (s *redisStore) deleteJob(ctx context.Context, identity LiveKitIdentity) error {
-	return s.client.HDel(ctx, redisJobsHashKey, string(identity)).Err()
+func (s *redisStore) deleteJob(ctx context.Context, key jobKey) error {
+	return s.client.HDel(ctx, redisJobsHashKey, s.keyToString(key)).Err()
 }
 
 func (s *redisStore) allJobs(ctx context.Context) ([]storedJob, error) {

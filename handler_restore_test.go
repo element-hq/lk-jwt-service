@@ -15,10 +15,11 @@ import (
 
 func TestHandler_Restore_ResumesSavedJob(t *testing.T) {
 	// Set up the store with a single saved job.
-	identity := LiveKitIdentity("@user:example.com")
 	room := LiveKitRoomAlias("test-room")
+	identity := LiveKitIdentity("@user:example.com")
+	key := jobKey{Room: room, Identity: identity}
 	store := newNotifyingStore()
-	_ = store.saveJob(context.Background(), identity, storedJob{
+	_ = store.saveJob(context.Background(), key, storedJob{
 		Params: DelayedEventJobParams{
 			DelayId:         "restore-delay-id",
 			ServerName:      "example.com",
@@ -83,9 +84,9 @@ func TestHandler_Restore_ResumesSavedJob(t *testing.T) {
 
 	// Wait for the job to finish and be deleted from the store.
 	select {
-	case actualIdentity := <-store.deletedCh:
-		if actualIdentity != identity {
-			t.Fatalf("expected delete for %v, observed delete for %v", identity, actualIdentity)
+	case actualKey := <-store.deletedCh:
+		if actualKey != key {
+			t.Fatalf("expected delete for %v, observed delete for %v", key, actualKey)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for job to be deleted from store")
@@ -94,10 +95,11 @@ func TestHandler_Restore_ResumesSavedJob(t *testing.T) {
 
 func TestHandler_Restore_PurgesExpiredJobs(t *testing.T) {
 	// Set up the store with an expired job.
-	identity := LiveKitIdentity("@user:example.com")
 	room := LiveKitRoomAlias("test-room")
+	identity := LiveKitIdentity("@user:example.com")
+	key := jobKey{Room: room, Identity: identity}
 	store := newInMemoryStore()
-	_ = store.saveJob(context.Background(), identity, storedJob{
+	_ = store.saveJob(context.Background(), key, storedJob{
 		Params: DelayedEventJobParams{
 			DelayId:         "expired-delay-id",
 			ServerName:      "example.com",
@@ -231,8 +233,9 @@ func TestHandler_Restore_SavesNewJobs(t *testing.T) {
 	}
 
 	// Add a new job.
-	identity := LiveKitIdentity("@user:example.com")
 	room := LiveKitRoomAlias("test-room")
+	identity := LiveKitIdentity("@user:example.com")
+	key := jobKey{Room: room, Identity: identity}
 	err := handler.addDelayedEventJob(DelayedEventJobParams{
 		ServerName:      "example.com",
 		DelayId:         "new-delay-id",
@@ -246,9 +249,9 @@ func TestHandler_Restore_SavesNewJobs(t *testing.T) {
 
 	// Wait for the job to be saved into the store.
 	select {
-	case actualIdentity := <-store.savedCh:
-		if actualIdentity != identity {
-			t.Fatalf("expected save for %v, observed save for %v", identity, actualIdentity)
+	case actualKey := <-store.savedCh:
+		if actualKey != key {
+			t.Fatalf("expected save for %v, observed save for %v", key, actualKey)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for job to be saved into the store")
@@ -266,9 +269,9 @@ func TestHandler_Restore_SavesNewJobs(t *testing.T) {
 
 	// Wait for the job to finish and be deleted from the store.
 	select {
-	case actualIdentity := <-store.deletedCh:
-		if actualIdentity != identity {
-			t.Fatalf("expected delete for %v, observed delete for %v", identity, actualIdentity)
+	case actualKey := <-store.deletedCh:
+		if actualKey != key {
+			t.Fatalf("expected delete for %v, observed delete for %v", key, actualKey)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for job to be deleted from store")
@@ -278,29 +281,29 @@ func TestHandler_Restore_SavesNewJobs(t *testing.T) {
 // An in-memory store that notifies about job save and deletion.
 type notifyingStore struct {
 	store
-	savedCh   chan LiveKitIdentity
-	deletedCh chan LiveKitIdentity
+	savedCh   chan jobKey
+	deletedCh chan jobKey
 }
 
 func newNotifyingStore() *notifyingStore {
 	return &notifyingStore{
 		store:     newInMemoryStore(),
-		savedCh:   make(chan LiveKitIdentity, 10),
-		deletedCh: make(chan LiveKitIdentity, 10)}
+		savedCh:   make(chan jobKey, 10),
+		deletedCh: make(chan jobKey, 10)}
 }
 
-func (s *notifyingStore) saveJob(ctx context.Context, identity LiveKitIdentity, job storedJob) error {
-	err := s.store.saveJob(ctx, identity, job)
+func (s *notifyingStore) saveJob(ctx context.Context, key jobKey, job storedJob) error {
+	err := s.store.saveJob(ctx, key, job)
 	if err == nil {
-		s.savedCh <- identity
+		s.savedCh <- key
 	}
 	return err
 }
 
-func (s *notifyingStore) deleteJob(ctx context.Context, identity LiveKitIdentity) error {
-	err := s.store.deleteJob(ctx, identity)
+func (s *notifyingStore) deleteJob(ctx context.Context, key jobKey) error {
+	err := s.store.deleteJob(ctx, key)
 	if err == nil {
-		s.deletedCh <- identity
+		s.deletedCh <- key
 	}
 	return err
 }
@@ -308,10 +311,10 @@ func (s *notifyingStore) deleteJob(ctx context.Context, identity LiveKitIdentity
 // A store that fails on any operation.
 type failingStore struct{}
 
-func (s *failingStore) saveJob(_ context.Context, _ LiveKitIdentity, _ storedJob) error {
+func (s *failingStore) saveJob(_ context.Context, _ jobKey, _ storedJob) error {
 	return errors.New("failed")
 }
-func (s *failingStore) deleteJob(_ context.Context, _ LiveKitIdentity) error {
+func (s *failingStore) deleteJob(_ context.Context, _ jobKey) error {
 	return errors.New("failed")
 }
 

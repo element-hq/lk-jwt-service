@@ -19,12 +19,14 @@ func runStoreTests(t *testing.T, newStore func() store) {
 	t.Helper()
 	ctx := context.Background()
 
+	room := LiveKitRoomAlias("!room:example.com")
 	identity := LiveKitIdentity("@user:example.com")
+	key := jobKey{Room: room, Identity: identity}
 	params := DelayedEventJobParams{
 		DelayId:         "id",
 		ServerName:      "example.com",
 		DelayTimeout:    30 * time.Second,
-		LiveKitRoom:     LiveKitRoomAlias("!room:example.com"),
+		LiveKitRoom:     room,
 		LiveKitIdentity: identity,
 	}
 	job := storedJob{Params: params, RestartedAt: time.Now().UTC().Truncate(time.Millisecond)}
@@ -46,7 +48,7 @@ func runStoreTests(t *testing.T, newStore func() store) {
 		store := newStore()
 
 		// Save a job.
-		if err := store.saveJob(ctx, identity, job); err != nil {
+		if err := store.saveJob(ctx, key, job); err != nil {
 			t.Fatalf("Saving job failed: %v", err)
 		}
 
@@ -68,14 +70,14 @@ func runStoreTests(t *testing.T, newStore func() store) {
 		store := newStore()
 
 		// Save a job.
-		if err := store.saveJob(ctx, identity, job); err != nil {
+		if err := store.saveJob(ctx, key, job); err != nil {
 			t.Fatalf("saving first job failed: %v", err)
 		}
 
-		// Save an updated job for the same identity.
+		// Save an updated job for the same key.
 		updated := job
 		updated.Params.DelayId = "delay-updated"
-		if err := store.saveJob(ctx, identity, updated); err != nil {
+		if err := store.saveJob(ctx, key, updated); err != nil {
 			t.Fatalf("saving second job failed second: %v", err)
 		}
 
@@ -97,20 +99,21 @@ func runStoreTests(t *testing.T, newStore func() store) {
 		store := newStore()
 
 		// Save a job.
-		if err := store.saveJob(ctx, identity, job); err != nil {
+		if err := store.saveJob(ctx, key, job); err != nil {
 			t.Fatalf("saving first job failed: %v", err)
 		}
 
 		// Save another job.
 		identity2 := LiveKitIdentity("@other:example.com:device-id:member-id")
+		key2 := jobKey{Room: room, Identity: identity2}
 		job2 := job
 		job2.Params.LiveKitIdentity = identity2
-		if err := store.saveJob(ctx, identity2, job2); err != nil {
+		if err := store.saveJob(ctx, key2, job2); err != nil {
 			t.Fatalf("saving second job failed: %v", err)
 		}
 
 		// Delete the first job.
-		if err := store.deleteJob(ctx, identity); err != nil {
+		if err := store.deleteJob(ctx, key); err != nil {
 			t.Fatalf("deleting first job failed: %v", err)
 		}
 
@@ -132,7 +135,8 @@ func runStoreTests(t *testing.T, newStore func() store) {
 		store := newStore()
 
 		// Delete a job that doesn't exist in the store.
-		if err := store.deleteJob(ctx, LiveKitIdentity("@nonexistent:example.com")); err != nil {
+		key := jobKey{Room: "nonexistent-room", Identity: LiveKitIdentity("@nonexistent:example.com")}
+		if err := store.deleteJob(ctx, key); err != nil {
 			t.Errorf("deleting missing job failed: %v", err)
 		}
 	})
@@ -170,12 +174,14 @@ func TestRedisStoreSkipsUnparseableEntry(t *testing.T) {
 	}
 
 	// Save a valid entry alongside it.
+	room := LiveKitRoomAlias("test-room")
 	identity := LiveKitIdentity("@good:example.com")
+	key := jobKey{Room: room, Identity: identity}
 	job := storedJob{
-		Params:      DelayedEventJobParams{DelayId: "id", LiveKitIdentity: identity},
+		Params:      DelayedEventJobParams{DelayId: "id", LiveKitRoom: room, LiveKitIdentity: identity},
 		RestartedAt: time.Now().UTC().Truncate(time.Millisecond),
 	}
-	if err := store.saveJob(ctx, identity, job); err != nil {
+	if err := store.saveJob(ctx, key, job); err != nil {
 		t.Fatalf("saving job failed: %v", err)
 	}
 
