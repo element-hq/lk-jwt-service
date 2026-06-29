@@ -445,7 +445,6 @@ func (h *Handler) addDelayedEventJob(p DelayedEventJobParams) error {
 // matrixErrorForAddJob maps an addDelayedEventJob failure to the client
 // response:
 //   - shutdown → 503 M_UNKNOWN,
-//   - store failure → 503 M_UNKNOWN,
 //   - invalid job params → 400 M_BAD_JSON.
 func matrixErrorForAddJob(err error) *MatrixErrorResponse {
 	if errors.Is(err, context.Canceled) {
