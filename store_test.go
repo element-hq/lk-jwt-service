@@ -142,12 +142,6 @@ func runStoreTests(t *testing.T, newStore func() store) {
 	})
 }
 
-// In-memory store tests
-
-func TestInMemoryStore(t *testing.T) {
-	runStoreTests(t, newInMemoryStore)
-}
-
 // Redis store tests
 
 func newMiniRedisStore(t *testing.T) (store, *redis.Client) {

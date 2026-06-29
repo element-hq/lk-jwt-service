@@ -8,7 +8,10 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 )
@@ -309,6 +312,31 @@ func TestHandler_Restore_SavesNewJobs(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for job to be deleted from store")
 	}
+}
+
+// An in-memory storage backend without persistency.
+type inMemoryStore struct {
+	jobs map[jobKey]storedJob
+}
+
+func newInMemoryStore() store {
+	store := &inMemoryStore{jobs: make(map[jobKey]storedJob)}
+	slog.Info("store: created new in-memory store")
+	return store
+}
+
+func (s *inMemoryStore) saveJob(_ context.Context, key jobKey, job storedJob) error {
+	s.jobs[key] = job
+	return nil
+}
+
+func (s *inMemoryStore) deleteJob(_ context.Context, key jobKey) error {
+	delete(s.jobs, key)
+	return nil
+}
+
+func (s *inMemoryStore) allJobs(_ context.Context) ([]storedJob, error) {
+	return slices.Collect(maps.Values(s.jobs)), nil
 }
 
 // An in-memory store that notifies about job save and deletion.

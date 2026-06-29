@@ -310,7 +310,7 @@ func TestProcessSFURequest(t *testing.T) {
 				false, []string{"example.com"},
 				0, // sanityCheckInterval disabled
 				map[string]CsApiUrl{},
-				newInMemoryStore(),
+				nil,
 			)
 			req := &SFURequest{
 				RoomID: "!room:example.com", SlotID: "slot",
@@ -378,7 +378,7 @@ func newGetTokenHandler(t *testing.T) *Handler {
 		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
-		newInMemoryStore(),
+		nil,
 	)
 	t.Cleanup(handler.Close)
 	return handler

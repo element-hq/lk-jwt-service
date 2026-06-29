@@ -350,7 +350,7 @@ func newDelegateDelayedLeaveHandler(t *testing.T) *Handler {
 		[]string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{"example.com": "https://matrix.example.com"},
-		newInMemoryStore(),
+		nil,
 	)
 	t.Cleanup(handler.Close)
 	return handler

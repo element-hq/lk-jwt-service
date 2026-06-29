@@ -63,7 +63,7 @@ func TestIsFullAccessUser(t *testing.T) {
 		true, []string{"example.com", "another.example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
-		newInMemoryStore(),
+		nil,
 	)
 	for _, tc := range []struct {
 		server string
@@ -118,7 +118,7 @@ func TestHandler_Close(t *testing.T) {
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
-		newInMemoryStore(),
+		nil,
 	)
 	done := make(chan struct{})
 	go func() { handler.Close(); close(done) }()
@@ -147,7 +147,7 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
-		newInMemoryStore(),
+		nil,
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 

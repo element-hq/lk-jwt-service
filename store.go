@@ -10,8 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -45,31 +43,6 @@ type store interface {
 	// The caller is responsible for ensuring thread-safety when calling this and
 	// other store methods.
 	allJobs(ctx context.Context) ([]storedJob, error)
-}
-
-// An in-memory storage backend without persistency.
-type inMemoryStore struct {
-	jobs map[jobKey]storedJob
-}
-
-func newInMemoryStore() store {
-	store := &inMemoryStore{jobs: make(map[jobKey]storedJob)}
-	slog.Info("store: created new in-memory store")
-	return store
-}
-
-func (s *inMemoryStore) saveJob(_ context.Context, key jobKey, job storedJob) error {
-	s.jobs[key] = job
-	return nil
-}
-
-func (s *inMemoryStore) deleteJob(_ context.Context, key jobKey) error {
-	delete(s.jobs, key)
-	return nil
-}
-
-func (s *inMemoryStore) allJobs(_ context.Context) ([]storedJob, error) {
-	return slices.Collect(maps.Values(s.jobs)), nil
 }
 
 // A store backend using an external Redis instance.
