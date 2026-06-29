@@ -228,9 +228,6 @@ func (h *Handler) loop() {
 				continue
 			}
 
-			// TODO johannes: verify that delayed event still exists?
-			// TODO johannes: avoid waiting up to one hour for the participant to connect?
-
 			// Create a new job.
 			job, err := NewDelayedEventJob(h.ctx, storedJob.Params, func(ctx context.Context, serverName string) (CsApiUrl, error) {
 				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
