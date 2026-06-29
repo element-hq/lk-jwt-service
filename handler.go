@@ -233,11 +233,14 @@ func (h *Handler) loop() {
 				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
 			}, h.jobDoneCh, h.jobRestartedCh)
 
-			// Gracefully ignore job creation failures but leave the job in the store for
-			// a potential future restart.
+			// NewDelayedEventJob shouldn't emit temporary errors. So if we've failed here, just
+			// delete the job from the store.
 			if err != nil {
 				slog.Error("Handler: failed to create delayed event job from stored job",
 					"room", storedJob.Params.LiveKitRoom, "lkId", storedJob.Params.LiveKitIdentity, "err", err)
+				if err := h.store.deleteJob(h.ctx, key); err != nil {
+					slog.Error("Handler: failed to delete expired stored job", "key", key, "err", err)
+				}
 				continue
 			}
 
