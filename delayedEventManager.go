@@ -900,13 +900,13 @@ func (job *DelayedEventJob) startDelayedEventRestart() {
 				"status", status, "err", err)
 			signal = DelayedEventTimedOut
 		default:
-			restartedAd := time.Now()
-			newDeadline := restartedAd.Add(job.DelayTimeout)
+			restartedAt := time.Now()
+			newDeadline := restartedAt.Add(job.DelayTimeout)
 
 			// Report success to handler.loop() so that it can update the
 			// stored job.
 			select {
-			case job.restartedCh <- jobRestartedRequest{params: job.DelayedEventJobParams, restartedAt: restartedAd}:
+			case job.restartedCh <- jobRestartedRequest{job: job, restartedAt: restartedAt}:
 			case <-job.ctx.Done():
 				return
 			}

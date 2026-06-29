@@ -139,7 +139,7 @@ type addJobResult struct {
 }
 
 type jobRestartedRequest struct {
-	params      DelayedEventJobParams
+	job         *DelayedEventJob
 	restartedAt time.Time
 }
 
@@ -371,7 +371,6 @@ func (h *Handler) loop() {
 			key := jobKey{Room: doneJob.LiveKitRoom, Identity: doneJob.LiveKitIdentity}
 			current, ok := jobs[key]
 			if !ok || current != doneJob {
-				// Stale signal from a replaced job — pointer equality guards this.
 				slog.Debug("Handler: ignoring stale jobDoneCh signal",
 					"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 				break
@@ -387,9 +386,14 @@ func (h *Handler) loop() {
 			// No Close() goroutine needed — doneJob.loop() exits on its own;
 			// loopWg.Wait() handles cleanup at shutdown.
 		case req := <-h.jobRestartedCh:
-			// Save the job in the store.
-			key := jobKey{Room: req.params.LiveKitRoom, Identity: req.params.LiveKitIdentity}
-			storedJob := storedJob{Params: req.params, RestartedAt: req.restartedAt}
+			key := jobKey{Room: req.job.LiveKitRoom, Identity: req.job.LiveKitIdentity}
+			current, ok := jobs[key]
+			if !ok || current != req.job {
+				slog.Debug("Handler: ignoring stale jobRestartedCh signal",
+					"room", key.Room, "lkId", key.Identity, "jobId", req.job.JobId)
+				break
+			}
+			storedJob := storedJob{Params: req.job.DelayedEventJobParams, RestartedAt: req.restartedAt}
 			if err := h.store.saveJob(h.ctx, key.Identity, storedJob); err != nil {
 				slog.Error("Handler: failed to update stored job",
 					"room", key.Room, "lkId", key.Identity, "err", err)
