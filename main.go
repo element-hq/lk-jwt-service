@@ -50,6 +50,17 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var store store
+	if config.RedisURL != "" {
+		store, err = newRedisStore(config.RedisURL)
+		if err != nil {
+			log.Fatalf("Could not connect Redis store: %v", err)
+		}
+	} else {
+		slog.Warn("LIVEKIT_REDIS_URL not set. Using in-memory store.")
+		store = nil
+	}
+
 	handler := NewHandler(
 		LiveKitAuth{
 			key:          config.Key,
@@ -61,6 +72,7 @@ func main() {
 		config.FullAccessHomeservers,
 		config.SanityCheckInterval,
 		config.CsApiUrlOverrides,
+		store,
 	)
 
 	sanityCheckIntervalDisplay := "disabled"

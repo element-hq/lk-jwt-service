@@ -109,6 +109,7 @@ func TestHandleSfuGet_Success(t *testing.T) {
 		false, []string{matrixServerName},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		newInMemoryStore(),
 	)
 	t.Cleanup(handler.Close)
 
@@ -227,6 +228,7 @@ func TestProcessLegacySFURequest(t *testing.T) {
 				false, []string{"example.com"},
 				0, // sanityCheckInterval disabled
 				map[string]CsApiUrl{},
+				newInMemoryStore(),
 			)
 			req := &LegacySFURequest{
 				Room:         "!room:example.com",

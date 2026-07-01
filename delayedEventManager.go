@@ -286,6 +286,9 @@ type DelayedEventJob struct {
 	// for this (room, identity) before cancelling and cleaning it up.
 	doneCh chan<- *DelayedEventJob
 
+	// Signals Handler.loop() when the job has restarted its delayed event.
+	restartedCh chan<- jobRestartedRequest
+
 	// done is closed by loop() when it exits, allowing Close() to wait.
 	done chan struct{}
 
@@ -321,6 +324,7 @@ func NewDelayedEventJob(
 	p DelayedEventJobParams,
 	lookupCsApiUrl func(context.Context, string) (CsApiUrl, error),
 	doneCh chan<- *DelayedEventJob,
+	restartedCh chan<- jobRestartedRequest,
 ) (*DelayedEventJob, error) {
 	if p.DelayTimeout <= 0 {
 		return nil, fmt.Errorf("invalid delay timeout for delayed event job: %v", p.DelayTimeout)
@@ -335,6 +339,7 @@ func NewDelayedEventJob(
 		ctx:                   ctx,
 		cancel:                cancel,
 		doneCh:                doneCh,
+		restartedCh:           restartedCh,
 		done:                  make(chan struct{}),
 		restartResultCh:       make(chan time.Time, 1),
 		state:                 WaitingForInitialConnect,
@@ -895,9 +900,19 @@ func (job *DelayedEventJob) startDelayedEventRestart() {
 				"status", status, "err", err)
 			signal = DelayedEventTimedOut
 		default:
+			restartedAt := time.Now()
+			newDeadline := restartedAt.Add(job.DelayTimeout)
+
+			// Report success to handler.loop() so that it can update the
+			// stored job.
+			select {
+			case job.restartedCh <- jobRestartedRequest{job: job, restartedAt: restartedAt}:
+			case <-job.ctx.Done():
+				return
+			}
+
 			// Report success to loop() via restartResultCh; loop() will extend
 			// the deadline and re-arm fsmTimerRestart.
-			newDeadline := time.Now().Add(job.DelayTimeout)
 			slog.Debug("Job: ActionRestart ok", "room", job.LiveKitRoom,
 				"lkId", job.LiveKitIdentity,
 				"next reset in", job.delayRestartDuration())

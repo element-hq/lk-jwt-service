@@ -63,6 +63,7 @@ func TestIsFullAccessUser(t *testing.T) {
 		true, []string{"example.com", "another.example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		nil,
 	)
 	for _, tc := range []struct {
 		server string
@@ -117,6 +118,7 @@ func TestHandler_Close(t *testing.T) {
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		nil,
 	)
 	done := make(chan struct{})
 	go func() { handler.Close(); close(done) }()
@@ -145,6 +147,7 @@ func TestHandler_AddDelayedEventJob(t *testing.T) {
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		nil,
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
@@ -194,6 +197,7 @@ func TestHandler_Loop_NoJobsLeft(t *testing.T) {
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		newInMemoryStore(),
 	)
 	t.Cleanup(handler.Close) // runs first: cancels all contexts → goroutines exit
 
@@ -281,6 +285,7 @@ func TestHandler_AddDelayedEventJob_AfterShutdown(t *testing.T) {
 		false, []string{"*"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		newInMemoryStore(),
 	)
 	handler.Close() // shut down loop() so ctx is cancelled
 
@@ -582,6 +587,7 @@ func TestHandler_loop_AllJobsClosedOnShutdown(t *testing.T) {
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		newInMemoryStore(),
 	)
 
 	// Start three jobs in three different rooms — each spawns a room worker goroutine.
@@ -643,6 +649,7 @@ func TestHandler_loop_DoneCh_CleanupBeforeHandlerClose(t *testing.T) {
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		newInMemoryStore(),
 	)
 
 	room := LiveKitRoomAlias("donech-shutdown-room")
@@ -708,6 +715,7 @@ func TestHandler_loop_JobReplacement_NoDeadlock(t *testing.T) {
 		false, []string{"example.com"},
 		0, // sanityCheckInterval disabled
 		map[string]CsApiUrl{},
+		newInMemoryStore(),
 	)
 
 	room := LiveKitRoomAlias("replacement-room")

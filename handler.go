@@ -92,12 +92,14 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 // needed. HTTP handler goroutines communicate with loop() exclusively through
 // channels:
 //
-//   - addJobCh:   deliver new DelayedEventJobParams to loop(), which creates a
+//   - addJobCh: deliver new DelayedEventJobParams to loop(), which creates a
 //     DelayedEventJob and starts its participant-lookup goroutine.
 //   - sfuEventCh: deliver an SFU webhook event to loop(), which routes it
 //     directly to the correct job by (room, identity) key.
-//   - jobDoneCh:  jobs signal loop() when they enter a terminal state so loop()
+//   - jobDoneCh: jobs signal loop() when they enter a terminal state so loop()
 //     can cancel and clean them up.
+//   - jobRestartedCh: jobs signal loop() when they restart the delayed event
+//     so loop() can update the stored job.
 //
 // Because all map mutations happen in a single goroutine there are no data
 // races and no mutex is required.
@@ -112,11 +114,16 @@ type Handler struct {
 	sanityCheckInterval time.Duration
 	csApiUrlOverrides   map[string]CsApiUrl
 	csApiUrlCache       *csApiUrlCache
+	store               store
 	// loopDone is closed when loop() has exited.
-	loopDone   chan struct{}
-	jobDoneCh  chan *DelayedEventJob
-	addJobCh   chan addJobRequest
-	sfuEventCh chan sfuEventRequest
+	loopDone chan struct{}
+	// Channel that is closed once start-up recovery of previously stored
+	// jobs is complete.
+	recoveryDone   chan struct{}
+	jobDoneCh      chan *DelayedEventJob
+	jobRestartedCh chan jobRestartedRequest
+	addJobCh       chan addJobRequest
+	sfuEventCh     chan sfuEventRequest
 }
 
 // addJobRequest is sent by HTTP handlers to loop() to add a delayed-event job.
@@ -131,13 +138,18 @@ type addJobResult struct {
 	err   error
 }
 
+type jobRestartedRequest struct {
+	job         *DelayedEventJob
+	restartedAt time.Time
+}
+
 // sfuEventRequest is sent by handleSfuWebhook to loop() for routing.
 type sfuEventRequest struct {
 	roomAlias LiveKitRoomAlias
 	msg       SFUMessage
 }
 
-func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]CsApiUrl) *Handler {
+func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []string, sanityCheckInterval time.Duration, csApiUrlOverrides map[string]CsApiUrl, store store) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Handler{
 		ctx:                   ctx,
@@ -147,11 +159,14 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 		fullAccessHomeservers: fullAccessHomeservers,
 		sanityCheckInterval:   sanityCheckInterval,
 		loopDone:              make(chan struct{}),
+		recoveryDone:          make(chan struct{}),
 		jobDoneCh:             make(chan *DelayedEventJob, 10),
+		jobRestartedCh:        make(chan jobRestartedRequest, 10),
 		addJobCh:              make(chan addJobRequest),
 		sfuEventCh:            make(chan sfuEventRequest, 200),
 		csApiUrlOverrides:     csApiUrlOverrides,
 		csApiUrlCache:         newCsApiUrlCache(),
+		store:                 store,
 	}
 	go h.loop()
 	return h
@@ -160,9 +175,10 @@ func NewHandler(lkAuth LiveKitAuth, skipVerifyTLS bool, fullAccessHomeservers []
 // loop is the Handler's actor goroutine: the sole owner of the jobs map
 // (no locking needed) and the single consumer of
 //
-//   - addJobCh:   job creation, replacing any active job for the same key
+//   - addJobCh: job creation, replacing any active job for the same key
 //   - sfuEventCh: routing SFU webhook events to the job for (room, identity)
-//   - jobDoneCh:  cleaning up jobs that reached a terminal state
+//   - jobDoneCh: cleaning up jobs that reached a terminal state
+//   - jobRestartedCh: updating the stored job when the delayed event is restarted
 //
 // Started once by NewHandler; runs until h.ctx is cancelled (Handler.Close),
 // then joins all job goroutines and closes h.loopDone.
@@ -195,6 +211,56 @@ func (h *Handler) loop() {
 	//         ExecuteDelayedEventAction)
 	var loopWg sync.WaitGroup
 
+	// Load any existing jobs from the store.
+	if h.store == nil {
+		// Nothing to do without a store.
+	} else if storedJobs, err := h.store.allJobs(h.ctx); err != nil {
+		slog.Error("Handler: failed to load stored jobs", "err", err)
+	} else {
+		for _, storedJob := range storedJobs {
+			key := jobKey{Room: storedJob.Params.LiveKitRoom, Identity: storedJob.Params.LiveKitIdentity}
+
+			// Check if the job's delay timeout has already exceeded. If so, delete it from the store.
+			remaining := time.Until(storedJob.RestartedAt.Add(storedJob.Params.DelayTimeout))
+			if remaining <= 0 {
+				slog.Info("Handler: skipping expired stored job", "lkId", key.Identity)
+				if err := h.store.deleteJob(h.ctx, key); err != nil {
+					slog.Error("Handler: failed to delete expired stored job", "key", key, "err", err)
+				}
+				continue
+			}
+
+			// Create a new job.
+			job, err := NewDelayedEventJob(h.ctx, storedJob.Params, func(ctx context.Context, serverName string) (CsApiUrl, error) {
+				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
+			}, h.jobDoneCh, h.jobRestartedCh)
+
+			// NewDelayedEventJob shouldn't emit temporary errors. So if we've failed here, just
+			// delete the job from the store.
+			if err != nil {
+				slog.Error("Handler: failed to create delayed event job from stored job",
+					"room", storedJob.Params.LiveKitRoom, "lkId", storedJob.Params.LiveKitIdentity, "err", err)
+				if err := h.store.deleteJob(h.ctx, key); err != nil {
+					slog.Error("Handler: failed to delete expired stored job", "key", key, "err", err)
+				}
+				continue
+			}
+
+			// Store the job in the handlers local map and kick off its loop.
+			jobs[key] = job
+			startParticipantLookup(job, h.liveKitAuth, h.sanityCheckInterval)
+			loopWg.Add(1)
+			go func() {
+				defer loopWg.Done()
+				job.loop()
+			}()
+			slog.Debug("Handler: job created from stored job",
+				"room", key.Room, "lkId", key.Identity, "jobId", job.JobId)
+		}
+	}
+
+	close(h.recoveryDone)
+
 	for {
 		select {
 		case <-h.ctx.Done():
@@ -223,9 +289,10 @@ func (h *Handler) loop() {
 		case req := <-h.addJobCh:
 			key := jobKey{Room: req.params.LiveKitRoom, Identity: req.params.LiveKitIdentity}
 
+			// Create a new job.
 			job, err := NewDelayedEventJob(h.ctx, req.params, func(ctx context.Context, serverName string) (CsApiUrl, error) {
 				return resolveCsApiUrl(ctx, serverName, h.csApiUrlOverrides, h.csApiUrlCache)
-			}, h.jobDoneCh)
+			}, h.jobDoneCh, h.jobRestartedCh)
 			if err != nil {
 				slog.Error("Handler: failed to create delayed event job",
 					"room", req.params.LiveKitRoom,
@@ -248,6 +315,15 @@ func (h *Handler) loop() {
 			}
 
 			jobs[key] = job
+
+			// Save the job in the store. We assume the delayed event was restarted
+			// just before the request came in because that is our best guess.
+			if h.store != nil {
+				storedJob := storedJob{Params: req.params, RestartedAt: time.Now()}
+				if err := h.store.saveJob(h.ctx, key, storedJob); err != nil {
+					slog.Error("Handler: failed to store job", "key", key, "err", err)
+				}
+			}
 
 			// Pull-based lookup (additionally to SFU webhook)
 			// Phase 1:
@@ -298,7 +374,6 @@ func (h *Handler) loop() {
 			key := jobKey{Room: doneJob.LiveKitRoom, Identity: doneJob.LiveKitIdentity}
 			current, ok := jobs[key]
 			if !ok || current != doneJob {
-				// Stale signal from a replaced job — pointer equality guards this.
 				slog.Debug("Handler: ignoring stale jobDoneCh signal",
 					"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 				break
@@ -306,9 +381,31 @@ func (h *Handler) loop() {
 			slog.Info("Handler: job done, cleaning up",
 				"room", key.Room, "lkId", key.Identity, "jobId", doneJob.JobId)
 			delete(jobs, key)
+
+			if h.store != nil {
+				if err := h.store.deleteJob(h.ctx, key); err != nil {
+					slog.Error("Handler: failed to delete persisted job", "key", key, "err", err)
+				}
+			}
+
 			doneJob.Stop()
 			// No Close() goroutine needed — doneJob.loop() exits on its own;
 			// loopWg.Wait() handles cleanup at shutdown.
+		case req := <-h.jobRestartedCh:
+			key := jobKey{Room: req.job.LiveKitRoom, Identity: req.job.LiveKitIdentity}
+			current, ok := jobs[key]
+			if !ok || current != req.job {
+				slog.Debug("Handler: ignoring stale jobRestartedCh signal",
+					"room", key.Room, "lkId", key.Identity, "jobId", req.job.JobId)
+				break
+			}
+
+			if h.store != nil {
+				storedJob := storedJob{Params: req.job.DelayedEventJobParams, RestartedAt: req.restartedAt}
+				if err := h.store.saveJob(h.ctx, key, storedJob); err != nil {
+					slog.Error("Handler: failed to update stored job", "key", key, "err", err)
+				}
+			}
 		}
 	}
 }

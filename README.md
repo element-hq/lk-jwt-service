@@ -128,6 +128,7 @@ Set environment variables to configure the service:
 | `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS`       | Interval (seconds) at which delegated-leave jobs re-check that a connected participant is still on the SFU. Guards against missed SFU webhooks. Unset/`0` disables the sanity check. | ❌ No                                                | `0` (disabled) |
 | `LIVEKIT_LOG_LEVEL`                           | One of `debug`, `info`, `warn`/`warning`, `error`             | ❌ No                                                | `info` |
 | `LIVEKIT_CS_API_URL_OVERRIDES`                | Comma-separated list of overrides for Client-Server API locations that cannot be inferred using .well-known discovery (e.g. `example.com=matrix-client.example.com`) | ❌ No                                                | |
+| `LIVEKIT_REDIS_URL`                           | Redis connection URL (e.g. `redis://localhost:6379`). When set, service state will be persisted during operation and restored upon service restarts. When unset, the service falls back to an in-memory store. | ❌ No | |
 
 > [!WARNING]
 > **Restricting room creation** requires two pieces working together:

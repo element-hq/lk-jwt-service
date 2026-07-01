@@ -37,6 +37,8 @@ type Config struct {
 	// Map of URLs for the Client-Server API keyed by server name. These will
 	// be preferred over .well-known resolution for the contained server names.
 	CsApiUrlOverrides map[string]CsApiUrl
+	// Connection URL for the Redis store.
+	RedisURL string
 }
 
 func readKeySecret() (string, string) {
@@ -162,5 +164,6 @@ func parseConfig() (*Config, error) {
 		LkJwtBind:             lkJwtBind,
 		SanityCheckInterval:   sanityCheckInterval,
 		CsApiUrlOverrides:     csApiUrlOverrides,
+		RedisURL:              os.Getenv("LIVEKIT_REDIS_URL"),
 	}, nil
 }

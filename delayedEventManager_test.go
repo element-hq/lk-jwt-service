@@ -42,6 +42,7 @@ func newTestJob(t *testing.T, timeout time.Duration) *DelayedEventJob {
 		},
 		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		make(chan *DelayedEventJob, 20),
+		make(chan jobRestartedRequest, 20),
 	)
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
@@ -91,6 +92,7 @@ func newJobWithDoneCh(timeout time.Duration) (*DelayedEventJob, chan *DelayedEve
 		},
 		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		doneCh,
+		make(chan jobRestartedRequest, 20),
 	)
 	return job, doneCh
 }
@@ -121,6 +123,7 @@ func TestDelayedEventJob_InvalidTimeout(t *testing.T) {
 		},
 		func(_ context.Context, _ string) (CsApiUrl, error) { return "", nil },
 		make(chan *DelayedEventJob, 1),
+		make(chan jobRestartedRequest, 1),
 	)
 	if err == nil {
 		t.Error("expected error for zero timeout, got nil")
@@ -347,6 +350,7 @@ func TestDelayedEventJob_ResetWithFailingCsApiUrlResolution(t *testing.T) {
 		},
 		func(_ context.Context, _ string) (CsApiUrl, error) { return "", fmt.Errorf("M_NOT_FOUND") },
 		make(chan *DelayedEventJob, 5),
+		make(chan jobRestartedRequest, 5),
 	)
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
@@ -425,6 +429,7 @@ func TestDelayedEventJob_ActionSendWithFailingCsApiUrlResolution(t *testing.T) {
 		},
 		func(_ context.Context, _ string) (CsApiUrl, error) { return "", fmt.Errorf("M_NOT_FOUND") },
 		doneCh,
+		make(chan jobRestartedRequest, 5),
 	)
 	go job.loop()
 
@@ -766,6 +771,7 @@ func TestParticipantLookup_Phase1_FindsParticipant(t *testing.T) {
 		},
 		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		doneCh,
+		make(chan jobRestartedRequest, 5),
 	)
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
@@ -823,6 +829,7 @@ func TestParticipantLookup_Phase2_DetectsGoneParticipant(t *testing.T) {
 		},
 		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		doneCh,
+		make(chan jobRestartedRequest, 5),
 	)
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
@@ -884,6 +891,7 @@ func TestParticipantLookup_Phase2_Disabled(t *testing.T) {
 		},
 		lookUpCsApiUrlFromOverrideOnly("example.com", "https://matrix-client.example.com"),
 		doneCh,
+		make(chan jobRestartedRequest, 5),
 	)
 	if err != nil {
 		t.Fatalf("NewDelayedEventJob: %v", err)
