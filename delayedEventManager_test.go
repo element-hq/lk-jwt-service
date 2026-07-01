@@ -550,6 +550,7 @@ func TestDelayedEventJob_ActionRestart_CsApiUrlNotFound(t *testing.T) {
 			return "", &MatrixErrorResponse{Status: http.StatusNotFound, ErrCode: "M_NOT_FOUND", Err: "no"}
 		},
 		doneCh,
+		make(chan jobRestartedRequest, 5),
 	)
 	go job.loop()
 
