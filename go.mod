@@ -2,19 +2,19 @@ module lk-jwt-service
 
 go 1.26
 
-toolchain go1.26.3
+toolchain go1.26.4
 
 require (
-	github.com/MatusOllah/slogcolor v1.7.0
+	github.com/MatusOllah/slogcolor v1.9.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/livekit/protocol v1.46.4
-	github.com/livekit/server-sdk-go/v2 v2.16.4
+	github.com/livekit/protocol v1.48.0
+	github.com/livekit/server-sdk-go/v2 v2.16.7
 	github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
 	github.com/matrix-org/gomatrixserverlib v0.0.0-20260506075950-c9c468727353
-	github.com/mattn/go-isatty v0.0.20
-	github.com/redis/go-redis/v9 v9.17.2
+	github.com/mattn/go-isatty v0.0.22
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/twitchtv/twirp v8.1.3+incompatible
 	google.golang.org/protobuf v1.36.11
 	maunium.net/go/mautrix v0.28.1
