@@ -492,10 +492,18 @@ func (job *DelayedEventJob) stopTimers() {
 // deliberately NOT drawn as self-loop arrows — a self-loop would denote an
 // external self-transition (exit/entry actions fire).
 //
-//	                       ParticipantConnected,
-//	  (Start)              ParticipantLookupSuccessful
-//	     |                ┌───────────────────────────────┐
-//	     ▼                |                               ▼
+//                                           ┌──────────────────────┐
+//                                           │ Disconnected         │
+//                                           │                      │
+//                      ┌───────────────────►│ On Entry:            │
+//                      |                    │ • Execute ActionSend │
+//                      |                    │ • Notify handler     │
+//                      |                    └──────────────────────┘
+//                      |                          ▲
+//                      | WaitingStateTimedOut     | ParticipantDisconnectedIntentionally,
+//      (Start)         |                          | ParticipantConnectionAborted,
+//         |            |                          | SFUParticipantGone
+//         ▼            |                          |
 //	┌────────────────────────────┐      ┌─────────────────────────────────┐
 //	│ WaitingForInitialConnect   │      │ Connected                       │
 //	│                            │      │                                 │
@@ -503,29 +511,22 @@ func (job *DelayedEventJob) stopTimers() {
 //	│ On Exit:                   │      │ • Emit: DelayedEventReset       │
 //	│ • Stop waiting timer       │      │                                 │
 //	└────────────────────────────┘      │ On Internal:                    │
-//	    |                 |             │ • DelayedEventReset:            │
-//	    |                 |             │     Execute ActionRestart       │
-//	    |                 |             │                                 │
-//	    |                 |             │ On Exit:                        │
-//	    |                 |             │ • Stop delayed-event timer      │
-//	    |                 |             └─────────────────────────────────┘
-//	    |                 |                          │
-//	    |                 | WaitingStateTimedOut     │ CsApiUrlNotFound,
-//	    |                 |                          │ DelayedEventTimedOut,
-//      |                 |                          | DelayedEventNotFound,
-//	    |                 |                          │ ParticipantDisconnectedIntentionally,
-//	    |                 |                          │ ParticipantConnectionAborted,
-//	    |                 └──────────────────────────│ SFUParticipantGone
-//	    |                                            │
-//	    | ParticipantConnectionAborted               │
-//	    ▼                                            ▼
-//	┌──────────────────────┐              ┌──────────────────────┐
-//	│ Aborted              │              │ Disconnected         │
-//	│                      │              │                      │
-//	│ On Entry:            │              │ On Entry:            │
-//	│ • Notify handler     │              │ • Execute ActionSend │
-//	│                      │              │ • Notify handler     │
-//	└──────────────────────┘              └──────────────────────┘
+//	  |   |                             │ • DelayedEventReset:            │
+//	  |   | ParticipantConnected,       │     Execute ActionRestart       │
+//	  |   | ParticipantLookupSuccessful │                                 │
+//	  |   └────────────────────────────►│ On Exit:                        │
+//	  |                                 │ • Stop delayed-event timer      │
+//	  |                                 └─────────────────────────────────┘
+//	  |                                            |
+//	  | ParticipantConnectionAborted               | CsApiUrlNotFound,
+//	  ▼                                            | DelayedEventTimedOut,
+//	┌──────────────────────┐                       | DelayedEventNotFound
+//	│ Aborted              │                       |
+//	│                      │                       |
+//	│ On Entry:            │◄──────────────────────╯
+//	│ • Notify handler     │
+//	│                      │
+//	└──────────────────────┘
 //
 //	    (from any state)
 //	           |
@@ -592,7 +593,7 @@ func (job *DelayedEventJob) stopTimers() {
 //
 // The cycle ends when ActionRestart fails terminally: CsApiUrlNotFound,
 // DelayedEventTimedOut or DelayedEventNotFound is emitted instead of a new
-// deadline, transitioning Connected → Disconnected; the exit action stops
+// deadline, transitioning Connected → Aborted; the exit action stops
 // the timer. Late results on restartResultCh are discarded by loop()'s
 // state != Connected guard.
 
@@ -611,9 +612,9 @@ var fsmTransitions = map[DelayEventState]map[DelayedEventSignal]DelayEventState{
 	Connected: {
 		ParticipantDisconnectedIntentionally: Disconnected,
 		ParticipantConnectionAborted:         Disconnected,
-		DelayedEventTimedOut:                 Disconnected,
-		DelayedEventNotFound:                 Disconnected,
-		CsApiUrlNotFound:                     Disconnected,
+		DelayedEventTimedOut:                 Aborted,
+		DelayedEventNotFound:                 Aborted,
+		CsApiUrlNotFound:                     Aborted,
 		SFUParticipantGone:                   Disconnected,
 		JobReplaced:                          Replaced,
 	},
