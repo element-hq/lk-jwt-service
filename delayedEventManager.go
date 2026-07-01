@@ -487,10 +487,18 @@ func (job *DelayedEventJob) stopTimers() {
 // deliberately NOT drawn as self-loop arrows — a self-loop would denote an
 // external self-transition (exit/entry actions fire).
 //
-//	                       ParticipantConnected,
-//	  (Start)              ParticipantLookupSuccessful
-//	     |                ┌───────────────────────────────┐
-//	     ▼                |                               ▼
+//                                           ┌──────────────────────┐
+//                                           │ Disconnected         │
+//                                           │                      │
+//                      ┌───────────────────►│ On Entry:            │
+//                      |                    │ • Execute ActionSend │
+//                      |                    │ • Notify handler     │
+//                      |                    └──────────────────────┘
+//                      |                          ▲
+//                      | WaitingStateTimedOut     | ParticipantDisconnectedIntentionally,
+//      (Start)         |                          | ParticipantConnectionAborted,
+//         |            |                          | SFUParticipantGone
+//         ▼            |                          |
 //	┌────────────────────────────┐      ┌─────────────────────────────────┐
 //	│ WaitingForInitialConnect   │      │ Connected                       │
 //	│                            │      │                                 │
@@ -498,32 +506,22 @@ func (job *DelayedEventJob) stopTimers() {
 //	│ On Exit:                   │      │ • Emit: DelayedEventReset       │
 //	│ • Stop waiting timer       │      │                                 │
 //	└────────────────────────────┘      │ On Internal:                    │
-//	    |                 |             │ • DelayedEventReset:            │
-//	    |                 |             │     Execute ActionRestart       │
-//	    |                 |             │                                 │
-//	    |                 |             │ On Exit:                        │
-//	    |                 |             │ • Stop delayed-event timer      │
-//	    |                 |             └─────────────────────────────────┘
-//	    |                 |                          │       |
-//	    |                 | WaitingStateTimedOut     │ ParticipantDisconnectedIntentionally,
-//	    |                 |                          │ ParticipantConnectionAborted,
-//      |                 |                          │ SFUParticipantGone
-//	    |                 |                          │       |
-//	    |                 |                          │       | CsApiUrlNotFound,
-//	    |                 |                          │       | DelayedEventTimedOut,
-//	    |                 └──────────────────────────|       | DelayedEventNotFound
-//	    |                                            │       │
-//	    | ParticipantConnectionAborted               │       │
-//	    |────────────────────────────────────────────⌒───────╯
-//	    │                                            │
-//	    ▼                                            ▼
-//	┌──────────────────────┐              ┌──────────────────────┐
-//	│ Aborted              │              │ Disconnected         │
-//	│                      │              │                      │
-//	│ On Entry:            │              │ On Entry:            │
-//	│ • Notify handler     │              │ • Execute ActionSend │
-//	│                      │              │ • Notify handler     │
-//	└──────────────────────┘              └──────────────────────┘
+//	  |   |                             │ • DelayedEventReset:            │
+//	  |   | ParticipantConnected,       │     Execute ActionRestart       │
+//	  |   | ParticipantLookupSuccessful │                                 │
+//	  |   └────────────────────────────►│ On Exit:                        │
+//	  |                                 │ • Stop delayed-event timer      │
+//	  |                                 └─────────────────────────────────┘
+//	  |                                            |
+//	  | ParticipantConnectionAborted               | CsApiUrlNotFound,
+//	  ▼                                            | DelayedEventTimedOut,
+//	┌──────────────────────┐                       | DelayedEventNotFound
+//	│ Aborted              │                       |
+//	│                      │                       |
+//	│ On Entry:            │◄──────────────────────╯
+//	│ • Notify handler     │
+//	│                      │
+//	└──────────────────────┘
 //
 //	    (from any state)
 //	           |
