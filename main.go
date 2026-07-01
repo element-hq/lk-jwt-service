@@ -17,7 +17,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/MatusOllah/slogcolor"
+	"github.com/SladkyCitron/slogcolor"
 	"github.com/livekit/protocol/auth"
 	"github.com/mattn/go-isatty"
 )
