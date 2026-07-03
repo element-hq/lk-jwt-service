@@ -295,14 +295,31 @@ LIVEKIT_KEY=devkey \
 LIVEKIT_SECRET=secret \
 LIVEKIT_JWT_PORT=6080 \
 LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse.m.localhost \
-./lk-jwt-service
+cargo run
+```
+
+#### 🔨 Build from source
+
+The service is written in Rust. With a [Rust toolchain](https://rustup.rs)
+installed:
+
+```sh
+cargo build --release
+# Produces target/release/lk-jwt-service and target/release/healthcheck
+```
+
+Run the test suite with:
+
+```sh
+cargo test
 ```
 
 #### Develop inside container (docker, podman)
 
 ```sh
-docker run --rm -it -w /proj -v .:/proj docker.io/golang:${GO_VERSION:-1}-alpine sh
-go build -o lk-jwt-service
-# For healthcheck run following:
-go build -o lk-jwt-service-healthcheck ./healthcheck
+docker run --rm -it -w /proj -v .:/proj docker.io/rust:1-alpine sh
+apk add --no-cache musl-dev cmake make gcc g++ perl linux-headers
+cargo build --release
+# The service binary is target/release/lk-jwt-service,
+# the healthcheck binary is target/release/healthcheck
 ```
