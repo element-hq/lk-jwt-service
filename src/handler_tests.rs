@@ -4,11 +4,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// handler_tests.rs: cross-cutting tests for the Handler infrastructure —
-// healthcheck, is_full_access_user, get_join_token, the actor-loop
-// lifecycle, sfu_event_from_webhook translation — plus the endpoint tests
-// for /get_token, /sfu/get and /delegate_delayed_leave and the store
-// recovery tests.
+//! Handler tests: actor-loop lifecycle, webhook translation, store
+//! recovery, and the HTTP endpoints.
 
 use std::sync::Mutex;
 
@@ -39,11 +36,9 @@ type ExistsFn = Box<
 type ExecFn =
     Box<dyn Fn(&CsApiUrl, &str, DelayEventAction) -> Result<u16, ActionError> + Send + Sync>;
 
-/// A [`Deps`] implementation whose behaviours are swappable per test — the
-/// equivalent of the Go tests' global function-variable swaps. Un-mocked
-/// methods panic (they must never be reached in a test), except CS-API URL
-/// resolution, which falls back to the real override/cache/discovery logic
-/// like the un-swapped Go default.
+/// A [`Deps`] implementation with per-test swappable behaviours. Un-mocked
+/// methods panic, except CS-API URL resolution, which falls back to the real
+/// override/cache/discovery logic.
 #[derive(Default)]
 struct HandlerTestDeps {
     exchange: Option<ExchangeFn>,
@@ -132,8 +127,8 @@ impl Deps for HandlerTestDeps {
     }
 }
 
-/// A participant_exists mock that blocks until the surrounding job is
-/// cancelled — the Go tests' `<-ctx.Done()` idiom.
+/// A participant_exists mock that pends until the surrounding job is
+/// cancelled.
 fn exists_block_until_cancelled() -> Option<ExistsFn> {
     Some(Box::new(|_, _| Box::pin(std::future::pending())))
 }
@@ -679,10 +674,9 @@ fn test_sfu_event_from_webhook_unknown_event() {
 
 // ── handle_sfu_webhook (HTTP entry-point) ─────────────────────────────────────
 
-/// Builds a POST /sfu_webhook request signed using the LiveKit webhook
-/// protocol: JSON-encoded body, SHA-256 of the body embedded in an
-/// AccessToken JWT in the Authorization header. Mirrors the URLNotifier's
-/// signing logic so the webhook receiver accepts it.
+/// Builds a POST /sfu_webhook request signed like the LiveKit SFU signs
+/// webhooks: JSON body, SHA-256 of the body embedded in an AccessToken JWT
+/// in the Authorization header.
 fn signed_sfu_webhook_request(
     key: &str,
     secret: &str,
@@ -816,11 +810,14 @@ async fn test_handle_sfu_webhook_shutdown_drop() {
 
     // Fill the sfu_event channel so the send arm of the select is never ready
     // — forcing the cancellation branch to win.
-    while handler
-        .sfu_event_tx
-        .try_send(SfuEventRequest::default())
-        .is_ok()
-    {}
+    let filler = SfuEventRequest {
+        room_alias: LiveKitRoomAlias("filler".into()),
+        msg: SfuMessage {
+            signal: DelayedEventSignal::ParticipantConnected,
+            livekit_identity: LiveKitIdentity("@filler".into()),
+        },
+    };
+    while handler.sfu_event_tx.try_send(filler.clone()).is_ok() {}
 
     let event = livekit_protocol::WebhookEvent {
         event: "participant_joined".into(),
@@ -851,8 +848,7 @@ async fn test_handler_loop_all_jobs_closed_on_shutdown() {
     let exited: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     /// Records the room when the pending lookup future is dropped — which
-    /// happens exactly when the lookup task observes cancellation (the Go
-    /// mock's `<-ctx.Done()` equivalent).
+    /// happens exactly when the lookup task observes cancellation.
     struct RecordExit {
         room: String,
         exited: Arc<Mutex<Vec<String>>>,
@@ -1039,7 +1035,7 @@ async fn test_handler_loop_job_replacement_no_deadlock() {
         .expect("handler.close() deadlocked after job replacement");
 }
 
-// ── store recovery (handler_restore_test.go) ──────────────────────────────────
+// ── store recovery ────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_handler_restore_resumes_saved_job() {
@@ -1304,7 +1300,7 @@ async fn test_handler_restore_saves_new_jobs() {
     handler.close().await;
 }
 
-// ── /get_token endpoint (get_token_test.go) ───────────────────────────────────
+// ── /get_token endpoint ───────────────────────────────────────────────────────
 
 /// Verifies that non-POST/OPTIONS requests to /get_token return 405.
 #[tokio::test]
@@ -1355,11 +1351,8 @@ async fn test_handle_get_token_invalid_json() {
 
 /// Verifies the full-access happy-path POST /get_token: a valid request
 /// produces a 200 SfuResponse, create_livekit_room is invoked, and the JWT's
-/// sub/room claims match the MSC-4195 test vectors.
-///
-/// The OpenID exchange and LiveKit room creation are mocked here — the real
-/// exchange path is exercised by test_exchange_openid_userinfo_success in
-/// helper.rs.
+/// sub/room claims match the MSC-4195 test vectors. The OpenID exchange and
+/// LiveKit room creation are mocked.
 #[tokio::test]
 async fn test_handle_get_token_success() {
     const MATRIX_SERVER_NAME: &str = "example.com";
@@ -1668,7 +1661,7 @@ async fn test_process_sfu_request() {
     }
 }
 
-// ── /sfu/get endpoint (sfu_get_test.go) ───────────────────────────────────────
+// ── /sfu/get endpoint ─────────────────────────────────────────────────────────
 // Deprecated: this endpoint is pre-Matrix-2.0. When /sfu/get is removed,
 // delete these tests too.
 
@@ -1932,7 +1925,7 @@ async fn test_process_legacy_sfu_request() {
     }
 }
 
-// ── /delegate_delayed_leave endpoint (delegate_delayed_leave_test.go) ─────────
+// ── /delegate_delayed_leave endpoint ──────────────────────────────────────────
 
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_options() {

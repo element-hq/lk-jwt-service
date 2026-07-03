@@ -4,18 +4,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// handler.rs: the HTTP entry point of the service.
-//
-// The Handler owns the actor-model jobs map (only run_loop reads/writes it),
-// routes incoming requests, generates LiveKit JWTs, and delegates to the
-// delayed-event manager for leave-event handling. get_join_token (the JWT
-// minter) lives here because it only makes sense as the Handler's internal.
+//! The HTTP entry point of the service: request routing, JWT minting and
+//! the actor loop that owns the delayed-event jobs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -30,7 +25,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::delayed_event_manager::{
     start_participant_lookup, DelayedEventJob, DelayedEventJobParams, DelayedEventSignal, JobKey,
-    LookupCsApiUrlFn, SfuMessage,
+    JobRestartedRequest, LookupCsApiUrlFn, SfuMessage,
 };
 use crate::helper::{
     livekit_identity_for, livekit_room_alias_for, CsApiUrl, CsApiUrlCache, Deps, LiveKitAuth,
@@ -68,14 +63,14 @@ pub fn get_join_token(
 
 // ── Handler ──────────────────────────────────────────────────────────────────
 
-/// Sent by HTTP handlers to the loop to add a delayed-event job.
+/// A request to add a delayed-event job.
 pub(crate) struct AddJobRequest {
     params: DelayedEventJobParams,
     result: oneshot::Sender<Result<UniqueId, String>>,
 }
 
-/// Sent by handle_sfu_webhook to the loop for routing.
-#[derive(Debug, Clone, Default)]
+/// An SFU webhook event on its way to the loop.
+#[derive(Debug, Clone)]
 pub(crate) struct SfuEventRequest {
     pub room_alias: LiveKitRoomAlias,
     pub msg: SfuMessage,
@@ -86,38 +81,29 @@ pub(crate) struct LoopReceivers {
     add_job_rx: mpsc::Receiver<AddJobRequest>,
     pub(crate) sfu_event_rx: mpsc::Receiver<SfuEventRequest>,
     job_done_rx: mpsc::Receiver<Arc<DelayedEventJob>>,
-    job_restarted_rx: mpsc::Receiver<crate::delayed_event_manager::JobRestartedRequest>,
+    job_restarted_rx: mpsc::Receiver<JobRestartedRequest>,
 }
 
 /// The error side of add_delayed_event_job.
 #[derive(Debug)]
 pub(crate) enum AddJobError {
-    /// The handler has already shut down (the Go implementation's
-    /// context.Canceled path).
+    /// The handler has already shut down.
     Shutdown,
     /// Job creation failed (invalid parameters).
     Creation(String),
 }
 
-/// Handler is the top-level HTTP handler.
+/// The top-level HTTP handler.
 ///
 /// # Concurrency model
 ///
-/// Handler::run_loop is the single task that owns the jobs map — no mutex
-/// needed. HTTP handler tasks communicate with the loop exclusively through
-/// channels:
+/// `run_loop` is the single task that owns the jobs map — no mutex needed.
+/// Everything else communicates with the loop through channels:
 ///
-///   - add_job: deliver new DelayedEventJobParams to the loop, which creates
-///     a DelayedEventJob and starts its participant-lookup task.
-///   - sfu_event: deliver an SFU webhook event to the loop, which routes it
-///     directly to the correct job by (room, identity) key.
-///   - job_done: jobs signal the loop when they enter a terminal state so the
-///     loop can cancel and clean them up.
-///   - job_restarted: jobs signal the loop when they restart the delayed
-///     event so the loop can update the stored job.
-///
-/// Because all map mutations happen in a single task there are no data races
-/// and no mutex is required.
+///   - add_job: create a job (replacing any active job for the same key)
+///   - sfu_event: route an SFU webhook event to the job for (room, identity)
+///   - job_done: clean up a job that reached a terminal state
+///   - job_restarted: update the stored job after a delayed-event restart
 pub struct Handler {
     cancel: CancellationToken,
     pub(crate) livekit_auth: LiveKitAuth,
@@ -136,7 +122,7 @@ pub struct Handler {
     /// complete.
     recovery_done_tx: watch::Sender<bool>,
     job_done_tx: mpsc::Sender<Arc<DelayedEventJob>>,
-    job_restarted_tx: mpsc::Sender<crate::delayed_event_manager::JobRestartedRequest>,
+    job_restarted_tx: mpsc::Sender<JobRestartedRequest>,
     add_job_tx: mpsc::Sender<AddJobRequest>,
     pub(crate) sfu_event_tx: mpsc::Sender<SfuEventRequest>,
 }
@@ -165,8 +151,8 @@ impl Handler {
         handler
     }
 
-    /// Constructs a Handler without starting its actor loop. Used by tests
-    /// that need to observe the loop's channels directly.
+    /// Constructs a Handler without starting its actor loop, handing the
+    /// loop's receiving ends to the caller.
     pub(crate) fn new_without_loop(
         lk_auth: LiveKitAuth,
         skip_verify_tls: bool,
@@ -222,8 +208,8 @@ impl Handler {
         &self.loop_done_tx
     }
 
-    /// Builds the CS-API URL resolver closure handed to jobs; it consults the
-    /// handler's overrides and cache.
+    /// Builds a CS-API URL resolver backed by this handler's overrides and
+    /// cache.
     fn make_lookup(&self) -> LookupCsApiUrlFn {
         let deps = self.deps.clone();
         let overrides = self.cs_api_url_overrides.clone();
@@ -253,18 +239,8 @@ impl Handler {
         )
     }
 
-    /// The Handler's actor task: the sole owner of the jobs map (no locking
-    /// needed) and the single consumer of
-    ///
-    ///   - add_job: job creation, replacing any active job for the same key
-    ///   - sfu_event: routing SFU webhook events to the job for
-    ///     (room, identity)
-    ///   - job_done: cleaning up jobs that reached a terminal state
-    ///   - job_restarted: updating the stored job when the delayed event is
-    ///     restarted
-    ///
-    /// Started once by Handler::new; runs until the handler is cancelled
-    /// (Handler::close), then joins all job tasks and flips loop_done.
+    /// The actor task owning the jobs map. Runs until the handler is
+    /// cancelled, then joins all job tasks and flips loop_done.
     async fn run_loop(self: Arc<Self>, mut rx: LoopReceivers) {
         let mut jobs: HashMap<JobKey, Arc<DelayedEventJob>> = HashMap::new();
 
@@ -345,7 +321,13 @@ impl Handler {
                     // blocked trying to send on the now-dead loop.
                     while rx.job_done_rx.try_recv().is_ok() {}
                     // Wait for all job loops to exit before returning.
-                    futures::future::join_all(jobs.values().map(|job| job.close())).await;
+                    for result in
+                        futures::future::join_all(jobs.values().map(|job| job.close())).await
+                    {
+                        if let Err(err) = result {
+                            warn!(err = %err, "Handler: job close failed during shutdown");
+                        }
+                    }
                     break;
                 }
 
@@ -394,19 +376,10 @@ impl Handler {
                         }
                     }
 
-                    // Pull-based lookup (additionally to SFU webhook)
-                    // Phase 1:
-                    // - required for handle_delegate_delayed_leave as no SFU
-                    //   webhook is expected for this code path
-                    // - safeguard in case of the token endpoints to minimize
-                    //   impact of transient SFU webhook failures
-                    //
-                    // Phase 2 (if enabled: sanity_check_interval > 0 seconds):
-                    // - Adds periodic lookups to ensure the participant is
-                    //   still present on the SFU, and cancels the job if not.
-                    // - Mitigates the risk of "zombie" jobs that never receive
-                    //   the SFU disconnect webhook (e.g. due to transient SFU
-                    //   webhook failures)
+                    // Pull-based lookup, in addition to SFU webhooks. Phase 1
+                    // confirms the initial connect (delegated leaves get no
+                    // webhook for it); Phase 2, when enabled, periodically
+                    // re-checks presence to catch missed disconnect webhooks.
                     start_participant_lookup(
                         &job,
                         self.deps.clone(),
@@ -523,9 +496,7 @@ impl Handler {
         }
     }
 
-    /// Sends a set of job params to the loop and waits for the result.
-    /// Returns Ok on success, the job-creation error on failure, or
-    /// AddJobError::Shutdown when the handler has already shut down.
+    /// Adds a delayed-event job and waits for the outcome.
     pub(crate) async fn add_delayed_event_job(
         &self,
         params: DelayedEventJobParams,
@@ -816,18 +787,11 @@ impl Handler {
         })
     }
 
-    /// Handles the /delegate_delayed_leave endpoint.
-    ///
-    /// Unlike process_sfu_request it:
-    ///   - Does NOT issue a JWT (the client is already connected to the SFU).
-    ///   - Does NOT create a LiveKit room (the room already exists).
-    ///   - Requires all three delayed-event parameters (they are mandatory
-    ///     here).
-    ///
-    /// The participant is assumed to be already present on the SFU. As the
-    /// ParticipantConnected SFU webhook has already happened, the
-    /// participant-lookup task (start_participant_lookup) will use its
-    /// backoff to confirm presence.
+    /// Handles /delegate_delayed_leave: schedules a delayed-leave job for a
+    /// participant that is already connected to the SFU. Issues no JWT and
+    /// creates no room; the delayed-event parameters are mandatory. Presence
+    /// is confirmed by the job's participant lookup, since the connect
+    /// webhook has already fired.
     pub(crate) async fn process_delegate_delayed_leave(
         &self,
         req: &DelegateDelayedLeaveRequest,
@@ -937,8 +901,7 @@ fn matrix_error_into_response(err: &MatrixErrorResponse) -> Response {
     matrix_error_response(err.status, &err.errcode, &err.err)
 }
 
-/// Adds the four standard CORS + JSON headers used by every POST endpoint —
-/// the equivalent of the Go implementation's corsJSON wrapper.
+/// Adds the standard CORS + JSON headers shared by the POST endpoints.
 fn apply_cors_json(mut resp: Response) -> Response {
     let headers = resp.headers_mut();
     headers.insert(
@@ -962,8 +925,7 @@ fn apply_cors_json(mut resp: Response) -> Response {
     resp
 }
 
-/// Reads and decodes a JSON request body, rejecting unknown fields (the
-/// equivalent of Go's DisallowUnknownFields).
+/// Reads and decodes a JSON request body.
 async fn decode_json_body<T: serde::de::DeserializeOwned>(req: Request) -> Result<T, String> {
     let bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
         .await
@@ -1175,19 +1137,6 @@ async fn handle_sfu_webhook(State(handler): State<Arc<Handler>>, req: Request) -
         _ = handler.sfu_event_tx.send(SfuEventRequest { room_alias, msg }) => {}
     }
     StatusCode::OK.into_response()
-}
-
-// Unused-import guard for Body (used indirectly via axum types).
-#[allow(unused)]
-fn _assert_body_type(_b: Body) {}
-
-impl Default for SfuMessage {
-    fn default() -> Self {
-        Self {
-            signal: DelayedEventSignal::ParticipantConnected,
-            livekit_identity: LiveKitIdentity::default(),
-        }
-    }
 }
 
 #[cfg(test)]

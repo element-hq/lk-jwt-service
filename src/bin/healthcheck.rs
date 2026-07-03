@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// healthcheck: a tiny client for container health checks — GETs /healthz on
-// the local service and exits non-zero on failure.
+//! Container health check: GETs /healthz on the local service and exits
+//! non-zero on failure.
 
 #[tokio::main]
 async fn main() {

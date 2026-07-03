@@ -4,16 +4,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// main.rs: process entry point. Sets up structured logging, parses the
-// environment-driven Config (see config.rs), constructs a Handler (see
-// handler.rs), and serves it.
+//! Process entry point: sets up logging, parses the environment-driven
+//! configuration, constructs the handler and serves it.
 
 use std::sync::Arc;
 
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use lk_jwt_service::config::parse_config;
+use lk_jwt_service::config::{bind_addresses, parse_config};
 use lk_jwt_service::handler::Handler;
 use lk_jwt_service::helper::{LiveKitAuth, RealDeps};
 use lk_jwt_service::store::{new_redis_store, Store};
@@ -36,8 +35,10 @@ async fn main() {
             Some("Invalid log level in LIVEKIT_LOG_LEVEL, defaulting to info"),
         ),
     };
+    // Library crates log at warn and above; LIVEKIT_LOG_LEVEL only controls
+    // the service's own verbosity.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(format!("lk_jwt_service={level}")))
+        .with_env_filter(EnvFilter::new(format!("warn,lk_jwt_service={level}")))
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
@@ -98,18 +99,19 @@ async fn main() {
         "Starting service"
     );
 
-    // A Go-style ":port" bind address means "all interfaces".
-    let bind_addr = if let Some(port) = config.lk_jwt_bind.strip_prefix(':') {
-        format!("0.0.0.0:{port}")
-    } else {
-        config.lk_jwt_bind.clone()
-    };
-    let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            eprintln!("Failed to bind {bind_addr}: {err}");
-            std::process::exit(1);
+    let mut listener = None;
+    for bind_addr in bind_addresses(&config.lk_jwt_bind) {
+        match tokio::net::TcpListener::bind(&bind_addr).await {
+            Ok(bound) => {
+                listener = Some(bound);
+                break;
+            }
+            Err(err) => warn!(bind_addr, err = %err, "Failed to bind"),
         }
+    }
+    let Some(listener) = listener else {
+        eprintln!("Failed to bind {}", config.lk_jwt_bind);
+        std::process::exit(1);
     };
     if let Err(err) = axum::serve(listener, handler.prepare_router()).await {
         eprintln!("{err}");

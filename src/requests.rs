@@ -4,10 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// requests.rs: HTTP request / response DTOs used by the handler —
-// SfuRequest, DelegateDelayedLeaveRequest, LegacySfuRequest,
-// SfuResponse, MatrixErrorResponse — together with their validate()
-// methods. Each type lives next to its validator.
+//! HTTP request / response bodies and their validation.
 
 use serde::{Deserialize, Serialize};
 use tracing::error;

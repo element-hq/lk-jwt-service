@@ -4,9 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// config.rs: environment-driven configuration parsing for the service —
-// LiveKit credentials, JWT bind address, full-access homeservers, and the
-// optional sanity-check interval.
+//! Environment-driven configuration parsing.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -170,6 +168,16 @@ pub fn parse_config() -> Result<Config, String> {
         cs_api_url_overrides,
         redis_url: env_var("LIVEKIT_REDIS_URL"),
     })
+}
+
+/// Expands a bind address into the socket addresses to try, in order. A bare
+/// ":port" means "all interfaces": the IPv6 wildcard is tried first (dual
+/// stack on most systems) with the IPv4 wildcard as fallback.
+pub fn bind_addresses(lk_jwt_bind: &str) -> Vec<String> {
+    match lk_jwt_bind.strip_prefix(':') {
+        Some(port) => vec![format!("[::]:{port}"), format!("0.0.0.0:{port}")],
+        None => vec![lk_jwt_bind.to_owned()],
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -577,5 +585,12 @@ mod tests {
                 assert_eq!(Some(got), tc.want_config, "{}: config mismatch", tc.name);
             });
         }
+    }
+
+    #[test]
+    fn test_bind_addresses() {
+        assert_eq!(bind_addresses(":8080"), vec!["[::]:8080", "0.0.0.0:8080"]);
+        assert_eq!(bind_addresses("127.0.0.1:9090"), vec!["127.0.0.1:9090"]);
+        assert_eq!(bind_addresses("[::1]:9090"), vec!["[::1]:9090"]);
     }
 }

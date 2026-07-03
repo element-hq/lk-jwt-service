@@ -4,11 +4,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// helper.rs: cross-cutting helpers shared by request handlers and the
-// delayed-event manager — ID generation, LiveKit SDK wrappers, Matrix
-// CS-API calls. The `Deps` trait plays the role of the swappable
-// function variables in the Go implementation: the real logic lives in
-// the trait's default methods and tests override individual methods.
+//! Cross-cutting helpers: ID generation, hash derivation, LiveKit room
+//! service calls and Matrix CS-API calls. External interactions live behind
+//! the [`Deps`] trait so they can be replaced in tests.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -32,6 +30,26 @@ pub struct LiveKitAuth {
     pub key: String,
     pub secret: String,
     pub lk_url: String,
+}
+
+/// Returns a shared HTTP client, optionally with TLS verification disabled.
+/// Clients are expensive to build (TLS setup), so one per mode is cached for
+/// the process lifetime; timeouts are set per request.
+fn http_client(skip_verify_tls: bool) -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static VERIFYING: OnceLock<reqwest::Client> = OnceLock::new();
+    static INSECURE: OnceLock<reqwest::Client> = OnceLock::new();
+    let (cell, danger) = if skip_verify_tls {
+        (&INSECURE, true)
+    } else {
+        (&VERIFYING, false)
+    };
+    cell.get_or_init(|| {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(danger)
+            .build()
+            .expect("failed to build HTTP client")
+    })
 }
 
 // ── newtypes ─────────────────────────────────────────────────────────────────
@@ -78,10 +96,10 @@ string_newtype!(LiveKitIdentity);
 string_newtype!(CsApiUrl);
 string_newtype!(UniqueId);
 
-/// Generates a unique, chronologically sortable ID: an 8-byte big-endian
-/// microsecond timestamp followed by 8 random bytes, Base32Hex-encoded
-/// without padding. Base32Hex's alphabet is naturally ordered in ASCII
-/// (0-9 then A-V), so string comparison matches chronological order.
+/// Generates a unique ID: an 8-byte big-endian microsecond timestamp
+/// followed by 8 random bytes, Base32Hex-encoded without padding. The
+/// Base32Hex alphabet sorts like ASCII, so string order matches
+/// chronological order.
 pub fn new_unique_id() -> UniqueId {
     let mut b = [0u8; 16];
 
@@ -117,8 +135,7 @@ impl CsApiUrlCache {
     pub fn get(&self, server_name: &str) -> Option<CsApiUrl> {
         let entries = self.entries.read().unwrap();
         match entries.get(server_name) {
-            // We don't evict the expired entry because it is extremely likely
-            // that the caller will re-resolve the URL and update the cache.
+            // Expired entries are not evicted; a re-resolve overwrites them.
             Some(entry) if Instant::now() <= entry.expires_at => Some(entry.url.clone()),
             _ => None,
         }
@@ -137,8 +154,8 @@ impl CsApiUrlCache {
 
 // ── hashing ──────────────────────────────────────────────────────────────────
 
-/// Marshals a slice of strings to JSON, byte-compatible with Go's
-/// json.Marshal for the inputs used here.
+/// JSON-encodes a string slice — the canonical input encoding for the
+/// MSC4195 hash derivations.
 fn marshal_strings(ss: &[&str]) -> Vec<u8> {
     serde_json::to_vec(ss).expect("string slices always serialize")
 }
@@ -205,15 +222,14 @@ pub enum RoomServiceError {
     Other(String),
 }
 
-/// The interface for room operations (mirrors the Go RoomClient interface).
+/// LiveKit room operations.
 #[async_trait]
 pub trait RoomServiceClient: Send + Sync {
     async fn create_room(&self, params: CreateRoomParams) -> Result<RoomInfo, RoomServiceError>;
     async fn get_participant(&self, room: &str, identity: &str) -> Result<(), RoomServiceError>;
 }
 
-/// Converts a LiveKit URL to its HTTP form for service API calls — the
-/// equivalent of the Go SDK's ToHttpURL. ws:// becomes http://, wss://
+/// Converts a LiveKit URL to its HTTP form: ws:// becomes http://, wss://
 /// becomes https://; anything else passes through unchanged.
 pub(crate) fn to_http_url(url: &str) -> String {
     if let Some(rest) = url.strip_prefix("ws://") {
@@ -227,22 +243,16 @@ pub(crate) fn to_http_url(url: &str) -> String {
 
 /// The real [`RoomServiceClient`].
 ///
-/// TODO(upstream): livekit-api's `RoomClient` builds request URLs via
-/// `url.set_path(...)`, which REPLACES the URL path and thereby strips any
-/// reverse-proxy prefix encoded in LIVEKIT_URL (e.g. `wss://host/livekit/sfu`
-/// → `/twirp/...` instead of `/livekit/sfu/twirp/...`). It also does not
-/// convert ws/wss schemes for HTTP service calls. The Go SDK preserves the
-/// prefix (sanitizeBaseURL + baseServicePath) and converts the scheme
-/// (ToHttpURL). Until livekit-api joins paths instead of replacing them (or
-/// exposes a prefix-aware constructor), the two RoomService Twirp calls are
-/// issued directly here — the SDK is still used for access tokens (auth
-/// headers, JWTs) and webhook verification.
+/// TODO(upstream): livekit-api's `RoomClient` builds request URLs with
+/// `url.set_path(...)`, which strips any reverse-proxy path prefix in
+/// LIVEKIT_URL, and it does not convert ws/wss schemes for HTTP calls. The
+/// two RoomService Twirp calls are therefore issued directly here; the SDK
+/// is still used for access tokens and webhook verification.
 struct LiveKitRoomServiceClient {
     /// The http(s) base URL, possibly carrying a path prefix.
     host: String,
     api_key: String,
     api_secret: String,
-    client: reqwest::Client,
 }
 
 impl LiveKitRoomServiceClient {
@@ -251,12 +261,11 @@ impl LiveKitRoomServiceClient {
             host: to_http_url(url),
             api_key: api_key.to_owned(),
             api_secret: api_secret.to_owned(),
-            client: reqwest::Client::new(),
         }
     }
 
     /// Issues one Twirp RoomService call, preserving any path prefix in the
-    /// host URL (unlike the SDK's TwirpClient — see the struct-level TODO).
+    /// host URL.
     async fn twirp_call<Req: prost::Message, Resp: prost::Message + Default>(
         &self,
         method: &str,
@@ -273,8 +282,7 @@ impl LiveKitRoomServiceClient {
                 .to_jwt()
                 .map_err(|e| RoomServiceError::Other(e.to_string()))?;
 
-        let resp = self
-            .client
+        let resp = http_client(false)
             .post(&url)
             .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
             .header(http::header::CONTENT_TYPE, "application/protobuf")
@@ -360,9 +368,8 @@ impl RoomServiceClient for LiveKitRoomServiceClient {
 
 // ── delayed-event action error taxonomy ──────────────────────────────────────
 
-/// The error side of [`Deps::execute_delayed_event_action`]. Carries the HTTP
-/// status code (0 for transport errors) so callers can log it, plus the retry
-/// classification consumed by [`crate::retry::retry`].
+/// A failed delayed-event action. Carries the HTTP status code (0 for
+/// transport errors) and classifies itself for retrying.
 #[derive(Debug, thiserror::Error)]
 pub enum ActionError {
     /// 404 on ActionRestart: the delayed event no longer exists on the
@@ -406,21 +413,16 @@ impl Classify for ActionError {
 #[derive(Debug, Deserialize)]
 struct LimitExceededBody {
     #[serde(default)]
-    #[allow(dead_code)]
-    errcode: String,
-    #[serde(default)]
     retry_after_ms: i64,
 }
 
 // ── Deps: the swappable dependency surface ───────────────────────────────────
 
-/// The set of external interactions that tests replace. The real logic lives
-/// in the default method implementations; [`RealDeps`] adds nothing. This is
-/// the Rust equivalent of the Go implementation's `var X = func(...)`
-/// swap-for-test pattern.
+/// External interactions of the service. The real logic lives in the default
+/// method implementations; tests override individual methods.
 #[async_trait]
 pub trait Deps: Send + Sync {
-    /// Constructs a LiveKit room service client (mockable in tests).
+    /// Constructs a LiveKit room service client.
     fn new_room_service_client(
         &self,
         url: &str,
@@ -448,11 +450,12 @@ pub trait Deps: Send + Sync {
         }
 
         let url = format!("https://{server_name}/.well-known/matrix/client");
-        let client = reqwest::Client::builder()
+        let resp = http_client(false)
+            .get(&url)
             .timeout(Duration::from_secs(30))
-            .build()
+            .send()
+            .await
             .map_err(|e| e.to_string())?;
-        let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!(
                 "failed to fetch {url}: http status code {}",
@@ -490,19 +493,11 @@ pub trait Deps: Send + Sync {
 
         let base = resolve_federation_base_url(&token.matrix_server_name, skip_verify_tls).await;
 
-        // Like Go's InsecureSkipVerify, skipping TLS verification covers both
-        // the certificate chain and the hostname (reqwest's rustls backend
-        // disables the whole verifier).
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(skip_verify_tls)
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| e.to_string())?;
-
         let url = format!("{base}/_matrix/federation/v1/openid/userinfo");
-        let resp = client
+        let resp = http_client(skip_verify_tls)
             .get(&url)
             .query(&[("access_token", token.access_token.as_str())])
+            .timeout(Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| {
@@ -598,24 +593,12 @@ pub trait Deps: Send + Sync {
     /// POSTs the given action (restart or send) to the Matrix CS-API for
     /// `delay_id`.
     ///
-    /// Return contract — by how [`crate::retry::retry`] treats the result:
-    ///
-    /// success — no retry; caller proceeds:
-    ///   - 2xx                                → `Ok(status)`
-    ///   - 404 on ActionSend                  → `Ok(404)` (MSC-4140 already-sent / cancelled)
-    ///
-    /// Permanent — no retry:
-    ///   - 404 on ActionRestart               → [`ActionError::DelayedEventNotFound`]
-    ///
-    /// RetryAfter — retry after the server's hint:
-    ///   - 429 + Retry-After or retry_after_ms → [`ActionError::RetryAfter`]
-    ///
-    /// transient — retry on default schedule until the elapsed budget runs out:
-    ///   - 5xx                                → "temporarily unavailable"
-    ///   - 429 with no usable retry hint      → "temporarily unavailable"
-    ///   - Transport / URL error              → status field is 0
-    ///   - Any other status (catchall)        → "CS API returned unexpected status: N"
-    ///     (e.g. 408, 421, 423, 425 — genuinely retriable; also 1xx, 3xx)
+    /// Return contract:
+    ///   - 2xx, and 404 on send (MSC4140 already-sent)  → `Ok(status)`
+    ///   - 404 on restart                               → permanent [`ActionError::DelayedEventNotFound`]
+    ///   - 429 with a usable retry hint                 → [`ActionError::RetryAfter`]
+    ///   - anything else (5xx, hint-less 429, transport
+    ///     errors with status 0, unclassified statuses) → transient
     async fn execute_delayed_event_action(
         &self,
         cs_api_url: &CsApiUrl,
@@ -646,19 +629,11 @@ pub trait Deps: Send + Sync {
             segments.push(action.as_str());
         }
 
-        // The client is built once and reused — TLS configuration setup is
-        // expensive enough to matter on the retry path.
-        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-        let client = CLIENT.get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .expect("default reqwest client")
-        });
-        let resp = client
+        let resp = http_client(false)
             .post(endpoint.clone())
             .header(http::header::CONTENT_TYPE, "application/json")
             .body("{}")
+            .timeout(Duration::from_secs(5))
             .send()
             .await
             .map_err(|e| {
@@ -692,9 +667,7 @@ pub trait Deps: Send + Sync {
             }),
 
             429 => {
-                // Prefer the standard HTTP Retry-After header (RFC 7231
-                // §7.1.3) — works for all Matrix homeservers and for any
-                // non-Matrix middlebox (CDN, proxy, gateway) sitting in front.
+                // Prefer the standard Retry-After header (RFC 7231 §7.1.3).
                 let retry_after_header = resp
                     .headers()
                     .get(http::header::RETRY_AFTER)
@@ -717,12 +690,9 @@ pub trait Deps: Send + Sync {
                         retry_after: Duration::from_secs(d.as_secs()),
                     });
                 }
-                // Matrix-spec fallback: M_LIMIT_EXCEEDED carries
-                // retry_after_ms in the response body. Deprecated in spec
-                // v1.10 in favour of Retry-After, but still emitted by
-                // Synapse / Dendrite / Conduit for backwards compatibility —
-                // and the only signal from older homeservers. Best-effort:
-                // decode once; ignore failures.
+                // Fall back to the retry_after_ms field of M_LIMIT_EXCEEDED
+                // bodies — deprecated in Matrix v1.10 but still emitted by
+                // common homeservers.
                 if let Ok(body) = resp.json::<LimitExceededBody>().await {
                     if body.retry_after_ms > 0 {
                         // Ceil ms → s (e.g. 500 ms → 1 s, 1500 ms → 2 s).
@@ -733,17 +703,15 @@ pub trait Deps: Send + Sync {
                         });
                     }
                 }
-                // Neither header nor body had a usable hint — let the retry
-                // loop decide.
+                // No usable hint.
                 Err(ActionError::Transient {
                     status,
                     msg: "CS API temporarily unavailable (http status code 429)".into(),
                 })
             }
 
-            // Anything not classified above is treated as transient — many
-            // 4xx codes are genuinely retriable (408 Request Timeout,
-            // 421 Misdirected, 423 Locked, 425 Too Early, …)
+            // Everything else is treated as transient — many 4xx codes are
+            // genuinely retriable (408, 421, 423, 425, …).
             _ => Err(ActionError::Transient {
                 status,
                 msg: format!("CS API returned unexpected status: {status}"),
@@ -758,10 +726,8 @@ pub struct RealDeps;
 
 impl Deps for RealDeps {}
 
-/// The default resolution logic behind [`Deps::resolve_cs_api_url`]: overrides
-/// win over the cache, which wins over fresh .well-known resolution (via
-/// `deps.discover_client_api`). A free function so that test doubles that
-/// override individual `Deps` methods can still fall back to it.
+/// Resolves the Client-Server API URL for a server name: overrides win over
+/// the cache, which wins over fresh .well-known discovery.
 pub async fn resolve_cs_api_url_via<D: Deps + ?Sized>(
     deps: &D,
     server_name: &str,
@@ -782,7 +748,7 @@ pub async fn resolve_cs_api_url_via<D: Deps + ?Sized>(
         }
     }
 
-    // Still nothing. Let's try .well-known resolution.
+    // Try .well-known resolution.
     let discovered = deps.discover_client_api(server_name).await;
     if let Ok(Some(well_known)) = &discovered {
         if !well_known.homeserver_base_url.is_empty() {
@@ -830,13 +796,14 @@ async fn resolve_federation_base_url(server_name: &str, skip_verify_tls: bool) -
         server: String,
     }
 
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(skip_verify_tls)
-        .timeout(Duration::from_secs(10))
-        .build();
-    if let Ok(client) = client {
+    {
         let url = format!("https://{server_name}/.well-known/matrix/server");
-        if let Ok(resp) = client.get(&url).send().await {
+        if let Ok(resp) = http_client(skip_verify_tls)
+            .get(&url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
             if resp.status().is_success() {
                 if let Ok(parsed) = resp.json::<WellKnownServer>().await {
                     if !parsed.server.is_empty() {
@@ -1549,8 +1516,7 @@ mod tests {
 
     // ── resolve_cs_api_url ────────────────────────────────────────────────────
 
-    /// A Deps implementation whose discover_client_api is backed by a
-    /// swappable closure — the equivalent of Go's `discoverClientAPI = ...`.
+    /// A Deps implementation with a swappable discover_client_api.
     type DiscoverFn = Box<dyn Fn(&str) -> Result<Option<ClientWellKnown>, String> + Send + Sync>;
 
     struct DiscoverMockDeps {
@@ -1703,8 +1669,7 @@ mod tests {
 
     /// Verifies the end-to-end OpenID userinfo lookup: exchange_openid_userinfo
     /// builds the correct federation request, parses the response body, and
-    /// returns the sub. Endpoint happy-path tests mock this function to focus
-    /// on endpoint behaviour — this is its dedicated home.
+    /// returns the sub.
     #[tokio::test]
     async fn test_exchange_openid_userinfo_success() {
         const ACCESS_TOKEN: &str = "testAccessToken";
@@ -1756,8 +1721,7 @@ mod tests {
 
     // ── create_livekit_room ───────────────────────────────────────────────────
 
-    /// A Deps implementation returning a mock room service client — the
-    /// equivalent of Go's `newRoomServiceClient = ...` swap.
+    /// A Deps implementation returning a mock room service client.
     type CreateRoomFn =
         Box<dyn Fn(CreateRoomParams) -> Result<RoomInfo, RoomServiceError> + Send + Sync>;
     type GetParticipantFn = Box<dyn Fn(&str, &str) -> Result<(), RoomServiceError> + Send + Sync>;
@@ -1996,12 +1960,10 @@ mod tests {
     }
 
     // ── real Twirp room-service client ────────────────────────────────────────
-    // Regression tests for the divergences from livekit-api's RoomClient (see
-    // the TODO(upstream) on LiveKitRoomServiceClient): a path prefix in
-    // LIVEKIT_URL must be preserved and ws/wss schemes must be converted for
-    // HTTP service calls, matching the Go SDK.
+    // Regression tests for the divergences from livekit-api's RoomClient:
+    // a path prefix in LIVEKIT_URL must be preserved and ws/wss schemes must
+    // be converted for HTTP service calls.
 
-    /// Verifies the Go SDK ToHttpURL equivalence.
     #[test]
     fn test_to_http_url() {
         for (input, want) in [
@@ -2048,9 +2010,7 @@ mod tests {
     }
 
     /// Verifies that a reverse-proxy path prefix in LIVEKIT_URL is preserved
-    /// by RoomService calls and that a ws:// URL is converted to http:// —
-    /// livekit-api's own RoomClient strips the prefix (url.set_path) and does
-    /// not convert the scheme; the Go SDK does both.
+    /// by RoomService calls and that a ws:// URL is converted to http://.
     #[tokio::test]
     async fn test_room_service_client_preserves_url_path_prefix() {
         use prost::Message;

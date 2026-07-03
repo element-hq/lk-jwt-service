@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// delayed_event_manager.rs: the DelayedEventJob actor — a finite state
-// machine modelling the lifecycle of a MatrixRTC cancellable delayed
-// disconnect event for a single participant in a LiveKit room.
+//! The DelayedEventJob actor: a finite state machine modelling the
+//! lifecycle of a MatrixRTC cancellable delayed disconnect event for a
+//! single participant in a LiveKit room.
 
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -134,9 +134,7 @@ pub struct JobKey {
     pub identity: LiveKitIdentity,
 }
 
-/// The resolver handed to jobs for looking up the Client-Server API base URL
-/// of a homeserver — the equivalent of the Go implementation's
-/// `lookupCsApiUrl` closure.
+/// Resolves the Client-Server API base URL for a homeserver.
 pub type LookupCsApiUrlFn =
     Arc<dyn Fn(String) -> BoxFuture<'static, Result<CsApiUrl, String>> + Send + Sync>;
 
@@ -221,9 +219,6 @@ impl Classify for LookupError {
 ///     `deps.participant_exists`; if the identity is confirmed absent (SFU
 ///     returned NotFound), sends SfuParticipantGone. Transport errors are
 ///     logged and ignored. Disabled when `sanity_interval` is zero.
-///
-/// Communication is identical to SFU webhooks — signals are sent on the job's
-/// event channel — so no new concurrency primitives are needed.
 pub fn start_participant_lookup(
     job: &Arc<DelayedEventJob>,
     deps: Arc<dyn Deps>,
@@ -255,8 +250,7 @@ pub fn start_participant_lookup(
                 let lk_id = lk_id.clone();
                 let cancel = cancel.clone();
                 async move {
-                    // Race the attempt against job shutdown — the Go
-                    // implementation passes ctx into the SDK call.
+                    // Race the attempt against job shutdown.
                     let outcome = tokio::select! {
                         _ = cancel.cancelled() => return Err(LookupError::Cancelled),
                         r = deps.participant_exists(&lk_auth, &lk_room, &lk_id) => r,
@@ -294,6 +288,7 @@ pub fn start_participant_lookup(
         }
         let mut ticker =
             tokio::time::interval_at(Instant::now() + sanity_interval, sanity_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -331,8 +326,8 @@ pub fn start_participant_lookup(
 // ── DelayedEventJob ──────────────────────────────────────────────────────────
 
 mod duration_ns {
-    //! Serializes Duration as an integer nanosecond count — the JSON shape of
-    //! Go's time.Duration — for store compatibility.
+    //! Serializes Duration as an integer nanosecond count, the JSON shape
+    //! expected by existing stores.
     use super::*;
     use serde::{Deserializer, Serializer};
 
@@ -381,18 +376,13 @@ pub struct JobRestartedRequest {
 ///
 /// # Lifecycle
 ///
-///  1. Created by the handler loop when a new delayed-event request arrives.
-///  2. Caller starts the loop: `job.spawn_loop()`.
-///  3. Events arrive via the event channel (SFU webhooks, internal FSM timers).
-///  4. The loop exits when the job is cancelled (via `close`/`stop` or parent
-///     cancellation).
-///  5. `close` cancels and waits until the loop has returned.
+///  1. `spawn_loop` starts the actor loop.
+///  2. Events arrive via the event channel (SFU webhooks, internal timers).
+///  3. The loop exits when the job is cancelled (`stop`, `close` or parent
+///     cancellation); `close` additionally waits for the exit.
 ///
-/// # Finite State Machine (FSM)
-///
-/// The FSM itself — state diagrams, transition/internal-action tables, timer
-/// FSMs and their coupling — is defined and documented in the FSM section of
-/// this file (see [`fsm_transitions`]).
+/// The FSM — state diagram, transition/internal-action tables, timers — is
+/// documented at [`fsm_transitions`] and the FSM section below.
 pub struct DelayedEventJob {
     // Immutable after construction.
     pub job_id: UniqueId,
@@ -407,22 +397,20 @@ pub struct DelayedEventJob {
 
     pub(crate) cancel: CancellationToken,
 
-    /// Signals the handler loop when the job enters a terminal state
-    /// (Disconnected after ActionSend completes, or Aborted). The job sends
-    /// itself so the handler can verify it is still the active job for this
-    /// (room, identity) before cancelling and cleaning it up.
+    /// Signals a terminal state (Disconnected after ActionSend completed, or
+    /// Aborted). Carries the job itself so stale signals from a replaced job
+    /// can be told apart from the active one.
     done_tx: mpsc::Sender<Arc<DelayedEventJob>>,
 
-    /// Signals the handler loop when the job has restarted its delayed event.
+    /// Signals a successful restart of the delayed event.
     restarted_tx: mpsc::Sender<JobRestartedRequest>,
 
     /// Set to true by the loop when it exits, allowing `close` to wait.
     loop_done_tx: watch::Sender<bool>,
 
-    /// Tracks all background tasks started by or for this job: the
-    /// participant-lookup task, ActionRestart tasks, and the ActionSend task.
-    /// The loop waits for them before returning so that `close` guarantees no
-    /// task still holds a reference to the deps after it returns.
+    /// Tracks all background tasks of this job (participant lookup,
+    /// ActionRestart, ActionSend). The loop drains it before exiting, so
+    /// after `close` no task holds a reference to the deps.
     pub(crate) background: WaitGroup,
 
     /// Carries the new deadline back to the loop (its owner). Sends never
@@ -431,12 +419,10 @@ pub struct DelayedEventJob {
     restart_result_tx: mpsc::Sender<Instant>,
     restart_result_rx: Mutex<Option<mpsc::Receiver<Instant>>>,
 
-    // ── FSM state — mutated only by the loop (and by tests that drive the
-    //    FSM methods directly, matching the Go tests) ────────────────────────
+    // ── FSM state — owned by the loop ─────────────────────────────────────
     state: Mutex<DelayEventState>,
-    /// The absolute time by which ActionSend must complete. Updated by the
-    /// loop on each successful restart (via restart_result). None means
-    /// "never set" (the Go zero time) — treated as already expired.
+    /// The absolute time by which ActionSend must complete. None means
+    /// "never set" and is treated as already expired.
     restart_deadline: Mutex<Option<Instant>>,
 }
 
@@ -533,26 +519,30 @@ impl DelayedEventJob {
 
     /// Starts the actor loop. Must be called exactly once, on a freshly
     /// constructed job — the loop is the single owner of all FSM decisions.
+    /// Panics when called a second time.
     pub fn spawn_loop(self: &Arc<Self>) {
-        let job = self.clone();
-        tokio::spawn(async move { job.run_loop().await });
-    }
-
-    /// The actor loop. Runs until the job is cancelled.
-    async fn run_loop(self: Arc<Self>) {
-        let mut event_rx = self
+        let event_rx = self
             .event_rx
             .lock()
             .unwrap()
             .take()
             .expect("DelayedEventJob loop started twice");
-        let mut restart_result_rx = self
+        let restart_result_rx = self
             .restart_result_rx
             .lock()
             .unwrap()
             .take()
             .expect("DelayedEventJob loop started twice");
+        let job = self.clone();
+        tokio::spawn(async move { job.run_loop(event_rx, restart_result_rx).await });
+    }
 
+    /// The actor loop. Runs until the job is cancelled.
+    async fn run_loop(
+        self: Arc<Self>,
+        mut event_rx: mpsc::Receiver<DelayedEventSignal>,
+        mut restart_result_rx: mpsc::Receiver<Instant>,
+    ) {
         let mut timers = LoopTimers::default();
 
         // Arm the waiting-state guard timer, bounded to at most one hour
@@ -606,10 +596,8 @@ impl DelayedEventJob {
                         continue;
                     }
                     self.set_restart_deadline(new_deadline);
-                    // (Re-)arm the delayed-event timer. In the Go
-                    // implementation the timer object is created lazily on the
-                    // first result and Reset afterwards; cancelling and
-                    // respawning the sleep task is the tokio equivalent.
+                    // (Re-)arm the delayed-event timer by cancelling any
+                    // running sleep task and spawning a fresh one.
                     if let Some(t) = timers.restart.take() {
                         t.cancel();
                     }
@@ -691,9 +679,8 @@ impl DelayedEventJob {
     //   - Exit action (handle_state_exit_action):
     //     runs when a state is left, regardless of transition
     //
-    // Invariant: a (state, event) pair must not appear in both tables: the
-    // internal action would silently shadow the transition. Enforced by
-    // test_fsm_tables_internal_and_transition_disjoint.
+    // Invariant: a (state, event) pair must not appear in both tables — the
+    // internal action would silently shadow the transition.
     //
     // # Main Job Lifecycle
     //
@@ -806,10 +793,9 @@ impl DelayedEventJob {
     // the timer. Late results on the restart_result channel are discarded by
     // the loop's state != Connected guard.
 
-    /// Processes one event completely according to the FSM rules: internal
-    /// actions take precedence (mutually exclusive with transitions per the
-    /// table invariant above); a transition runs the exit action of the state
-    /// being left and the entry action of the state being entered.
+    /// Processes one event: internal actions take precedence; a transition
+    /// runs the exit action of the state being left and the entry action of
+    /// the state being entered.
     async fn handle_event(self: &Arc<Self>, event: DelayedEventSignal, timers: &mut LoopTimers) {
         if self.handle_state_internal_action(event).await {
             return; // input action consumed the event, no state change
@@ -872,11 +858,8 @@ impl DelayedEventJob {
                 }
             }
             DelayEventState::Connected => {
-                // The delayed-event timer belongs to this state. Restore the
-                // "not running" encoding (None) so the loop's restart_result
-                // arm never re-arms a stopped timer; a late ActionRestart
-                // result is additionally discarded there by the
-                // state != Connected guard.
+                // The delayed-event timer belongs to this state; None encodes
+                // "not running".
                 if let Some(t) = timers.restart.take() {
                     t.cancel();
                 }
@@ -928,20 +911,11 @@ impl DelayedEventJob {
                     .min(Duration::from_secs(60 * 60));
 
                 // ActionSend runs in a background task so the loop stays
-                // responsive. It retries with exponential backoff until
-                // `remaining` elapses — this is the core of the delegation: we
-                // keep trying to send the leave event until the original
-                // delayed-event timeout would have fired anyway.
-                //
-                // The handler is notified AFTER ActionSend completes (or times
-                // out) so that the job is NOT cancelled prematurely by handler
-                // teardown. Cancelling the job would abort ActionSend before
-                // the leave event is sent — defeating the purpose of the
-                // delegation.
-                //
-                // Teardown order:
-                //   ActionSend completes → done_tx notified → handler calls
-                //   job.stop() → background wait → loop exits cleanly.
+                // responsive, retrying until `remaining` elapses — the leave
+                // event keeps being attempted until the original delayed-event
+                // timeout would have fired anyway. done_tx is only notified
+                // AFTER ActionSend completes; notifying earlier would let
+                // cleanup cancel the job and abort the send.
                 let guard = self.background.add();
                 let job = self.clone();
                 tokio::spawn(async move {
@@ -985,10 +959,8 @@ impl DelayedEventJob {
                     )
                     .await;
 
-                    // Per execute_delayed_event_action's explicit-success
-                    // contract: Err covers transient (5xx, 429, transport) and
-                    // permanent failures. Ok(404) means MSC-4140 already-sent.
-                    // Ok(200/204) is silent success.
+                    // Ok(404) means MSC4140 already-sent; Ok(200/204) is
+                    // silent success.
                     match &result {
                         Err(RetryError::Error(err)) => {
                             warn!(state = %DelayEventState::Disconnected, event = %event,
@@ -1049,8 +1021,6 @@ impl DelayedEventJob {
     ///     on the event channel
     ///   - any other failure, including an already-exhausted deadline:
     ///     DelayedEventTimedOut on the event channel
-    ///
-    /// See the restart cycle next to the FSM diagram above.
     pub(crate) async fn start_delayed_event_restart(self: &Arc<Self>) {
         let remaining = self
             .restart_deadline()
@@ -1111,11 +1081,9 @@ impl DelayedEventJob {
             )
             .await;
 
-            // Per execute_delayed_event_action's explicit-success contract:
-            // DelayedEventNotFound is the only "soft" failure we treat
-            // specially (the event is gone, not a transient blip). Any other
-            // error falls into the generic timed-out bucket. Ok is the
-            // success path.
+            // DelayedEventNotFound is the only failure treated specially
+            // (the event is gone, not a transient blip); everything else
+            // falls into the generic timed-out bucket.
             let signal = match result {
                 Err(RetryError::Error(err)) if err.is_delayed_event_not_found() => {
                     warn!(room = %job.params.livekit_room, lk_id = %job.params.livekit_identity,
@@ -1137,8 +1105,7 @@ impl DelayedEventJob {
                     let restarted_at = SystemTime::now();
                     let new_deadline = Instant::now() + job.params.delay_timeout;
 
-                    // Report success to the handler loop so that it can update
-                    // the stored job.
+                    // Report success so the stored job gets updated.
                     tokio::select! {
                         _ = job.cancel.cancelled() => return,
                         _ = job.restarted_tx.send(JobRestartedRequest {
@@ -1147,9 +1114,8 @@ impl DelayedEventJob {
                         }) => {}
                     }
 
-                    // Report success to the loop via the restart_result
-                    // channel; the loop will extend the deadline and re-arm
-                    // the restart timer.
+                    // Hand the new deadline to the loop, which extends the
+                    // deadline and re-arms the restart timer.
                     debug!(room = %job.params.livekit_room, lk_id = %job.params.livekit_identity,
                         next_reset_in = ?job.delay_restart_duration(), "Job: ActionRestart ok");
                     tokio::select! {
@@ -1233,9 +1199,7 @@ pub(crate) mod test_support {
             + Sync,
     >;
 
-    /// A [`Deps`] implementation for job tests with swappable behaviours —
-    /// the equivalent of the Go tests' `ExecuteDelayedEventAction = ...` and
-    /// `LiveKitParticipantExists = ...` global swaps.
+    /// A [`Deps`] implementation for job tests with swappable behaviours.
     pub(crate) struct TestJobDeps {
         pub exec: ExecFn,
         pub exists: ExistsFn,
@@ -1245,8 +1209,7 @@ pub(crate) mod test_support {
         fn default() -> Self {
             Self {
                 exec: Box::new(|_, _, _| Ok(200)),
-                // Block until cancelled — mirrors the Go tests' `<-ctx.Done()`
-                // mock (the surrounding select resolves via cancellation).
+                // Pends forever; lookups resolve via cancellation.
                 exists: Box::new(|_, _| Box::pin(std::future::pending())),
             }
         }
@@ -1273,13 +1236,12 @@ pub(crate) mod test_support {
         }
     }
 
-    /// A deps whose exec always returns 200 OK (Go's mockExecOK).
+    /// A deps whose exec always returns 200 OK.
     pub(crate) fn mock_exec_ok() -> Arc<TestJobDeps> {
         Arc::new(TestJobDeps::default())
     }
 
-    /// Resolves the CS-API URL only for the given server name (Go's
-    /// lookUpCsApiUrlFromOverrideOnly).
+    /// Resolves the CS-API URL only for the given server name.
     pub(crate) fn lookup_cs_api_url_from_override_only(
         server_name_override: &str,
         url_override: &str,
@@ -1330,9 +1292,7 @@ mod tests {
         };
         let (done_tx, _done_rx) = mpsc::channel(20);
         let (restarted_tx, _restarted_rx) = mpsc::channel(20);
-        // The receivers are dropped, matching the Go tests' unread buffered
-        // channels — sends into a closed tokio channel resolve immediately
-        // with an error, which the job ignores.
+        // Leak the receivers so the channels stay open but unread.
         std::mem::forget(_done_rx);
         std::mem::forget(_restarted_rx);
         DelayedEventJob::new(
@@ -1975,6 +1935,15 @@ mod tests {
         )
         .await;
         job.close().await.expect("close");
+    }
+
+    /// Starting the loop twice is a programming error and panics.
+    #[tokio::test]
+    #[should_panic(expected = "loop started twice")]
+    async fn test_delayed_event_job_spawn_loop_twice_panics() {
+        let job = new_test_job(mock_exec_ok(), Duration::from_secs(10));
+        job.spawn_loop();
+        job.spawn_loop();
     }
 
     // ── Display impls ─────────────────────────────────────────────────────────

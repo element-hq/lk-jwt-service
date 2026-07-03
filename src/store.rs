@@ -3,10 +3,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-// store.rs: the job persistence layer. Jobs are serialized to JSON in the
-// same shape as the Go implementation (Params + RestartedAt, with the delay
-// timeout as integer nanoseconds), so a Redis store written by either
-// implementation can be read by the other.
+//! The job persistence layer.
+//!
+//! Jobs are serialized to JSON in the same shape as the original Go
+//! implementation (`Params` + `RestartedAt`, with the delay timeout as
+//! integer nanoseconds), so an existing Redis store keeps working across
+//! the migration.
 
 use std::sync::Arc;
 
@@ -46,7 +48,8 @@ pub trait Store: Send + Sync {
 
 /// A store backend using an external Redis instance.
 pub struct RedisStore {
-    conn: redis::aio::MultiplexedConnection,
+    // ConnectionManager reconnects automatically after connection loss.
+    conn: redis::aio::ConnectionManager,
 }
 
 pub(crate) const REDIS_JOBS_HASH_KEY: &str = "lk-jwt:jobs";
@@ -55,7 +58,7 @@ pub async fn new_redis_store(redis_url: &str) -> Result<Arc<dyn Store>, String> 
     let client = redis::Client::open(redis_url)
         .map_err(|e| format!("store: invalid Redis URL {redis_url:?}: {e}"))?;
     let mut conn = client
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .map_err(|e| format!("store: Redis connection failed: {e}"))?;
     redis::cmd("PING")
@@ -69,7 +72,7 @@ pub async fn new_redis_store(redis_url: &str) -> Result<Arc<dyn Store>, String> 
 
 impl RedisStore {
     #[cfg(test)]
-    pub(crate) fn with_connection(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub(crate) fn with_connection(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 
@@ -493,9 +496,9 @@ mod tests {
 
     async fn new_mini_redis_store(
         mini: &MiniRedis,
-    ) -> (Arc<dyn Store>, redis::aio::MultiplexedConnection) {
+    ) -> (Arc<dyn Store>, redis::aio::ConnectionManager) {
         let client = redis::Client::open(format!("redis://{}", mini.addr)).unwrap();
-        let conn = client.get_multiplexed_async_connection().await.unwrap();
+        let conn = client.get_connection_manager().await.unwrap();
         (Arc::new(RedisStore::with_connection(conn.clone())), conn)
     }
 
