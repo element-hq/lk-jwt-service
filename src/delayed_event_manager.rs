@@ -704,7 +704,7 @@ impl DelayedEventJob {
     //	│ WaitingForInitialConnect   │      │ Connected                       │
     //	│                            │      │                                 │
     //	│ On Entry: (none)           │      │ On Entry:                       │
-    //	│ On Exit:                   │      │ • Emit: DelayedEventReset       │
+    //	│ On Exit:                   │      │ • Execute ActionRestart         │
     //	│ • Stop waiting timer       │      │                                 │
     //	└────────────────────────────┘      │ On Internal:                    │
     //	  |   |                             │ • DelayedEventReset:            │
@@ -770,12 +770,9 @@ impl DelayedEventJob {
     // # The restart cycle
     //
     //	Connected: On Entry
-    //	    │  Emit DelayedEventReset
-    //	    ▼
-    //	event channel <- DelayedEventReset
     //	    │
     //	    ▼
-    //	Connected: On internal (DelayedEventReset): start_delayed_event_restart
+    //	start_delayed_event_restart
     //	    │  Emit new deadline
     //	    ▼
     //	restart_result <- new deadline               (success only)
@@ -785,7 +782,11 @@ impl DelayedEventJob {
     //	    │
     //	    │  (timer fires after 80 % of the delay timeout)
     //	    ▼
-    //	event channel <- DelayedEventReset           (cycle repeats)
+    //	event channel <- DelayedEventReset
+    //	    │
+    //	    ▼
+    //	Connected: On internal (DelayedEventReset): start_delayed_event_restart
+    //	                                             (cycle repeats)
     //
     // The cycle ends when ActionRestart fails terminally: CsApiUrlNotFound,
     // DelayedEventTimedOut or DelayedEventNotFound is emitted instead of a
@@ -880,16 +881,14 @@ impl DelayedEventJob {
                 // must complete; the full delay timeout is available until the
                 // first successful restart extends it (via restart_result).
                 self.set_restart_deadline(Instant::now() + self.params.delay_timeout);
-                // Trigger the first reset right away so the homeserver timer
+                // Trigger the first restart right away so the homeserver timer
                 // is synced immediately — we don't know how long elapsed
                 // between submitting the delayed event to the homeserver and
-                // handing over the delegation to this service. The
-                // delayed-event timer itself is created lazily by the loop
-                // once the first ActionRestart result arrives.
-                tokio::select! {
-                    _ = self.cancel.cancelled() => {}
-                    _ = self.event_tx.send(DelayedEventSignal::DelayedEventReset) => {}
-                }
+                // handing over the delegation to this service. Invoked
+                // directly rather than round-tripping a DelayedEventReset
+                // through the event channel: a send into the loop's own
+                // channel would deadlock when the channel is full.
+                self.start_delayed_event_restart().await;
             }
 
             DelayEventState::Disconnected => {
@@ -994,12 +993,17 @@ impl DelayedEventJob {
 
             DelayEventState::Aborted => {
                 // Timers are stopped by the exit actions of the states that
-                // own them. Notify the handler immediately (same pattern as
-                // Disconnected).
-                tokio::select! {
-                    _ = self.cancel.cancelled() => {}
-                    _ = self.done_tx.send(self.clone()) => {}
-                }
+                // own them. The done notification runs in a background task
+                // so the loop cannot block on a full done channel.
+                let guard = self.background.add();
+                let job = self.clone();
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    tokio::select! {
+                        _ = job.cancel.cancelled() => {}
+                        _ = job.done_tx.send(job.clone()) => {}
+                    }
+                });
             }
 
             _ => {}
@@ -1030,10 +1034,17 @@ impl DelayedEventJob {
             info!(room = %self.params.livekit_room, lk_id = %self.params.livekit_identity,
                 delay_id = %self.params.delay_id, job_id = %self.job_id,
                 "Job: ActionRestart deadline exhausted — emitting DelayedEventTimedOut");
-            tokio::select! {
-                _ = self.cancel.cancelled() => {}
-                _ = self.event_tx.send(DelayedEventSignal::DelayedEventTimedOut) => {}
-            }
+            // Emitted from a background task: a send into the loop's own
+            // channel would deadlock when the channel is full.
+            let guard = self.background.add();
+            let job = self.clone();
+            tokio::spawn(async move {
+                let _guard = guard;
+                tokio::select! {
+                    _ = job.cancel.cancelled() => {}
+                    _ = job.event_tx.send(DelayedEventSignal::DelayedEventTimedOut) => {}
+                }
+            });
             return;
         }
 
@@ -1935,6 +1946,46 @@ mod tests {
         )
         .await;
         job.close().await.expect("close");
+    }
+
+    /// A completely full event channel at the moment of the Connected
+    /// transition must not wedge the job: the restart still executes and the
+    /// job still closes cleanly.
+    #[tokio::test]
+    async fn test_delayed_event_job_connect_with_saturated_event_channel() {
+        let (restart_tx, mut restart_rx) = mpsc::channel::<()>(1);
+        let deps = Arc::new(TestJobDeps {
+            exec: Box::new(move |_, _, action| {
+                if action == DelayEventAction::Restart {
+                    let _ = restart_tx.try_send(());
+                }
+                Ok(200)
+            }),
+            ..TestJobDeps::default()
+        });
+        let job = new_test_job(deps, Duration::from_secs(10));
+
+        // Fill the channel to capacity: the connect plus no-op padding.
+        job.event_tx
+            .try_send(DelayedEventSignal::ParticipantConnected)
+            .unwrap();
+        for _ in 1..job.event_tx.max_capacity() {
+            job.event_tx
+                .try_send(DelayedEventSignal::SfuNotAvailable)
+                .unwrap();
+        }
+        assert!(job
+            .event_tx
+            .try_send(DelayedEventSignal::SfuNotAvailable)
+            .is_err());
+
+        job.spawn_loop();
+
+        tokio::time::timeout(Duration::from_secs(3), restart_rx.recv())
+            .await
+            .expect("timed out waiting for ActionRestart despite saturated channel");
+        job.close().await.expect("close");
+        assert_eq!(job.state(), DelayEventState::Connected);
     }
 
     /// Starting the loop twice is a programming error and panics.

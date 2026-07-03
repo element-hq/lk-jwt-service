@@ -114,41 +114,62 @@ pub fn new_unique_id() -> UniqueId {
     UniqueId(data_encoding::BASE32HEX_NOPAD.encode(&b))
 }
 
-// ── CS-API URL cache ─────────────────────────────────────────────────────────
+// ── TTL cache ────────────────────────────────────────────────────────────────
 
-struct CsApiUrlCacheEntry {
-    url: CsApiUrl,
-    expires_at: Instant,
+/// A TTL cache keyed by server name, optionally bounded in size.
+pub struct TtlCache<V> {
+    entries: RwLock<HashMap<String, (V, Instant)>>,
+    max_entries: Option<usize>,
 }
 
 /// A TTL cache for resolved Client-Server API URLs.
-#[derive(Default)]
-pub struct CsApiUrlCache {
-    entries: RwLock<HashMap<String, CsApiUrlCacheEntry>>,
+pub type CsApiUrlCache = TtlCache<CsApiUrl>;
+
+impl<V> Default for TtlCache<V> {
+    fn default() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            max_entries: None,
+        }
+    }
 }
 
-impl CsApiUrlCache {
+impl<V: Clone> TtlCache<V> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn get(&self, server_name: &str) -> Option<CsApiUrl> {
+    /// A cache that holds at most `max_entries` live entries. Inserts beyond
+    /// the bound first purge expired entries and are dropped when the cache
+    /// is still full.
+    pub fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            max_entries: Some(max_entries),
+        }
+    }
+
+    pub fn get(&self, server_name: &str) -> Option<V> {
         let entries = self.entries.read().unwrap();
         match entries.get(server_name) {
             // Expired entries are not evicted; a re-resolve overwrites them.
-            Some(entry) if Instant::now() <= entry.expires_at => Some(entry.url.clone()),
+            Some((value, expires_at)) if Instant::now() <= *expires_at => Some(value.clone()),
             _ => None,
         }
     }
 
-    pub fn set(&self, server_name: &str, url: CsApiUrl, ttl: Duration) {
-        self.entries.write().unwrap().insert(
-            server_name.to_owned(),
-            CsApiUrlCacheEntry {
-                url,
-                expires_at: Instant::now() + ttl,
-            },
-        );
+    pub fn set(&self, server_name: &str, value: V, ttl: Duration) {
+        let now = Instant::now();
+        let mut entries = self.entries.write().unwrap();
+        if let Some(max) = self.max_entries {
+            if entries.len() >= max && !entries.contains_key(server_name) {
+                entries.retain(|_, (_, expires_at)| now <= *expires_at);
+                if entries.len() >= max {
+                    return;
+                }
+            }
+        }
+        entries.insert(server_name.to_owned(), (value, now + ttl));
     }
 }
 
@@ -782,12 +803,34 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// How long resolved federation base URLs are cached.
+const FEDERATION_BASE_URL_TTL: Duration = Duration::from_secs(60 * 60);
+
 /// Resolves the federation base URL for a Matrix server name: an explicit
 /// port is used verbatim; otherwise .well-known/matrix/server delegation is
-/// attempted, falling back to the default federation port 8448.
+/// attempted, falling back to the default federation port 8448. Resolved
+/// URLs are cached, so token verification does not pay an extra well-known
+/// round trip per request.
 async fn resolve_federation_base_url(server_name: &str, skip_verify_tls: bool) -> String {
+    // Bounded because server names arrive in unauthenticated requests.
+    static CACHE: std::sync::LazyLock<TtlCache<String>> =
+        std::sync::LazyLock::new(|| TtlCache::with_max_entries(10_000));
+    let well_known_url = format!("https://{server_name}/.well-known/matrix/server");
+    resolve_federation_base_url_with(server_name, skip_verify_tls, &CACHE, &well_known_url).await
+}
+
+async fn resolve_federation_base_url_with(
+    server_name: &str,
+    skip_verify_tls: bool,
+    cache: &TtlCache<String>,
+    well_known_url: &str,
+) -> String {
     if has_explicit_port(server_name) {
         return format!("https://{server_name}");
+    }
+
+    if let Some(base) = cache.get(server_name) {
+        return base;
     }
 
     #[derive(Deserialize)]
@@ -796,30 +839,35 @@ async fn resolve_federation_base_url(server_name: &str, skip_verify_tls: bool) -
         server: String,
     }
 
+    let fallback = format!("https://{server_name}:8448");
+    let resp = match http_client(skip_verify_tls)
+        .get(well_known_url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
     {
-        let url = format!("https://{server_name}/.well-known/matrix/server");
-        if let Ok(resp) = http_client(skip_verify_tls)
-            .get(&url)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-        {
-            if resp.status().is_success() {
-                if let Ok(parsed) = resp.json::<WellKnownServer>().await {
-                    if !parsed.server.is_empty() {
-                        let delegated = if has_explicit_port(&parsed.server) {
-                            parsed.server
-                        } else {
-                            format!("{}:8448", parsed.server)
-                        };
-                        return format!("https://{delegated}");
-                    }
-                }
+        Ok(resp) => resp,
+        // Transport errors are not cached — the next request retries.
+        Err(_) => return fallback,
+    };
+
+    let mut base = fallback;
+    if resp.status().is_success() {
+        if let Ok(parsed) = resp.json::<WellKnownServer>().await {
+            if !parsed.server.is_empty() {
+                let delegated = if has_explicit_port(&parsed.server) {
+                    parsed.server
+                } else {
+                    format!("{}:8448", parsed.server)
+                };
+                base = format!("https://{delegated}");
             }
         }
     }
-
-    format!("https://{server_name}:8448")
+    // The server answered definitively (delegation or no well-known record),
+    // so the result is cacheable.
+    cache.set(server_name, base.clone(), FEDERATION_BASE_URL_TTL);
+    base
 }
 
 /// Reports whether a Matrix server name carries an explicit port
@@ -1080,6 +1128,134 @@ mod tests {
         let id = livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
         assert!(!id.0.is_empty(), "identity is empty");
         assert!(!id.0.contains('='), "identity contains padding '=': {id}");
+    }
+
+    // ── TtlCache ──────────────────────────────────────────────────────────────
+
+    /// A bounded cache purges expired entries before dropping inserts.
+    #[test]
+    fn test_ttl_cache_max_entries() {
+        let cache: TtlCache<String> = TtlCache::with_max_entries(2);
+        cache.set("a", "1".into(), Duration::from_secs(60));
+        cache.set("b", "2".into(), Duration::from_secs(60));
+
+        // At the bound: a new key is dropped, an existing key still updates.
+        cache.set("c", "3".into(), Duration::from_secs(60));
+        assert_eq!(
+            cache.get("c"),
+            None,
+            "insert beyond the bound must be dropped"
+        );
+        cache.set("a", "1b".into(), Duration::from_secs(60));
+        assert_eq!(cache.get("a"), Some("1b".into()));
+
+        // Expired entries make room.
+        cache.set("a", "1c".into(), Duration::ZERO);
+        cache.set("b", "2c".into(), Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(10));
+        cache.set("c", "3".into(), Duration::from_secs(60));
+        assert_eq!(cache.get("c"), Some("3".into()));
+    }
+
+    // ── resolve_federation_base_url ───────────────────────────────────────────
+
+    async fn spawn_counting_well_known_server(
+        response_status: http::StatusCode,
+        response_body: &'static str,
+    ) -> (TestHttpServer, Arc<AtomicU32>) {
+        let hits = Arc::new(AtomicU32::new(0));
+        let hits_clone = hits.clone();
+        let router = Router::new().route(
+            "/{*path}",
+            any(move || {
+                let hits = hits_clone.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (response_status, response_body)
+                }
+            }),
+        );
+        let server = spawn_http_server(router).await;
+        (server, hits)
+    }
+
+    /// A well-known delegation is followed and cached: the second resolution
+    /// does not fetch again.
+    #[tokio::test]
+    async fn test_resolve_federation_base_url_caches_delegation() {
+        let (server, hits) = spawn_counting_well_known_server(
+            http::StatusCode::OK,
+            r#"{"m.server": "fed.example.com:1234"}"#,
+        )
+        .await;
+        let cache: TtlCache<String> = TtlCache::new();
+        let well_known_url = format!("{}/.well-known/matrix/server", server.url);
+
+        for _ in 0..2 {
+            let base =
+                resolve_federation_base_url_with("example.com", false, &cache, &well_known_url)
+                    .await;
+            assert_eq!(base, "https://fed.example.com:1234");
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "expected the resolution to be cached"
+        );
+    }
+
+    /// A definitive "no well-known record" answer resolves to port 8448 and
+    /// is cached too.
+    #[tokio::test]
+    async fn test_resolve_federation_base_url_caches_fallback() {
+        let (server, hits) =
+            spawn_counting_well_known_server(http::StatusCode::NOT_FOUND, "").await;
+        let cache: TtlCache<String> = TtlCache::new();
+        let well_known_url = format!("{}/.well-known/matrix/server", server.url);
+
+        for _ in 0..2 {
+            let base =
+                resolve_federation_base_url_with("example.com", false, &cache, &well_known_url)
+                    .await;
+            assert_eq!(base, "https://example.com:8448");
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "expected the fallback to be cached"
+        );
+    }
+
+    /// Transport errors are not cached; the next resolution retries.
+    #[tokio::test]
+    async fn test_resolve_federation_base_url_transport_error_not_cached() {
+        let (server, _hits) = spawn_counting_well_known_server(http::StatusCode::OK, "{}").await;
+        let well_known_url = format!("{}/.well-known/matrix/server", server.url);
+        drop(server); // provoke connection errors
+
+        let cache: TtlCache<String> = TtlCache::new();
+        let base =
+            resolve_federation_base_url_with("example.com", false, &cache, &well_known_url).await;
+        assert_eq!(base, "https://example.com:8448");
+        assert_eq!(
+            cache.get("example.com"),
+            None,
+            "transport errors must not be cached"
+        );
+    }
+
+    /// An explicit port bypasses well-known resolution and the cache.
+    #[tokio::test]
+    async fn test_resolve_federation_base_url_explicit_port() {
+        let cache: TtlCache<String> = TtlCache::new();
+        let base = resolve_federation_base_url_with(
+            "example.com:8449",
+            false,
+            &cache,
+            "http://127.0.0.1:1/.well-known/matrix/server",
+        )
+        .await;
+        assert_eq!(base, "https://example.com:8449");
     }
 
     // ── execute_delayed_event_action ──────────────────────────────────────────

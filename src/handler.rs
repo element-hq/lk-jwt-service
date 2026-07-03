@@ -84,6 +84,19 @@ pub(crate) struct LoopReceivers {
     job_restarted_rx: mpsc::Receiver<JobRestartedRequest>,
 }
 
+/// A persistence operation queued for the store-writer task.
+enum StoreOp {
+    Save {
+        key: JobKey,
+        job: StoredJob,
+        context: &'static str,
+    },
+    Delete {
+        key: JobKey,
+        context: &'static str,
+    },
+}
+
 /// The error side of add_delayed_event_job.
 #[derive(Debug)]
 pub(crate) enum AddJobError {
@@ -112,7 +125,7 @@ pub struct Handler {
     /// The period between room-worker sanity checks. Zero disables the sanity
     /// check.
     sanity_check_interval: Duration,
-    cs_api_url_overrides: HashMap<String, CsApiUrl>,
+    cs_api_url_overrides: Arc<HashMap<String, CsApiUrl>>,
     cs_api_url_cache: Arc<CsApiUrlCache>,
     store: Option<Arc<dyn Store>>,
     deps: Arc<dyn Deps>,
@@ -175,7 +188,7 @@ impl Handler {
             skip_verify_tls,
             full_access_homeservers,
             sanity_check_interval,
-            cs_api_url_overrides,
+            cs_api_url_overrides: Arc::new(cs_api_url_overrides),
             cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
             store,
             deps,
@@ -241,8 +254,45 @@ impl Handler {
 
     /// The actor task owning the jobs map. Runs until the handler is
     /// cancelled, then joins all job tasks and flips loop_done.
+    ///
+    /// Store writes are handed to a dedicated writer task so a slow store
+    /// cannot stall event routing; the single writer preserves the order the
+    /// loop decided on.
     async fn run_loop(self: Arc<Self>, mut rx: LoopReceivers) {
         let mut jobs: HashMap<JobKey, Arc<DelayedEventJob>> = HashMap::new();
+
+        let (store_tx, store_writer) = match &self.store {
+            Some(store) => {
+                let store = store.clone();
+                let (tx, mut op_rx) = mpsc::channel::<StoreOp>(256);
+                let writer = tokio::spawn(async move {
+                    while let Some(op) = op_rx.recv().await {
+                        let (result, key, context) = match op {
+                            StoreOp::Save { key, job, context } => {
+                                (store.save_job(&key, &job).await, key, context)
+                            }
+                            StoreOp::Delete { key, context } => {
+                                (store.delete_job(&key).await, key, context)
+                            }
+                        };
+                        if let Err(err) = result {
+                            error!(key = ?key, err = %err, "Handler: failed to {context}");
+                        }
+                    }
+                });
+                (Some(tx), Some(writer))
+            }
+            None => (None, None),
+        };
+        // Enqueues block only when the writer is 256 operations behind,
+        // providing backpressure instead of unbounded queueing.
+        let enqueue_store_op = |op: StoreOp| async {
+            if let Some(tx) = &store_tx {
+                if tx.send(op).await.is_err() {
+                    error!("Handler: store writer is gone, dropping store operation");
+                }
+            }
+        };
 
         // Load any existing jobs from the store.
         if let Some(store) = &self.store {
@@ -368,12 +418,15 @@ impl Handler {
                     // Save the job in the store. We assume the delayed event
                     // was restarted just before the request came in because
                     // that is our best guess.
-                    if let Some(store) = &self.store {
+                    if self.store.is_some() {
                         let stored_job =
                             StoredJob { params: req.params.clone(), restarted_at: Utc::now() };
-                        if let Err(err) = store.save_job(&key, &stored_job).await {
-                            error!(key = ?key, err = %err, "Handler: failed to store job");
-                        }
+                        enqueue_store_op(StoreOp::Save {
+                            key: key.clone(),
+                            job: stored_job,
+                            context: "store job",
+                        })
+                        .await;
                     }
 
                     // Pull-based lookup, in addition to SFU webhooks. Phase 1
@@ -436,11 +489,12 @@ impl Handler {
                         "Handler: job done, cleaning up");
                     jobs.remove(&key);
 
-                    if let Some(store) = &self.store {
-                        if let Err(err) = store.delete_job(&key).await {
-                            error!(key = ?key, err = %err,
-                                "Handler: failed to delete persisted job");
-                        }
+                    if self.store.is_some() {
+                        enqueue_store_op(StoreOp::Delete {
+                            key: key.clone(),
+                            context: "delete persisted job",
+                        })
+                        .await;
                     }
 
                     done_job.stop();
@@ -461,17 +515,26 @@ impl Handler {
                         continue;
                     }
 
-                    if let Some(store) = &self.store {
+                    if self.store.is_some() {
                         let stored_job = StoredJob {
                             params: req.job.params.clone(),
                             restarted_at: req.restarted_at.into(),
                         };
-                        if let Err(err) = store.save_job(&key, &stored_job).await {
-                            error!(key = ?key, err = %err, "Handler: failed to update stored job");
-                        }
+                        enqueue_store_op(StoreOp::Save {
+                            key: key.clone(),
+                            job: stored_job,
+                            context: "update stored job",
+                        })
+                        .await;
                     }
                 }
             }
+        }
+
+        // Let the writer drain its queue before signalling completion.
+        drop(store_tx);
+        if let Some(writer) = store_writer {
+            let _ = writer.await;
         }
 
         self.loop_done_tx.send_replace(true);

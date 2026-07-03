@@ -215,6 +215,34 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A store whose saves block until the gate receives permits.
+    pub(crate) struct GatedStore {
+        inner: Arc<dyn Store>,
+        gate: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl GatedStore {
+        pub(crate) fn new(inner: Arc<dyn Store>, gate: Arc<tokio::sync::Semaphore>) -> Self {
+            Self { inner, gate }
+        }
+    }
+
+    #[async_trait]
+    impl Store for GatedStore {
+        async fn save_job(&self, key: &JobKey, job: &StoredJob) -> Result<(), String> {
+            self.gate.acquire().await.expect("gate closed").forget();
+            self.inner.save_job(key, job).await
+        }
+
+        async fn delete_job(&self, key: &JobKey) -> Result<(), String> {
+            self.inner.delete_job(key).await
+        }
+
+        async fn all_jobs(&self) -> Result<Vec<StoredJob>, String> {
+            self.inner.all_jobs().await
+        }
+    }
+
     /// A store that fails on any operation.
     pub(crate) struct FailingStore;
 

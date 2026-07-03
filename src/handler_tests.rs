@@ -20,7 +20,9 @@ use super::*;
 use crate::delayed_event_manager::DelayEventAction;
 use crate::helper::{resolve_cs_api_url_via, ActionError, RoomServiceClient, UserInfo};
 use crate::requests::MatrixRtcMemberType;
-use crate::store::test_support::{new_in_memory_store, new_notifying_store, FailingStore};
+use crate::store::test_support::{
+    new_in_memory_store, new_notifying_store, FailingStore, GatedStore,
+};
 
 // ── test deps ─────────────────────────────────────────────────────────────────
 
@@ -1033,6 +1035,167 @@ async fn test_handler_loop_job_replacement_no_deadlock() {
     tokio::time::timeout(Duration::from_secs(5), handler.close())
         .await
         .expect("handler.close() deadlocked after job replacement");
+}
+
+/// A slow store must not block the actor loop: adding a job returns before
+/// the store write lands, events keep routing, and the job completes while
+/// the write is still pending. The write and the delete land afterwards, in
+/// order.
+#[tokio::test]
+async fn test_handler_slow_store_does_not_block_event_routing() {
+    let (notifying, mut saved_rx, mut deleted_rx) = new_notifying_store();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let store: Arc<dyn Store> = Arc::new(GatedStore::new(notifying, gate.clone()));
+
+    let (exec_tx, mut exec_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let deps = HandlerTestDeps {
+        exists: exists_block_until_cancelled(),
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix-client.example.com".into()))
+        })),
+        exec: Some(Box::new(move |_, _, _| {
+            let _ = exec_tx.try_send(());
+            Ok(200)
+        })),
+        ..Default::default()
+    };
+    let handler = new_handler_with(deps, &["example.com"], Some(store));
+
+    let room = LiveKitRoomAlias("slow-store-room".into());
+    let identity = LiveKitIdentity("@user:example.com".into());
+    let key = JobKey {
+        room: room.clone(),
+        identity: identity.clone(),
+    };
+
+    // The store write is gated, but adding the job must return promptly.
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        handler.add_delayed_event_job(DelayedEventJobParams {
+            server_name: "example.com".into(),
+            delay_id: "slow-store-id".into(),
+            delay_timeout: Duration::from_secs(10),
+            livekit_room: room.clone(),
+            livekit_identity: identity.clone(),
+        }),
+    )
+    .await
+    .expect("add_delayed_event_job must not wait for the store")
+    .expect("add_delayed_event_job");
+
+    // Events keep routing and the job completes while the write is pending.
+    handler
+        .sfu_event_tx
+        .send(SfuEventRequest {
+            room_alias: room.clone(),
+            msg: SfuMessage {
+                signal: DelayedEventSignal::ParticipantConnected,
+                livekit_identity: identity.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    handler
+        .sfu_event_tx
+        .send(SfuEventRequest {
+            room_alias: room.clone(),
+            msg: SfuMessage {
+                signal: DelayedEventSignal::ParticipantDisconnectedIntentionally,
+                livekit_identity: identity.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), exec_rx.recv())
+        .await
+        .expect("timed out waiting for the delayed event action");
+    assert!(
+        saved_rx.try_recv().is_err(),
+        "the gated save must not have landed yet"
+    );
+
+    // Release the store: the save and the delete land in order.
+    gate.add_permits(10);
+    match tokio::time::timeout(Duration::from_secs(3), saved_rx.recv()).await {
+        Ok(Some(actual_key)) => assert_eq!(actual_key, key, "unexpected save key"),
+        _ => panic!("timed out waiting for the save to land"),
+    }
+    match tokio::time::timeout(Duration::from_secs(3), deleted_rx.recv()).await {
+        Ok(Some(actual_key)) => assert_eq!(actual_key, key, "unexpected delete key"),
+        _ => panic!("timed out waiting for the delete to land"),
+    }
+    handler.close().await;
+}
+
+/// Many jobs complete concurrently under duplicate-event load: all lifecycle
+/// signals route through the loop and every job's persisted entry is deleted.
+#[tokio::test]
+async fn test_handler_many_jobs_complete_under_event_load() {
+    const JOBS: usize = 50;
+
+    let (store, saved_rx, mut deleted_rx) = new_notifying_store();
+    drop(saved_rx); // saves are not observed here
+
+    let deps = HandlerTestDeps {
+        exists: exists_block_until_cancelled(),
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix-client.example.com".into()))
+        })),
+        exec: exec_ok(),
+        ..Default::default()
+    };
+    let handler = new_handler_with(deps, &["example.com"], Some(store));
+
+    let identity = LiveKitIdentity("@user:example.com".into());
+    for i in 0..JOBS {
+        handler
+            .add_delayed_event_job(DelayedEventJobParams {
+                server_name: "example.com".into(),
+                delay_id: format!("load-{i}"),
+                delay_timeout: Duration::from_secs(10),
+                livekit_room: LiveKitRoomAlias(format!("load-room-{i}")),
+                livekit_identity: identity.clone(),
+            })
+            .await
+            .expect("add_delayed_event_job");
+    }
+
+    // Connect (with a duplicate) and disconnect every participant.
+    for signal in [
+        DelayedEventSignal::ParticipantConnected,
+        DelayedEventSignal::ParticipantConnected,
+        DelayedEventSignal::ParticipantDisconnectedIntentionally,
+    ] {
+        for i in 0..JOBS {
+            handler
+                .sfu_event_tx
+                .send(SfuEventRequest {
+                    room_alias: LiveKitRoomAlias(format!("load-room-{i}")),
+                    msg: SfuMessage {
+                        signal,
+                        livekit_identity: identity.clone(),
+                    },
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    // Every job must finish and have its stored entry deleted.
+    let mut deleted = std::collections::HashSet::new();
+    while deleted.len() < JOBS {
+        match tokio::time::timeout(Duration::from_secs(10), deleted_rx.recv()).await {
+            Ok(Some(key)) => {
+                deleted.insert(key.room.0.clone());
+            }
+            _ => panic!(
+                "timed out: only {}/{JOBS} jobs were cleaned up",
+                deleted.len()
+            ),
+        }
+    }
+    handler.close().await;
 }
 
 // ── store recovery ────────────────────────────────────────────────────────────
