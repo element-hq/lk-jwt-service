@@ -39,11 +39,11 @@ struct HsState {
 
     /// The recorded /openid/userinfo requests.
     user_info_requests: Vec<UserInfoRequest>,
-    
+
     /// The HTTP status to return on /delayed_events requests.
     /// None results in 200 OK.
     delayed_event_status: Option<u16>,
-    
+
     /// The recorded /delayed_events requests.
     delayed_event_requests: Vec<DelayedEventRequest>,
 }
@@ -75,7 +75,10 @@ impl FakeHomeserver {
             TcpListener::bind("127.0.0.1:0").expect("failed to bind federation listener");
         let server_name = federation_listener.local_addr().unwrap().to_string();
         let federation_app = Router::new()
-            .route("/_matrix/federation/v1/openid/userinfo", get(handle_user_info))
+            .route(
+                "/_matrix/federation/v1/openid/userinfo",
+                get(handle_user_info),
+            )
             .with_state(Arc::clone(&state));
         tokio::spawn(
             axum_server::from_tcp_rustls(federation_listener, tls_config)
@@ -88,7 +91,10 @@ impl FakeHomeserver {
             .expect("failed to bind CS API listener");
         let cs_api_url = format!("http://{}", cs_api_listener.local_addr().unwrap());
         let cs_api_app = Router::new()
-            .route("/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}/{action}", post(handle_delayed_event))
+            .route(
+                "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}/{action}",
+                post(handle_delayed_event),
+            )
             .with_state(Arc::clone(&state));
         tokio::spawn(axum::serve(cs_api_listener, cs_api_app).into_future());
 
@@ -181,7 +187,7 @@ async fn handle_delayed_event(
     state
         .delayed_event_requests
         .push(DelayedEventRequest { delay_id, action });
-    
+
     // Respond with the configured HTTP status.
     let status = state.delayed_event_status.unwrap_or(200);
     (
