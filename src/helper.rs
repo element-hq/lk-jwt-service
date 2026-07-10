@@ -52,6 +52,20 @@ fn http_client(skip_verify_tls: bool) -> &'static reqwest::Client {
     })
 }
 
+/// Formats an error together with its source chain ("a: b: c"). The Display
+/// of reqwest errors alone hides the underlying cause (e.g. the TLS failure
+/// behind a connect error).
+fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    msg
+}
+
 // ── newtypes ─────────────────────────────────────────────────────────────────
 
 macro_rules! string_newtype {
@@ -274,14 +288,18 @@ struct LiveKitRoomServiceClient {
     host: String,
     api_key: String,
     api_secret: String,
+    /// Whether to skip TLS certificate verification
+    /// (LIVEKIT_INSECURE_SKIP_VERIFY_TLS).
+    skip_verify_tls: bool,
 }
 
 impl LiveKitRoomServiceClient {
-    fn new(url: &str, api_key: &str, api_secret: &str) -> Self {
+    fn new(url: &str, api_key: &str, api_secret: &str, skip_verify_tls: bool) -> Self {
         Self {
             host: to_http_url(url),
             api_key: api_key.to_owned(),
             api_secret: api_secret.to_owned(),
+            skip_verify_tls,
         }
     }
 
@@ -303,14 +321,19 @@ impl LiveKitRoomServiceClient {
                 .to_jwt()
                 .map_err(|e| RoomServiceError::Other(e.to_string()))?;
 
-        let resp = http_client(false)
+        let resp = http_client(self.skip_verify_tls)
             .post(&url)
             .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
             .header(http::header::CONTENT_TYPE, "application/protobuf")
             .body(request.encode_to_vec())
             .send()
             .await
-            .map_err(|e| RoomServiceError::Other(format!("failed to execute the request: {e}")))?;
+            .map_err(|e| {
+                RoomServiceError::Other(format!(
+                    "failed to execute the request: {}",
+                    error_chain(&e)
+                ))
+            })?;
 
         if resp.status() == http::StatusCode::OK {
             let bytes = resp
@@ -443,6 +466,13 @@ struct LimitExceededBody {
 /// method implementations; tests override individual methods.
 #[async_trait]
 pub trait Deps: Send + Sync {
+    /// Whether outbound TLS connections skip certificate verification
+    /// (LIVEKIT_INSECURE_SKIP_VERIFY_TLS). Honored by every HTTPS client the
+    /// service creates.
+    fn skip_verify_tls(&self) -> bool {
+        false
+    }
+
     /// Constructs a LiveKit room service client.
     fn new_room_service_client(
         &self,
@@ -450,7 +480,12 @@ pub trait Deps: Send + Sync {
         key: &str,
         secret: &str,
     ) -> Arc<dyn RoomServiceClient> {
-        Arc::new(LiveKitRoomServiceClient::new(url, key, secret))
+        Arc::new(LiveKitRoomServiceClient::new(
+            url,
+            key,
+            secret,
+            self.skip_verify_tls(),
+        ))
     }
 
     /// Resolves the Client-Server API base URL for a server name via
@@ -471,12 +506,12 @@ pub trait Deps: Send + Sync {
         }
 
         let url = format!("https://{server_name}/.well-known/matrix/client");
-        let resp = http_client(false)
+        let resp = http_client(self.skip_verify_tls())
             .get(&url)
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_chain(&e))?;
         if !resp.status().is_success() {
             return Err(format!(
                 "failed to fetch {url}: http status code {}",
@@ -503,27 +538,25 @@ pub trait Deps: Send + Sync {
 
     /// Validates an OpenID token against its homeserver's federation API and
     /// returns the user info (notably the `sub` — the Matrix user ID).
-    async fn exchange_openid_userinfo(
-        &self,
-        token: &OpenIdTokenType,
-        skip_verify_tls: bool,
-    ) -> Result<UserInfo, String> {
+    async fn exchange_openid_userinfo(&self, token: &OpenIdTokenType) -> Result<UserInfo, String> {
         if token.access_token.is_empty() || token.matrix_server_name.is_empty() {
             return Err("missing parameters in openid token".into());
         }
 
-        let base = resolve_federation_base_url(&token.matrix_server_name, skip_verify_tls).await;
+        let base =
+            resolve_federation_base_url(&token.matrix_server_name, self.skip_verify_tls()).await;
 
         let url = format!("{base}/_matrix/federation/v1/openid/userinfo");
-        let resp = http_client(skip_verify_tls)
+        let resp = http_client(self.skip_verify_tls())
             .get(&url)
             .query(&[("access_token", token.access_token.as_str())])
             .timeout(Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| {
-                error!(err = %e, "OpenIDUserInfo: Failed to look up user info");
-                format!("failed to look up user info: {e}")
+                let msg = error_chain(&e);
+                error!(err = %msg, "OpenIDUserInfo: Failed to look up user info");
+                format!("failed to look up user info: {msg}")
             })?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -650,7 +683,7 @@ pub trait Deps: Send + Sync {
             segments.push(action.as_str());
         }
 
-        let resp = http_client(false)
+        let resp = http_client(self.skip_verify_tls())
             .post(endpoint.clone())
             .header(http::header::CONTENT_TYPE, "application/json")
             .body("{}")
@@ -658,11 +691,9 @@ pub trait Deps: Send + Sync {
             .send()
             .await
             .map_err(|e| {
-                debug!(url = %endpoint, err = %e, "execute_delayed_event_action");
-                ActionError::Transient {
-                    status: 0,
-                    msg: e.to_string(),
-                }
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "execute_delayed_event_action");
+                ActionError::Transient { status: 0, msg }
             })?;
 
         let status = resp.status().as_u16();
@@ -743,9 +774,18 @@ pub trait Deps: Send + Sync {
 
 /// The production [`Deps`] implementation — all behaviour comes from the
 /// trait's default methods.
-pub struct RealDeps;
+#[derive(Default)]
+pub struct RealDeps {
+    /// Whether outbound TLS connections skip certificate verification
+    /// (LIVEKIT_INSECURE_SKIP_VERIFY_TLS).
+    pub skip_verify_tls: bool,
+}
 
-impl Deps for RealDeps {}
+impl Deps for RealDeps {
+    fn skip_verify_tls(&self) -> bool {
+        self.skip_verify_tls
+    }
+}
 
 /// Resolves the Client-Server API URL for a server name: overrides win over
 /// the cache, which wins over fresh .well-known discovery.
@@ -1261,7 +1301,7 @@ mod tests {
     // ── execute_delayed_event_action ──────────────────────────────────────────
 
     async fn exec(url: &str, delay_id: &str, action: DelayEventAction) -> Result<u16, ActionError> {
-        RealDeps
+        RealDeps::default()
             .execute_delayed_event_action(&CsApiUrl(url.to_owned()), delay_id, action)
             .await
     }
@@ -1881,17 +1921,17 @@ mod tests {
         let matrix_server_name = format!("127.0.0.1:{}", addr.port());
         *server_name.lock().unwrap() = matrix_server_name.clone();
 
-        let info = RealDeps
-            .exchange_openid_userinfo(
-                &OpenIdTokenType {
-                    access_token: ACCESS_TOKEN.into(),
-                    matrix_server_name: matrix_server_name.clone(),
-                    ..Default::default()
-                },
-                true, // skip_verify_tls — required for the self-signed test server
-            )
-            .await
-            .expect("unexpected error");
+        // skip_verify_tls is required for the self-signed test server.
+        let info = RealDeps {
+            skip_verify_tls: true,
+        }
+        .exchange_openid_userinfo(&OpenIdTokenType {
+            access_token: ACCESS_TOKEN.into(),
+            matrix_server_name: matrix_server_name.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("unexpected error");
         assert_eq!(info.sub, format!("@alice:{matrix_server_name}"));
     }
 
@@ -2200,7 +2240,7 @@ mod tests {
 
         // ws scheme + path prefix, as configured for reverse-proxied setups.
         let lk_url = format!("ws{}/livekit/sfu", server.url.strip_prefix("http").unwrap());
-        let client = RealDeps.new_room_service_client(&lk_url, "devkey", "secret");
+        let client = RealDeps::default().new_room_service_client(&lk_url, "devkey", "secret");
         let info = client
             .create_room(CreateRoomParams {
                 name: "room".into(),
@@ -2224,6 +2264,56 @@ mod tests {
         );
     }
 
+    /// Verifies that RoomService calls honor skip_verify_tls when the SFU
+    /// sits behind TLS with an untrusted certificate — as deployed by ESS —
+    /// and are rejected without it.
+    #[tokio::test]
+    async fn test_room_service_client_skip_verify_tls() {
+        use prost::Message;
+        let room = livekit_protocol::Room {
+            sid: "room-sid-1".into(),
+            ..Default::default()
+        };
+        let response = room.encode_to_vec();
+        let router = Router::new().route(
+            "/{*path}",
+            any(move || {
+                let response = response.clone();
+                async move {
+                    http::Response::builder()
+                        .status(http::StatusCode::OK)
+                        .header(http::header::CONTENT_TYPE, "application/protobuf")
+                        .body(axum::body::Body::from(response))
+                        .unwrap()
+                }
+            }),
+        );
+        let addr = test_support::spawn_https_server(router).await;
+        let lk_url = format!("wss://127.0.0.1:{}", addr.port());
+
+        // With TLS verification, the self-signed server must be rejected.
+        let client = RealDeps::default().new_room_service_client(&lk_url, "devkey", "secret");
+        let err = client
+            .create_room(CreateRoomParams::default())
+            .await
+            .expect_err("create_room should fail against an untrusted certificate");
+        assert!(
+            err.to_string().contains("failed to execute the request"),
+            "unexpected error: {err}"
+        );
+
+        // With skip_verify_tls, the call must succeed.
+        let client = RealDeps {
+            skip_verify_tls: true,
+        }
+        .new_room_service_client(&lk_url, "devkey", "secret");
+        let info = client
+            .create_room(CreateRoomParams::default())
+            .await
+            .expect("create_room failed");
+        assert_eq!(info.sid, "room-sid-1");
+    }
+
     /// Verifies that GetParticipant reaches the prefixed endpoint and that a
     /// twirp not_found error surfaces as participant-absent (Ok(false)) via
     /// participant_exists.
@@ -2240,7 +2330,7 @@ mod tests {
             secret: "secret".into(),
             lk_url: format!("{}/livekit/sfu", server.url),
         };
-        let exists = RealDeps
+        let exists = RealDeps::default()
             .participant_exists(
                 &auth,
                 &LiveKitRoomAlias("r".into()),
@@ -2266,7 +2356,7 @@ mod tests {
             secret: "secret".into(),
             lk_url: format!("{}/livekit/sfu", server.url),
         };
-        let exists = RealDeps
+        let exists = RealDeps::default()
             .participant_exists(
                 &auth,
                 &LiveKitRoomAlias("r".into()),
@@ -2287,7 +2377,7 @@ mod tests {
             secret: "secret".into(),
             lk_url: format!("{}/livekit/sfu", server.url),
         };
-        let result = RealDeps
+        let result = RealDeps::default()
             .participant_exists(
                 &auth,
                 &LiveKitRoomAlias("r".into()),

@@ -121,7 +121,6 @@ pub struct Handler {
     cancel: CancellationToken,
     pub(crate) livekit_auth: LiveKitAuth,
     full_access_homeservers: Vec<String>,
-    skip_verify_tls: bool,
     /// The period between room-worker sanity checks. Zero disables the sanity
     /// check.
     sanity_check_interval: Duration,
@@ -143,7 +142,6 @@ pub struct Handler {
 impl Handler {
     pub fn new(
         lk_auth: LiveKitAuth,
-        skip_verify_tls: bool,
         full_access_homeservers: Vec<String>,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
@@ -152,7 +150,6 @@ impl Handler {
     ) -> Arc<Self> {
         let (handler, receivers) = Self::new_without_loop(
             lk_auth,
-            skip_verify_tls,
             full_access_homeservers,
             sanity_check_interval,
             cs_api_url_overrides,
@@ -168,7 +165,6 @@ impl Handler {
     /// loop's receiving ends to the caller.
     pub(crate) fn new_without_loop(
         lk_auth: LiveKitAuth,
-        skip_verify_tls: bool,
         full_access_homeservers: Vec<String>,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
@@ -185,7 +181,6 @@ impl Handler {
         let handler = Arc::new(Self {
             cancel: CancellationToken::new(),
             livekit_auth: lk_auth,
-            skip_verify_tls,
             full_access_homeservers,
             sanity_check_interval,
             cs_api_url_overrides: Arc::new(cs_api_url_overrides),
@@ -617,7 +612,7 @@ impl Handler {
 
         let user_info = self
             .deps
-            .exchange_openid_userinfo(token, self.skip_verify_tls)
+            .exchange_openid_userinfo(token)
             .await
             .map_err(|_| unauthorized())?;
 

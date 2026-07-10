@@ -26,7 +26,7 @@ use crate::store::test_support::{
 
 // ── test deps ─────────────────────────────────────────────────────────────────
 
-type ExchangeFn = Box<dyn Fn(&OpenIdTokenType, bool) -> Result<UserInfo, String> + Send + Sync>;
+type ExchangeFn = Box<dyn Fn(&OpenIdTokenType) -> Result<UserInfo, String> + Send + Sync>;
 type ResolveFn = Box<dyn Fn(&str) -> Result<CsApiUrl, String> + Send + Sync>;
 type CreateRoomMockFn =
     Box<dyn Fn(&LiveKitRoomAlias, &str, &LiveKitIdentity) -> Result<(), String> + Send + Sync>;
@@ -80,13 +80,9 @@ impl Deps for HandlerTestDeps {
         }
     }
 
-    async fn exchange_openid_userinfo(
-        &self,
-        token: &OpenIdTokenType,
-        skip_verify_tls: bool,
-    ) -> Result<UserInfo, String> {
+    async fn exchange_openid_userinfo(&self, token: &OpenIdTokenType) -> Result<UserInfo, String> {
         match &self.exchange {
-            Some(f) => f(token, skip_verify_tls),
+            Some(f) => f(token),
             None => panic!("exchange_openid_userinfo not mocked in HandlerTestDeps"),
         }
     }
@@ -137,7 +133,7 @@ fn exists_block_until_cancelled() -> Option<ExistsFn> {
 
 fn exchange_ok(sub: &str) -> Option<ExchangeFn> {
     let sub = sub.to_owned();
-    Some(Box::new(move |_, _| Ok(UserInfo { sub: sub.clone() })))
+    Some(Box::new(move |_| Ok(UserInfo { sub: sub.clone() })))
 }
 
 fn exec_ok() -> Option<ExecFn> {
@@ -161,7 +157,6 @@ fn new_handler_with(
 ) -> Arc<Handler> {
     Handler::new(
         default_auth(),
-        false,
         full_access.iter().map(|s| s.to_string()).collect(),
         Duration::ZERO, // sanity check interval disabled
         HashMap::new(),
@@ -179,7 +174,6 @@ fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
             secret: "secret".into(),
             lk_url: "wss://lk.local".into(),
         },
-        false,
         vec!["example.com".into()],
         Duration::ZERO,
         HashMap::new(),
@@ -192,7 +186,6 @@ fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
 fn new_delegate_delayed_leave_handler(deps: HandlerTestDeps) -> Arc<Handler> {
     Handler::new(
         default_auth(),
-        false,
         vec!["example.com".into()],
         Duration::ZERO,
         HashMap::from([(
@@ -327,7 +320,6 @@ async fn test_is_full_access_user() {
             secret: "testSecret".into(),
             lk_url: "wss://lk.local:8080/foo".into(),
         },
-        true,
         vec!["example.com".into(), "another.example.com".into()],
         Duration::ZERO,
         HashMap::new(),
@@ -497,7 +489,6 @@ async fn test_handler_close_timeout() {
     // its own.
     let (handler, _rx) = Handler::new_without_loop(
         default_auth(),
-        false,
         vec!["*".into()],
         Duration::ZERO,
         HashMap::new(),
@@ -709,7 +700,6 @@ fn new_sfu_webhook_test_handler(key: &str, secret: &str) -> (Arc<Handler>, LoopR
             secret: secret.into(),
             lk_url: String::new(),
         },
-        false,
         vec![],
         Duration::ZERO,
         HashMap::new(),
@@ -1629,7 +1619,7 @@ async fn test_handle_get_token_restricted_user() {
 #[tokio::test]
 async fn test_handle_get_token_exchange_error() {
     let deps = HandlerTestDeps {
-        exchange: Some(Box::new(|_, _| Err("M_UNAUTHORIZED: no".into()))),
+        exchange: Some(Box::new(|_| Err("M_UNAUTHORIZED: no".into()))),
         ..Default::default()
     };
     let handler = new_get_token_handler(deps);
@@ -1753,7 +1743,7 @@ async fn test_process_sfu_request() {
                 assert!(!room.is_empty(), "expected non-empty room name");
                 Ok(())
             })),
-            exchange: Some(Box::new(move |_, _| {
+            exchange: Some(Box::new(move |_| {
                 if fail_exchange {
                     Err("M_UNAUTHORIZED: unauthorised".into())
                 } else {
@@ -1784,7 +1774,6 @@ async fn test_process_sfu_request() {
                 secret: "secret".into(),
                 lk_url: "wss://lk.local:8080/foo".into(),
             },
-            false,
             vec!["example.com".into()],
             Duration::ZERO,
             HashMap::new(),
@@ -1903,7 +1892,6 @@ async fn test_handle_sfu_get_success() {
             secret: "testSecret".into(),
             lk_url: "wss://lk.local:8080/foo".into(),
         },
-        false,
         vec![MATRIX_SERVER_NAME.into()],
         Duration::ZERO,
         HashMap::new(),
@@ -2022,7 +2010,7 @@ async fn test_process_legacy_sfu_request() {
                 assert!(!room.is_empty(), "expected non-empty room name");
                 Ok(())
             })),
-            exchange: Some(Box::new(move |_, _| {
+            exchange: Some(Box::new(move |_| {
                 if fail_exchange {
                     Err("M_UNAUTHORIZED: unauthorised".into())
                 } else {
@@ -2053,7 +2041,6 @@ async fn test_process_legacy_sfu_request() {
                 secret: "secret".into(),
                 lk_url: "wss://lk.local:8080/foo".into(),
             },
-            false,
             vec!["example.com".into()],
             Duration::ZERO,
             HashMap::new(),
@@ -2193,7 +2180,7 @@ async fn test_handle_delegate_delayed_leave_restricted_user() {
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_exchange_error() {
     let deps = HandlerTestDeps {
-        exchange: Some(Box::new(|_, _| Err("M_UNAUTHORIZED: no".into()))),
+        exchange: Some(Box::new(|_| Err("M_UNAUTHORIZED: no".into()))),
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_handler(deps);

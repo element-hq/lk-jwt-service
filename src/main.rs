@@ -77,12 +77,13 @@ async fn main() {
             secret: config.secret.clone(),
             lk_url: config.lk_url.clone(),
         },
-        config.skip_verify_tls,
         config.full_access_homeservers.clone(),
         config.sanity_check_interval,
         config.cs_api_url_overrides.clone(),
         store,
-        Arc::new(RealDeps),
+        Arc::new(RealDeps {
+            skip_verify_tls: config.skip_verify_tls,
+        }),
     );
 
     let sanity_check_interval_display = if config.sanity_check_interval.is_zero() {
