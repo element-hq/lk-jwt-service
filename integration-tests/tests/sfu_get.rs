@@ -8,32 +8,27 @@ use lk_jwt_service_integration_tests::{
 };
 use serde_json::{Value, json};
 
-/// Return a valid /delegate_delayed_leave body for the given user.
-fn delegate_request(hs: &FakeHomeserver, user: &FakeUser) -> Value {
+/// Return a valid body for /sfu/get, the deprecated pre-Matrix-2.0 token
+/// endpoint, for the given user. Unlike /get_token, the endpoint has no
+/// member field and therefore no claimed_user_id check.
+fn sfu_get_request(hs: &FakeHomeserver, user: &FakeUser) -> Value {
     json!({
-        "room_id": "!room:example.com",
-        "slot_id": "m.call#",
+        "room": "!room:example.com",
         "openid_token": {
             "access_token": user.openid_token,
             "token_type": "Bearer",
             "matrix_server_name": hs.server_name(),
             "expires_in": 3600,
         },
-        "member": {
-            "id": "member-1",
-            "claimed_user_id": user.user_id,
-            "claimed_device_id": "DEVICE",
-        },
-        "delay_id": "syd_integration_1",
-        "delay_timeout": 8000,
+        "device_id": "DEVICE",
     })
 }
 
-/// POST the given body to /delegate_delayed_leave and return the status
-/// code and raw response body.
-async fn post_delegate(svc: &Service, body: impl Into<reqwest::Body>) -> (u16, String) {
+/// POST the given body to /sfu/get and return the status code and raw
+/// response body.
+async fn post_sfu_get(svc: &Service, body: impl Into<reqwest::Body>) -> (u16, String) {
     let resp = reqwest::Client::new()
-        .post(format!("{}/delegate_delayed_leave", svc.base_url))
+        .post(format!("{}/sfu/get", svc.base_url))
         .header("Content-Type", "application/json")
         .body(body)
         .send()
@@ -50,30 +45,40 @@ async fn success() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
 
-    // Start the service.
+    // Start the service. The fake homeserver is NOT in the full-access list, so no
+    // no LiveKit room should be created.
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["trusted.example.com".to_owned()],
+        livekit_url: Some("wss://sfu.example.com".to_owned()),
         ..Default::default()
     })
     .await;
 
-    // Post a valid /delegate_delayed_leave request.
-    let (status, body) = post_delegate(&svc, delegate_request(&hs, &user).to_string()).await;
+    // Post a valid /sfu/get request.
+    let (status, body) = post_sfu_get(&svc, sfu_get_request(&hs, &user).to_string()).await;
 
     // The request should succeed.
     assert_eq!(status, 200, "body: {body}");
+
+    // The response should contain the configured SFU URL and a LiveKit JWT.
     let response: Value = serde_json::from_str(&body).expect("response is not JSON");
-    assert_eq!(
-        response.as_object().map(|o| o.len()),
-        Some(0),
-        "expected empty response object, got {body}"
+    assert_eq!(response["url"].as_str(), Some("wss://sfu.example.com"));
+    assert!(
+        !response["jwt"].as_str().unwrap_or_default().is_empty(),
+        "expected a non-empty jwt, got {body}"
     );
 
     // The service should have called /openid/userinfo.
     let requests = hs.user_info_requests();
     assert_eq!(requests.len(), 1, "expected exactly one user info lookup");
     assert_eq!(requests[0].access_token, user.openid_token);
+
+    // The service should not have called /delayed_events.
+    assert!(
+        hs.delayed_event_requests().is_empty(),
+        "expected no delayed event actions, got {:?}",
+        hs.delayed_event_requests()
+    );
 }
 
 #[tokio::test]
@@ -90,10 +95,10 @@ async fn unknown_token() {
     })
     .await;
 
-    // Post a /delegate_delayed_leave request with an invalid OpenID token.
-    let mut request = delegate_request(&hs, &user);
+    // Post a /sfu/get request with an invalid OpenID token.
+    let mut request = sfu_get_request(&hs, &user);
     request["openid_token"]["access_token"] = json!("syt_forged_token");
-    let (status, body) = post_delegate(&svc, request.to_string()).await;
+    let (status, body) = post_sfu_get(&svc, request.to_string()).await;
 
     // The request should fail.
     expect_matrix_error(status, &body, 401, "M_UNAUTHORIZED");
@@ -102,41 +107,6 @@ async fn unknown_token() {
     let requests = hs.user_info_requests();
     assert_eq!(requests.len(), 1, "expected exactly one user info lookup");
     assert_eq!(requests[0].access_token, "syt_forged_token");
-
-    // The service should not have called /delayed_events.
-    assert!(
-        hs.delayed_event_requests().is_empty(),
-        "expected no delayed event actions, got {:?}",
-        hs.delayed_event_requests()
-    );
-}
-
-#[tokio::test]
-async fn claimed_user_mismatch() {
-    // Set up the homeserver.
-    let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
-
-    // Start the service.
-    let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        ..Default::default()
-    })
-    .await;
-
-    // Post a /delegate_delayed_leave request with a different MXID.
-    let mut request = delegate_request(&hs, &user);
-    request["member"]["claimed_user_id"] = json!(format!("@bob:{}", hs.server_name()));
-
-    // The request should fail.
-    let (status, body) = post_delegate(&svc, request.to_string()).await;
-    expect_matrix_error(status, &body, 401, "M_UNAUTHORIZED");
-
-    // The service should have called /openid/userinfo.
-    let requests = hs.user_info_requests();
-    assert_eq!(requests.len(), 1, "expected exactly one user info lookup");
-    assert_eq!(requests[0].access_token, user.openid_token);
 
     // The service should not have called /delayed_events.
     assert!(
@@ -160,11 +130,15 @@ async fn restricted_homeserver() {
     })
     .await;
 
-    // Post a /delegate_delayed_leave request.
-    let (status, body) = post_delegate(&svc, delegate_request(&hs, &user).to_string()).await;
+    // Post a /sfu/get request with delay parameters. Delegation of delayed
+    // events is only supported for full-access users.
+    let mut request = sfu_get_request(&hs, &user);
+    request["delay_id"] = json!("syd_integration_1");
+    request["delay_timeout"] = json!(8000);
+    let (status, body) = post_sfu_get(&svc, request.to_string()).await;
 
     // The request should fail.
-    expect_matrix_error(status, &body, 403, "M_FORBIDDEN");
+    expect_matrix_error(status, &body, 400, "M_BAD_JSON");
 
     // The service should have called /openid/userinfo.
     let requests = hs.user_info_requests();
@@ -194,8 +168,11 @@ async fn unresolvable_cs_api() {
     })
     .await;
 
-    // Post a /delegate_delayed_leave request.
-    let (status, body) = post_delegate(&svc, delegate_request(&hs, &user).to_string()).await;
+    // Post a /sfu/get request with delay parameters.
+    let mut request = sfu_get_request(&hs, &user);
+    request["delay_id"] = json!("syd_integration_1");
+    request["delay_timeout"] = json!(8000);
+    let (status, body) = post_sfu_get(&svc, request.to_string()).await;
 
     // The request should fail.
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
@@ -214,7 +191,7 @@ async fn unresolvable_cs_api() {
 }
 
 #[tokio::test]
-async fn missing_delay_params() {
+async fn partial_delay_params() {
     // Set up the homeserver.
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
@@ -227,18 +204,18 @@ async fn missing_delay_params() {
     })
     .await;
 
-    // Post a /delegate_delayed_leave request without delay_id.
-    let mut request = delegate_request(&hs, &user);
-    request.as_object_mut().unwrap().remove("delay_id");
-    let (status, body) = post_delegate(&svc, request.to_string()).await;
+    // Post a /sfu/get request with delay_id but without delay_timeout.
+    let mut request = sfu_get_request(&hs, &user);
+    request["delay_id"] = json!("syd_integration_1");
+    let (status, body) = post_sfu_get(&svc, request.to_string()).await;
 
     // The request should fail.
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
 
-    // Post a /delegate_delayed_leave request without delay_timeout.
-    let mut request = delegate_request(&hs, &user);
-    request.as_object_mut().unwrap().remove("delay_timeout");
-    let (status, body) = post_delegate(&svc, request.to_string()).await;
+    // Post a /sfu/get request with delay_timeout but without delay_id.
+    let mut request = sfu_get_request(&hs, &user);
+    request["delay_timeout"] = json!(8000);
+    let (status, body) = post_sfu_get(&svc, request.to_string()).await;
 
     // The request should fail.
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
@@ -270,8 +247,8 @@ async fn malformed_json() {
     })
     .await;
 
-    // Post a /delegate_delayed_leave request with malformed JSON.
-    let (status, body) = post_delegate(&svc, "{not json").await;
+    // Post a /sfu/get request with malformed JSON.
+    let (status, body) = post_sfu_get(&svc, "{not json").await;
 
     // The request should fail.
     expect_matrix_error(status, &body, 400, "M_NOT_JSON");
@@ -303,8 +280,8 @@ async fn get_instead_of_post() {
     })
     .await;
 
-    // Send a /delegate_delayed_leave request using GET instead of POST.
-    let url = format!("{}/delegate_delayed_leave", svc.base_url);
+    // Send a /sfu/get request using GET instead of POST.
+    let url = format!("{}/sfu/get", svc.base_url);
     let client = reqwest::Client::new();
     let resp = client.get(&url).send().await.expect("GET failed");
 
