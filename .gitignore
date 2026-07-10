@@ -1,6 +1,6 @@
 .vscode
-/lk-jwt-service*
 build/*
-lk-jwt-service-healthcheck
 coverage.out
+lk-jwt-service
+lk-jwt-service-healthcheck
 target/

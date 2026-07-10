@@ -25,25 +25,19 @@ fn service_binary() -> PathBuf {
         // Look up the repository root.
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
 
-        // Encode the process ID into the binary name so two parallel runs of the suite
-        // cannot collide.
-        let binary = repo_root.join(format!("lk-jwt-service-it-{}", std::process::id()));
-
         // Build the service.
-        let output = Command::new("go")
-            .args(["build", "-o"])
-            .arg(&binary)
-            .arg(".")
+        let output = Command::new("cargo")
+            .args(["build", "--bin", "lk-jwt-service"])
             .current_dir(&repo_root)
             .output()
-            .map_err(|e| format!("failed to run go build: {e}"))?;
+            .map_err(|e| format!("failed to run cargo build: {e}"))?;
         if !output.status.success() {
             return Err(format!(
                 "building service: {}",
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
-        Ok(binary)
+        Ok(repo_root.join("target/debug/lk-jwt-service"))
     });
     match result {
         Ok(path) => path.clone(),

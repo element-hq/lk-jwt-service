@@ -18,5 +18,3 @@ cargo test
 ```
 
 The harness builds the service from the repository root on first use.
-Tests run in parallel (cargo's default), each against its own service
-process. On failure a test dumps the captured logs of its service process.
