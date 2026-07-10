@@ -4,7 +4,9 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_integration_tests::{
-    FakeHomeserver, FakeUser, Service, ServiceConfig, expect_matrix_error,
+    FakeHomeserver, FakeSfu, FakeUser, LIVEKIT_KEY, Service, ServiceConfig, decode_livekit_jwt,
+    expect_matrix_error, expect_no_delayed_event_requests, expect_no_user_info_lookups,
+    expect_user_info_lookup,
 };
 use serde_json::{Value, json};
 
@@ -40,48 +42,6 @@ async fn post_sfu_get(svc: &Service, body: impl Into<reqwest::Body>) -> (u16, St
 }
 
 #[tokio::test]
-async fn success() {
-    // Set up the homeserver.
-    let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
-
-    // Start the service. The fake homeserver is NOT in the full-access list, so no
-    // no LiveKit room should be created.
-    let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec!["trusted.example.com".to_owned()],
-        livekit_url: Some("wss://sfu.example.com".to_owned()),
-        ..Default::default()
-    })
-    .await;
-
-    // Post a valid /sfu/get request.
-    let (status, body) = post_sfu_get(&svc, sfu_get_request(&hs, &user).to_string()).await;
-
-    // The request should succeed.
-    assert_eq!(status, 200, "body: {body}");
-
-    // The response should contain the configured SFU URL and a LiveKit JWT.
-    let response: Value = serde_json::from_str(&body).expect("response is not JSON");
-    assert_eq!(response["url"].as_str(), Some("wss://sfu.example.com"));
-    assert!(
-        !response["jwt"].as_str().unwrap_or_default().is_empty(),
-        "expected a non-empty jwt, got {body}"
-    );
-
-    // The service should have called /openid/userinfo.
-    let requests = hs.user_info_requests();
-    assert_eq!(requests.len(), 1, "expected exactly one user info lookup");
-    assert_eq!(requests[0].access_token, user.openid_token);
-
-    // The service should not have called /delayed_events.
-    assert!(
-        hs.delayed_event_requests().is_empty(),
-        "expected no delayed event actions, got {:?}",
-        hs.delayed_event_requests()
-    );
-}
-
-#[tokio::test]
 async fn unknown_token() {
     // Set up the homeserver.
     let hs = FakeHomeserver::new().await;
@@ -104,16 +64,10 @@ async fn unknown_token() {
     expect_matrix_error(status, &body, 401, "M_UNAUTHORIZED");
 
     // The service should have called /openid/userinfo.
-    let requests = hs.user_info_requests();
-    assert_eq!(requests.len(), 1, "expected exactly one user info lookup");
-    assert_eq!(requests[0].access_token, "syt_forged_token");
+    expect_user_info_lookup(&hs, "syt_forged_token");
 
     // The service should not have called /delayed_events.
-    assert!(
-        hs.delayed_event_requests().is_empty(),
-        "expected no delayed event actions, got {:?}",
-        hs.delayed_event_requests()
-    );
+    expect_no_delayed_event_requests(&hs);
 }
 
 #[tokio::test]
@@ -141,16 +95,10 @@ async fn restricted_homeserver() {
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
 
     // The service should have called /openid/userinfo.
-    let requests = hs.user_info_requests();
-    assert_eq!(requests.len(), 1, "expected exactly one user info lookup");
-    assert_eq!(requests[0].access_token, user.openid_token);
+    expect_user_info_lookup(&hs, &user.openid_token);
 
     // The service should not have called /delayed_events.
-    assert!(
-        hs.delayed_event_requests().is_empty(),
-        "expected no delayed event actions, got {:?}",
-        hs.delayed_event_requests()
-    );
+    expect_no_delayed_event_requests(&hs);
 }
 
 #[tokio::test]
@@ -178,16 +126,10 @@ async fn unresolvable_cs_api() {
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
 
     // The service should have called /openid/userinfo.
-    let requests = hs.user_info_requests();
-    assert_eq!(requests.len(), 1, "expected exactly one user info lookup");
-    assert_eq!(requests[0].access_token, user.openid_token);
+    expect_user_info_lookup(&hs, &user.openid_token);
 
     // The service should not have called /delayed_events.
-    assert!(
-        hs.delayed_event_requests().is_empty(),
-        "expected no delayed event actions, got {:?}",
-        hs.delayed_event_requests()
-    );
+    expect_no_delayed_event_requests(&hs);
 }
 
 #[tokio::test]
@@ -221,18 +163,10 @@ async fn partial_delay_params() {
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
 
     // The service should not have called /openid/userinfo.
-    assert!(
-        hs.user_info_requests().is_empty(),
-        "expected no user info lookups, got {:?}",
-        hs.user_info_requests()
-    );
+    expect_no_user_info_lookups(&hs);
 
     // The service should not have called /delayed_events.
-    assert!(
-        hs.delayed_event_requests().is_empty(),
-        "expected no delayed event actions, got {:?}",
-        hs.delayed_event_requests()
-    );
+    expect_no_delayed_event_requests(&hs);
 }
 
 #[tokio::test]
@@ -254,18 +188,10 @@ async fn malformed_json() {
     expect_matrix_error(status, &body, 400, "M_NOT_JSON");
 
     // The service should not have called /openid/userinfo.
-    assert!(
-        hs.user_info_requests().is_empty(),
-        "expected no user info lookups, got {:?}",
-        hs.user_info_requests()
-    );
+    expect_no_user_info_lookups(&hs);
 
     // The service should not have called /delayed_events.
-    assert!(
-        hs.delayed_event_requests().is_empty(),
-        "expected no delayed event actions, got {:?}",
-        hs.delayed_event_requests()
-    );
+    expect_no_delayed_event_requests(&hs);
 }
 
 #[tokio::test]
@@ -289,16 +215,130 @@ async fn get_instead_of_post() {
     assert_eq!(resp.status().as_u16(), 405);
 
     // The service should not have called /openid/userinfo.
+    expect_no_user_info_lookups(&hs);
+
+    // The service should not have called /delayed_events.
+    expect_no_delayed_event_requests(&hs);
+}
+
+#[tokio::test]
+async fn full_access_token() {
+    // Set up the homeserver and SFU.
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    let sfu = FakeSfu::new().await;
+
+    // Start the service. The fake homeserver is in the full-access list, so
+    // a LiveKit room should be created on the SFU.
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        ..Default::default()
+    })
+    .await;
+
+    // Post a valid /sfu/get request.
+    let (status, body) = post_sfu_get(&svc, sfu_get_request(&hs, &user).to_string()).await;
+
+    // The request should succeed.
+    assert_eq!(status, 200, "body: {body}");
+
+    // The response should contain the SFU URL and a LiveKit JWT.
+    let response: Value = serde_json::from_str(&body).expect("response is not JSON");
+    assert_eq!(response["url"].as_str(), Some(sfu.url()));
+    let jwt = response["jwt"].as_str().unwrap_or_default();
+
+    // The JWT should grant joining plus publishing and subscribing. Unlike
+    // /get_token, the legacy identity is the plain MXID and device ID.
+    let claims = decode_livekit_jwt(jwt);
+    assert_eq!(claims["iss"].as_str(), Some(LIVEKIT_KEY));
+    assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
+    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
+    assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
+    assert_eq!(
+        claims["sub"].as_str(),
+        Some(format!("{}:DEVICE", user.user_id).as_str())
+    );
+
+    // The service should have called /openid/userinfo.
+    expect_user_info_lookup(&hs, &user.openid_token);
+
+    // The service should have created the room granted in the JWT on the SFU.
+    let rooms = sfu.create_room_requests();
+    assert_eq!(rooms.len(), 1, "expected exactly one room creation");
+    assert_eq!(
+        claims["video"]["room"].as_str(),
+        Some(rooms[0].name.as_str())
+    );
+
+    // The room should stay open for 5 minutes while no one joins, linger
+    // for 20 seconds after everyone left and not limit participants.
+    assert_eq!(rooms[0].empty_timeout, 300);
+    assert_eq!(rooms[0].departure_timeout, 20);
+    assert_eq!(rooms[0].max_participants, 0);
+
+    // The service should not have called /delayed_events.
+    expect_no_delayed_event_requests(&hs);
+}
+
+#[tokio::test]
+async fn remote_token() {
+    // Set up the homeserver and SFU.
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    let sfu = FakeSfu::new().await;
+
+    // Start the service. The fake homeserver is NOT in the full-access
+    // list, so no LiveKit room should be created on the SFU.
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["trusted.example.com".to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        ..Default::default()
+    })
+    .await;
+
+    // Post a valid /sfu/get request.
+    let (status, body) = post_sfu_get(&svc, sfu_get_request(&hs, &user).to_string()).await;
+
+    // The request should succeed.
+    assert_eq!(status, 200, "body: {body}");
+
+    // The response should contain the SFU URL and a LiveKit JWT.
+    let response: Value = serde_json::from_str(&body).expect("response is not JSON");
+    assert_eq!(response["url"].as_str(), Some(sfu.url()));
+    let jwt = response["jwt"].as_str().unwrap_or_default();
+
+    // The JWT should grant joining plus publishing and subscribing. Unlike
+    // /get_token, the legacy identity is the plain MXID and device ID.
+    let claims = decode_livekit_jwt(jwt);
+    assert_eq!(claims["iss"].as_str(), Some(LIVEKIT_KEY));
+    assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
+    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
+    assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
+    assert_eq!(
+        claims["sub"].as_str(),
+        Some(format!("{}:DEVICE", user.user_id).as_str())
+    );
     assert!(
-        hs.user_info_requests().is_empty(),
-        "expected no user info lookups, got {:?}",
-        hs.user_info_requests()
+        !claims["video"]["room"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "expected a non-empty room, got {claims}"
+    );
+
+    // The service should have called /openid/userinfo.
+    expect_user_info_lookup(&hs, &user.openid_token);
+
+    // The service should not have created a room on the SFU.
+    assert!(
+        sfu.create_room_requests().is_empty(),
+        "expected no room creations, got {:?}",
+        sfu.create_room_requests()
     );
 
     // The service should not have called /delayed_events.
-    assert!(
-        hs.delayed_event_requests().is_empty(),
-        "expected no delayed event actions, got {:?}",
-        hs.delayed_event_requests()
-    );
+    expect_no_delayed_event_requests(&hs);
 }
