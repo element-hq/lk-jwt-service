@@ -243,13 +243,14 @@ pub async fn send_sfu_webhook(
     identity: &str,
     disconnect_reason: Option<&str>,
 ) {
+    let mut participant = json!({ "identity": identity });
+    if let Some(reason) = disconnect_reason {
+        participant["disconnectReason"] = json!(reason);
+    }
     let body = json!({
         "event": event,
         "room": {"name": room},
-        "participant": {
-            "identity": identity,
-            "disconnectReason": disconnect_reason,
-        },
+        "participant": participant,
         "id": "evt_integration_test",
         "createdAt": 0,
     })
