@@ -266,7 +266,12 @@ impl Handler {
                 let writer = tokio::spawn(async move {
                     while let Some(op) = op_rx.recv().await {
                         match op {
-                            StoreOp::Save { key, job, context, done } => {
+                            StoreOp::Save {
+                                key,
+                                job,
+                                context,
+                                done,
+                            } => {
                                 if let Err(err) = store.save_job(&key, &job).await {
                                     error!(key = ?key, err = %err, "Handler: failed to {context}");
                                 }
