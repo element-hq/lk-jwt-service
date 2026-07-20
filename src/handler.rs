@@ -90,6 +90,9 @@ enum StoreOp {
         key: JobKey,
         job: StoredJob,
         context: &'static str,
+        /// Signalled once the write attempt (success or failure) completes,
+        /// so a caller can wait for durability without blocking the loop.
+        done: Option<oneshot::Sender<()>>,
     },
     Delete {
         key: JobKey,
@@ -262,16 +265,20 @@ impl Handler {
                 let (tx, mut op_rx) = mpsc::channel::<StoreOp>(256);
                 let writer = tokio::spawn(async move {
                     while let Some(op) = op_rx.recv().await {
-                        let (result, key, context) = match op {
-                            StoreOp::Save { key, job, context } => {
-                                (store.save_job(&key, &job).await, key, context)
+                        match op {
+                            StoreOp::Save { key, job, context, done } => {
+                                if let Err(err) = store.save_job(&key, &job).await {
+                                    error!(key = ?key, err = %err, "Handler: failed to {context}");
+                                }
+                                if let Some(done) = done {
+                                    let _ = done.send(());
+                                }
                             }
                             StoreOp::Delete { key, context } => {
-                                (store.delete_job(&key).await, key, context)
+                                if let Err(err) = store.delete_job(&key).await {
+                                    error!(key = ?key, err = %err, "Handler: failed to {context}");
+                                }
                             }
-                        };
-                        if let Err(err) = result {
-                            error!(key = ?key, err = %err, "Handler: failed to {context}");
                         }
                     }
                 });
@@ -413,16 +420,21 @@ impl Handler {
                     // Save the job in the store. We assume the delayed event
                     // was restarted just before the request came in because
                     // that is our best guess.
-                    if self.store.is_some() {
+                    let store_done = if self.store.is_some() {
                         let stored_job =
                             StoredJob { params: req.params.clone(), restarted_at: Utc::now() };
+                        let (done_tx, done_rx) = oneshot::channel();
                         enqueue_store_op(StoreOp::Save {
                             key: key.clone(),
                             job: stored_job,
                             context: "store job",
+                            done: Some(done_tx),
                         })
                         .await;
-                    }
+                        Some(done_rx)
+                    } else {
+                        None
+                    };
 
                     // Pull-based lookup, in addition to SFU webhooks. Phase 1
                     // confirms the initial connect (delegated leaves get no
@@ -438,7 +450,22 @@ impl Handler {
                     job.spawn_loop();
                     debug!(room = %key.room, lk_id = %key.identity, job_id = %job.job_id,
                         "Handler: job created");
-                    let _ = req.result.send(Ok(job.job_id.clone()));
+
+                    // Reply only once the store write has completed (or
+                    // immediately if there's no store), so a caller who sees
+                    // success can rely on the job being durably persisted --
+                    // without blocking this loop on Redis I/O in the
+                    // meantime. The write's outcome doesn't gate the reply,
+                    // only its completion: a failed persist is logged by the
+                    // writer above, matching the store being best-effort.
+                    let job_id = job.job_id.clone();
+                    let result_tx = req.result;
+                    tokio::spawn(async move {
+                        if let Some(done_rx) = store_done {
+                            let _ = done_rx.await;
+                        }
+                        let _ = result_tx.send(Ok(job_id));
+                    });
                 }
 
                 // ── SFU webhook routing ──────────────────────────────────────
@@ -519,6 +546,7 @@ impl Handler {
                             key: key.clone(),
                             job: stored_job,
                             context: "update stored job",
+                            done: None,
                         })
                         .await;
                     }

@@ -1027,10 +1027,11 @@ async fn test_handler_loop_job_replacement_no_deadlock() {
         .expect("handler.close() deadlocked after job replacement");
 }
 
-/// A slow store must not block the actor loop: adding a job returns before
-/// the store write lands, events keep routing, and the job completes while
-/// the write is still pending. The write and the delete land afterwards, in
-/// order.
+/// A slow store must not block the actor loop from routing events: the job
+/// is live (inserted, lookup and loop started) and keeps processing signals
+/// while its own store write is still pending. But the caller who added the
+/// job now only sees success once that write actually lands -- durability
+/// is guaranteed by the time add_delayed_event_job returns.
 #[tokio::test]
 async fn test_handler_slow_store_does_not_block_event_routing() {
     let (notifying, mut saved_rx, mut deleted_rx) = new_notifying_store();
@@ -1058,20 +1059,31 @@ async fn test_handler_slow_store_does_not_block_event_routing() {
         identity: identity.clone(),
     };
 
-    // The store write is gated, but adding the job must return promptly.
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        handler.add_delayed_event_job(DelayedEventJobParams {
-            server_name: "example.com".into(),
-            delay_id: "slow-store-id".into(),
-            delay_timeout: Duration::from_secs(10),
-            livekit_room: room.clone(),
-            livekit_identity: identity.clone(),
-        }),
-    )
-    .await
-    .expect("add_delayed_event_job must not wait for the store")
-    .expect("add_delayed_event_job");
+    // The store write is gated, so adding the job must now wait for it --
+    // spawn the call instead of awaiting it inline.
+    let handler_for_add = handler.clone();
+    let add_room = room.clone();
+    let add_identity = identity.clone();
+    let add_job = tokio::spawn(async move {
+        handler_for_add
+            .add_delayed_event_job(DelayedEventJobParams {
+                server_name: "example.com".into(),
+                delay_id: "slow-store-id".into(),
+                delay_timeout: Duration::from_secs(10),
+                livekit_room: add_room,
+                livekit_identity: add_identity,
+            })
+            .await
+    });
+
+    // Give the loop a moment to insert the job and start its lookup/loop --
+    // both happen before the store write, so the job is live even though
+    // add_delayed_event_job has not returned.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(
+        !add_job.is_finished(),
+        "add_delayed_event_job must wait for the gated store write"
+    );
 
     // Events keep routing and the job completes while the write is pending.
     handler
@@ -1104,8 +1116,13 @@ async fn test_handler_slow_store_does_not_block_event_routing() {
         saved_rx.try_recv().is_err(),
         "the gated save must not have landed yet"
     );
+    assert!(
+        !add_job.is_finished(),
+        "add_delayed_event_job must still be waiting for the gated save"
+    );
 
-    // Release the store: the save and the delete land in order.
+    // Release the store: the save and the delete land in order, and the
+    // pending add_delayed_event_job call finally resolves.
     gate.add_permits(10);
     match tokio::time::timeout(Duration::from_secs(3), saved_rx.recv()).await {
         Ok(Some(actual_key)) => assert_eq!(actual_key, key, "unexpected save key"),
@@ -1115,6 +1132,12 @@ async fn test_handler_slow_store_does_not_block_event_routing() {
         Ok(Some(actual_key)) => assert_eq!(actual_key, key, "unexpected delete key"),
         _ => panic!("timed out waiting for the delete to land"),
     }
+    tokio::time::timeout(Duration::from_secs(3), add_job)
+        .await
+        .expect("add_delayed_event_job should resolve once the store write lands")
+        .expect("add_delayed_event_job task panicked")
+        .expect("add_delayed_event_job");
+
     handler.close().await;
 }
 
