@@ -67,12 +67,14 @@ func getJoinToken(apiKey string, apiSecret string, room LiveKitRoomAlias, identi
 
 	canPublish := true
 	canSubscribe := true
+	canUpdateOwnMetadata := true
 	grant := &auth.VideoGrant{
-		RoomJoin:     true,
-		RoomCreate:   false,
-		CanPublish:   &canPublish,
-		CanSubscribe: &canSubscribe,
-		Room:         string(room),
+		RoomJoin:             true,
+		RoomCreate:           false,
+		CanPublish:           &canPublish,
+		CanSubscribe:         &canSubscribe,
+		CanUpdateOwnMetadata: &canUpdateOwnMetadata,
+		Room:                 string(room),
 	}
 
 	at.SetVideoGrant(grant).
