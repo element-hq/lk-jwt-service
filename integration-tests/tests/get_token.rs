@@ -287,12 +287,17 @@ async fn full_access_token() {
     assert_eq!(response["url"].as_str(), Some(sfu.url()));
     let jwt = response["jwt"].as_str().unwrap_or_default();
 
-    // The JWT should grant joining plus publishing and subscribing.
+    // The JWT should grant joining plus publishing, subscribing and
+    // updating the participant's own metadata.
     let claims = decode_livekit_jwt(jwt);
     assert_eq!(claims["iss"].as_str(), Some(LIVEKIT_KEY));
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
+    assert_eq!(
+        claims["video"]["canUpdateOwnMetadata"].as_bool(),
+        Some(true)
+    );
     assert!(
         !claims["sub"].as_str().unwrap_or_default().is_empty(),
         "expected a non-empty identity, got {claims}"
@@ -347,12 +352,17 @@ async fn remote_token() {
     assert_eq!(response["url"].as_str(), Some(sfu.url()));
     let jwt = response["jwt"].as_str().unwrap_or_default();
 
-    // The JWT should grant joining plus publishing and subscribing.
+    // The JWT should grant joining plus publishing, subscribing and
+    // updating the participant's own metadata.
     let claims = decode_livekit_jwt(jwt);
     assert_eq!(claims["iss"].as_str(), Some(LIVEKIT_KEY));
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
+    assert_eq!(
+        claims["video"]["canUpdateOwnMetadata"].as_bool(),
+        Some(true)
+    );
     assert!(
         !claims["sub"].as_str().unwrap_or_default().is_empty(),
         "expected a non-empty identity, got {claims}"
