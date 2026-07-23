@@ -1584,6 +1584,11 @@ async fn test_handle_get_token_success() {
         serde_json::Value::String(WANT_ROOM.into()),
         "room"
     );
+    assert_eq!(
+        claims["video"]["canUpdateOwnMetadata"],
+        serde_json::Value::Bool(true),
+        "canUpdateOwnMetadata"
+    );
     handler.close().await;
 }
 
