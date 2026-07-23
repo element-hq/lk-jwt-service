@@ -13,12 +13,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Install Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: go.mod
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - name: Test
-        run: go test -timeout 30s
+        run: cargo test --locked
 
   integration:
     name: Integration tests
@@ -27,18 +27,16 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Install Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
-          go-version-file: go.mod
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            integration-tests/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('integration-tests/Cargo.lock') }}
+          # The suite in integration-tests/ builds the service from the
+          # repository root, so both target directories are cached.
+          workspaces: |
+            .
+            integration-tests
       - name: Test
         working-directory: integration-tests
         run: cargo test --locked
@@ -68,9 +66,6 @@ jobs:
             echo "ref=main" | tee -a $GITHUB_OUTPUT
           fi
 
-      - name: Get go version
-        run: echo "GO_VERSION=$(go mod edit -json | jq -r .Toolchain | sed "s,^go,,")" >> $GITHUB_ENV
-
       - name: Install ESS test dependencies
         uses: element-hq/setup-ess-cluster-action@23c5b953699591752a7385e143af59607a68c85e # release/v2
         with:
@@ -78,7 +73,7 @@ jobs:
 
       - name: Build lk-jwt-service docker image to local registry
         run: |
-          docker build -t localhost:5000/lk-jwt-service:ci --build-arg "GO_VERSION=${GO_VERSION}" -f ./Dockerfile .
+          docker build -t localhost:5000/lk-jwt-service:ci -f ./Dockerfile .
           docker push localhost:5000/lk-jwt-service:ci
 
       - name: Build Additional values file
