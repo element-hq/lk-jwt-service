@@ -144,6 +144,9 @@ func TestHandleGetToken_Success(t *testing.T) {
 	if got := claims["video"].(map[string]interface{})["room"]; got != wantRoom {
 		t.Errorf("room = %v, want %v", got, wantRoom)
 	}
+	if got := claims["video"].(map[string]interface{})["canUpdateOwnMetadata"]; got != true {
+		t.Errorf("canUpdateOwnMetadata = %v, want true", got)
+	}
 }
 
 // TestHandleGetToken_UnauthorizedUser verifies that a mismatch between the
