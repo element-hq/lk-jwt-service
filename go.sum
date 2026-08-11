@@ -113,6 +113,8 @@ github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530 h1:kHKxCOLcHH8
 github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530/go.mod h1:/gBX06Kw0exX1HrwmoBibFA98yBk/jxKpGVeyQbff+s=
 github.com/matrix-org/gomatrixserverlib v0.0.0-20260506075950-c9c468727353 h1:BdGU/8sF4ZaqGhfYN+eFEzc/whU4LpKvEDdM6i0Oqqs=
 github.com/matrix-org/gomatrixserverlib v0.0.0-20260506075950-c9c468727353/go.mod h1:b6KVfDjXjA5Q7vhpOaMqIhFYvu5BuFVZixlNeTV/CLc=
+github.com/matrix-org/gomatrixserverlib v0.0.0-20260716140101-4fe595dc7f58 h1:S42otjye0YIfq58z0nnKmiOuZDXiy6XlbMpLUmTZAqE=
+github.com/matrix-org/gomatrixserverlib v0.0.0-20260716140101-4fe595dc7f58/go.mod h1:b6KVfDjXjA5Q7vhpOaMqIhFYvu5BuFVZixlNeTV/CLc=
 github.com/matrix-org/util v0.0.0-20221111132719-399730281e66 h1:6z4KxomXSIGWqhHcfzExgkH3Z3UkIXry4ibJS4Aqz2Y=
 github.com/matrix-org/util v0.0.0-20221111132719-399730281e66/go.mod h1:iBI1foelCqA09JJgPV0FYz4qA5dUXYOxMi57FxKBdd4=
 github.com/mattn/go-colorable v0.1.14 h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=

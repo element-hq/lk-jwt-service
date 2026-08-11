@@ -12,7 +12,7 @@ require (
 	github.com/livekit/protocol v1.48.1-0.20260624204523-bd5703442db6
 	github.com/livekit/server-sdk-go/v2 v2.16.7
 	github.com/matrix-org/gomatrix v0.0.0-20220926102614-ceba4d9f7530
-	github.com/matrix-org/gomatrixserverlib v0.0.0-20260506075950-c9c468727353
+	github.com/matrix-org/gomatrixserverlib v0.0.0-20260716140101-4fe595dc7f58
 	github.com/mattn/go-isatty v0.0.22
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/twitchtv/twirp v8.1.3+incompatible
