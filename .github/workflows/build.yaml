@@ -1,4 +1,4 @@
-name: Trigger Build and publish Docker image
+name: Build
 
 on:
   push:
@@ -8,7 +8,8 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-docker:
+  docker:
+    name: Docker
     permissions:
       contents: write
       packages: write

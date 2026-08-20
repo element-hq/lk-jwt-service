@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: Testing
+    name: Unit tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,6 +42,7 @@ jobs:
         run: cargo test --locked
 
   ess:
+    name: ESS tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
