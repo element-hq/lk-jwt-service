@@ -7,9 +7,23 @@ WORKDIR /proj
 RUN apk add --no-cache musl-dev cmake make gcc g++ perl linux-headers ca-certificates
 
 COPY Cargo.toml Cargo.lock ./
+
+# Build with stub sources first so dependency compilation lands in its own
+# layer and is skipped by the Docker layer cache when only src/ changes.
+RUN mkdir -p src/bin \
+    && echo "fn main() {}" > src/main.rs \
+    && echo "fn main() {}" > src/bin/healthcheck.rs \
+    && touch src/lib.rs \
+    && cargo build --release --locked \
+    && rm -rf src
+
 COPY src ./src
 
-RUN cargo build --release --locked
+# Docker preserves the source files' original mtimes, which predate the
+# stub build above, so cargo would otherwise consider them unchanged and
+# skip recompilation entirely.
+RUN find src -name '*.rs' -exec touch {} + \
+    && cargo build --release --locked
 RUN cp target/release/lk-jwt-service /lk-jwt-service \
     && cp target/release/healthcheck /lk-jwt-service-healthcheck
 
