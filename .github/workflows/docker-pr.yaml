@@ -1,4 +1,4 @@
-name: Trigger PR docker image
+name: Trigger Docker for external PRs
 on:
   pull_request:
     types:
@@ -28,7 +28,7 @@ jobs:
       contents: write
       packages: write
       id-token: write
-    uses: ./.github/workflows/build-and-publish-docker.yaml
+    uses: ./.github/workflows/docker.yaml
     secrets: inherit
     with:
       docker_tags: |
