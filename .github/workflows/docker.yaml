@@ -6,6 +6,11 @@ on:
       docker_tags:
         required: true
         type: string
+    secrets:
+      TS_OAUTH_CLIENT_ID:
+        required: true
+      TS_AUDIENCE:
+        required: true
 
 env:
   REGISTRY: ghcr.io

@@ -15,7 +15,9 @@ jobs:
       packages: write
       id-token: write
     uses: ./.github/workflows/docker.yaml
-    secrets: inherit
+    secrets:
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_AUDIENCE: ${{ secrets.TS_AUDIENCE }}
     with:
       docker_tags: |
         type=sha,format=short,event=branch
