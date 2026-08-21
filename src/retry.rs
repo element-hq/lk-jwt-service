@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -85,7 +85,7 @@ impl BackoffState {
         let base = self.current.as_secs_f64();
         let randomized = if rf > 0.0 {
             let delta = rf * base;
-            rand::thread_rng().gen_range((base - delta)..=(base + delta))
+            rand::rng().random_range((base - delta)..=(base + delta))
         } else {
             base
         };

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
@@ -122,7 +122,7 @@ pub fn new_unique_id() -> UniqueId {
         .as_micros() as u64;
     b[0..8].copy_from_slice(&micros.to_be_bytes());
 
-    rand::thread_rng().fill_bytes(&mut b[8..16]);
+    rand::rng().fill_bytes(&mut b[8..16]);
 
     UniqueId(data_encoding::BASE32HEX_NOPAD.encode(&b))
 }
@@ -966,15 +966,17 @@ pub(crate) mod test_support {
             .unwrap();
         let config = axum_server::tls_rustls::RustlsConfig::from_der(
             vec![cert.cert.der().to_vec()],
-            cert.key_pair.serialize_der(),
+            cert.signing_key.serialize_der(),
         )
         .await
         .unwrap();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum_server::from_tcp_rustls(listener, config)
+                .unwrap()
                 .serve(router.into_make_service())
                 .await
                 .unwrap();
