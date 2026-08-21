@@ -1,40 +1,24 @@
-# 🎥 MatrixRTC Authorization Service
+# 🎥 LiveKit Authorization Service
 
-The **MatrixRTC Authorization Service** bridges Matrix and LiveKit, handling
-authentication and room creation when needed.
+The **LiveKit Authorization Service** bridges Matrix and LiveKit, handling
+authentication, room creation and delegated delayed leave management when needed.
 
 [![Lint](https://github.com/element-hq/lk-jwt-service/actions/workflows/lint.yaml/badge.svg)](https://github.com/element-hq/lk-jwt-service/actions/workflows/lint.yaml)
 [![Test](https://github.com/element-hq/lk-jwt-service/actions/workflows/test.yaml/badge.svg)](https://github.com/element-hq/lk-jwt-service/actions/workflows/test.yaml)
 [![Docker](https://github.com/element-hq/lk-jwt-service/actions/workflows/docker.yaml/badge.svg)](https://github.com/element-hq/lk-jwt-service/actions/workflows/docker.yaml)
 
-
-## 💡 TL;DR
-
-Matrix user wants to start or join a call?
-
-👤 ➡️ Gets OpenID token ➡️ Sends it to the **MatrixRTC Authorization Service** ➡️
-Receives LiveKit JWT ➡️
-
-- **If full-access user** ➡️ Can trigger LiveKit room creation (if needed) ➡️
-  Joins the call 🎉
-- **If restricted user** ➡️ Can join existing rooms ➡️ Joins the call 🎉
-
-📡 Once connected, the LiveKit SFU handles all real-time media routing so
-participants can see and hear each other.
-
-## 🏗️ MatrixRTC Stack: Architecture Overview
-
-<p align="center">
-  <img src="https://github.com/element-hq/element-call/raw/livekit/docs/Federated_Setup.drawio.png" alt="MatrixRTC Architecture">
-</p>
-
 ## 📌 When to Use
 
-This service is part of the **MatrixRTC stack** and is primarily used when the
-[LiveKit RTC backend (MSC4195)](https://github.com/matrix-org/matrix-spec-proposals/pull/4195)
-is in use.
+As per [MSC4195](https://github.com/matrix-org/matrix-spec-proposals/pull/4195),
+the connection between Matrix Clients and the LiveKit SFU is mediated by the homeserver.
+Homeservers can integrate lk-jwt-service as an application service to serve the
+LiveKit-related endpoints without adopting LiveKit as a dependency in the codebase.
 
-As outlined in the
+Alternatively, the service also still supports the deprecated standalone mode
+from prior versions of the MSC where clients interacted with lk-jwt-service instances
+directly.
+
+Regardless of the above and as outlined in the
 [Element Call Self-Hosting Guide](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md),
 you’ll also need:
 
@@ -71,25 +55,8 @@ exist.
 > ordering ensure that conferences across Matrix federation remain fully
 > functional.
 
-## 🗺️ How It Works — Token Exchange Flow
-
-```mermaid
-sequenceDiagram
-    participant U as 🧑 User
-    participant M as 🏢 Matrix Homeserver
-    participant A as 🔐 MatrixRTC Authorization Service
-    participant L as 📡 LiveKit SFU
-
-    U->>M: Requests OpenID token
-    M-->>U: Returns OpenID token
-    U->>A: Sends OpenID token & room request
-    A->>M: Validates token via OpenID API
-    M-->>A: Confirms user identity
-    A->>A: Generates LiveKit JWT
-    A->>L: (If full-access user) Create room if missing
-    A-->>U: Returns LiveKit JWT
-    U->>L: Connects to room using JWT
-```
+⏰ **Manages delegated delayed leave events** to retain accurate session membership
+even when clients lose connectivity.
 
 ## 🚀 Installation
 
@@ -134,6 +101,9 @@ Set environment variables to configure the service:
 | `LIVEKIT_LOG_LEVEL`                           | One of `debug`, `info`, `warn`/`warning`, `error`             | ❌ No                                                | `info` |
 | `LIVEKIT_CS_API_URL_OVERRIDES`                | Comma-separated list of overrides for Client-Server API locations that cannot be inferred using .well-known discovery (e.g. `example.com=matrix-client.example.com`) | ❌ No                                                | |
 | `LIVEKIT_REDIS_URL`                           | Redis connection URL (e.g. `redis://localhost:6379`). When set, service state will be persisted during operation and restored upon service restarts. When unset, the service falls back to an in-memory store. | ❌ No | |
+| `LIVEKIT_AS_TOKEN`                            | The token used for authenticating requests to the homeserver as an application service | ❌ No | |
+| `LIVEKIT_HS_TOKEN`                            | The token used by the homeserver for authenticating requests to the service as an application service | ❌ No | |
+| `LIVEKIT_AS_REGISTRATION_FILE`                | Path to an application service registration file containing the application service tokens. Takes precedence over `LIVEKIT_AS_TOKEN` and `LIVEKIT_HS_TOKEN` if specified. | ❌ No | |
 
 > [!WARNING]
 > **Restricting room creation** requires two pieces working together:
@@ -150,6 +120,41 @@ Set environment variables to configure the service:
 >    room:
 >      auto_create: false
 >    ```
+
+## 🏠 Homeserver Wiring (Application Service)
+
+When set up as an application service, the integration depends on
+[MSC4502](https://github.com/matrix-org/matrix-spec-proposals/pull/4502) and
+[MSC4512](https://github.com/matrix-org/matrix-spec-proposals/pull/4512).
+
+The service needs to cover all local users because it needs to verify room memberships
+without being joined to any rooms itself. This requires the `urn:matrix:client:rooms:is_joined`
+scope to be set. The service does not require any event traffic, however. So make sure to set
+`url` to `null`.
+
+Additionally, request proxying needs to be enabled for the `/livekit` subpath in the Client-Server
+and Server-Server API. This is done via the `proxy_prefix` and `proxy_url` properties.
+
+Below is an example application service registration file.
+
+```yaml
+id: "LiveKit JWT service"
+as_token: "<snip>"
+hs_token: "<snip>"
+sender_localpart: "_lk_jwt_service"
+namespaces:
+  users:
+    - exclusive: false
+      regex: ".*" # Cover all users
+url: null # No event traffic required
+# Stable scope for membership look-up
+scopes: [ "urn:matrix:client:rooms:is_joined" ]
+# Unstable scope for membership look-up
+io.element.msc4502.scope: [ "urn:matrix:client:io.element.msc4502:rooms:is_joined" ],
+proxy_prefix: "livekit" # Proxy /livekit requests on the C-S and S-S API
+proxy_url: "http://127.0.0.1:1234" # Forward proxied requests to this URL
+```
+
 
 ## 🔌 LiveKit SFU Wiring (Webhooks)
 

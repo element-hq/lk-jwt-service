@@ -47,6 +47,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rust-yaml = "1.1.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
