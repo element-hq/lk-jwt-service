@@ -5,7 +5,7 @@ authentication and room creation when needed.
 
 [![Lint](https://github.com/element-hq/lk-jwt-service/actions/workflows/lint.yaml/badge.svg)](https://github.com/element-hq/lk-jwt-service/actions/workflows/lint.yaml)
 [![Test](https://github.com/element-hq/lk-jwt-service/actions/workflows/test.yaml/badge.svg)](https://github.com/element-hq/lk-jwt-service/actions/workflows/test.yaml)
-[![Build and publish Docker image](https://github.com/element-hq/lk-jwt-service/actions/workflows/docker.yaml/badge.svg)](https://github.com/element-hq/lk-jwt-service/actions/workflows/docker.yaml)
+[![Docker](https://github.com/element-hq/lk-jwt-service/actions/workflows/docker.yaml/badge.svg)](https://github.com/element-hq/lk-jwt-service/actions/workflows/docker.yaml)
 
 
 ## 💡 TL;DR
