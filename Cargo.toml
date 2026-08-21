@@ -50,7 +50,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 temp-env = "0.3"
 http-body-util = "0.1"
 rcgen = "0.14"
