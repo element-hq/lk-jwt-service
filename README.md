@@ -155,7 +155,6 @@ proxy_prefix: "livekit" # Proxy /livekit requests on the C-S and S-S API
 proxy_url: "http://127.0.0.1:1234" # Forward proxied requests to this URL
 ```
 
-
 ## 🔌 LiveKit SFU Wiring (Webhooks)
 
 Delegated MatrixRTC leave handling
