@@ -1,30 +1,37 @@
-# Set the version to match that which is in go.mod
-ARG GO_VERSION="build-arg-must-be-provided"
-
-FROM --platform=${BUILDPLATFORM} docker.io/golang:${GO_VERSION}-alpine AS builder
+FROM docker.io/rust:1-alpine AS builder
 
 WORKDIR /proj
 
-COPY go.mod ./
-COPY go.sum ./
-RUN go mod download
+# musl-dev for the static libc, cmake/make/gcc/g++/perl/linux-headers for the
+# vendored aws-lc-sys / ring C code pulled in by rustls.
+RUN apk add --no-cache musl-dev cmake make gcc g++ perl linux-headers ca-certificates
 
-COPY *.go ./
-COPY healthcheck ./healthcheck
+COPY Cargo.toml Cargo.lock ./
 
-ARG TARGETOS TARGETARCH
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o lk-jwt-service
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o lk-jwt-service-healthcheck ./healthcheck
-# set up nsswitch.conf for Go's "netgo" implementation
-# - https://github.com/golang/go/blob/go1.24.0/src/net/conf.go#L343
-RUN echo 'hosts: files dns' > /etc/nsswitch.conf
+# Build with stub sources first so dependency compilation lands in its own
+# layer and is skipped by the Docker layer cache when only src/ changes.
+RUN mkdir -p src/bin \
+    && echo "fn main() {}" > src/main.rs \
+    && echo "fn main() {}" > src/bin/healthcheck.rs \
+    && touch src/lib.rs \
+    && cargo build --release --locked \
+    && rm -rf src
+
+COPY src ./src
+
+# Docker preserves the source files' original mtimes, which predate the
+# stub build above, so cargo would otherwise consider them unchanged and
+# skip recompilation entirely.
+RUN find src -name '*.rs' -exec touch {} + \
+    && cargo build --release --locked
+RUN cp target/release/lk-jwt-service /lk-jwt-service \
+    && cp target/release/healthcheck /lk-jwt-service-healthcheck
 
 FROM scratch
 
-COPY --from=builder /proj/lk-jwt-service /lk-jwt-service
-COPY --from=builder /proj/lk-jwt-service-healthcheck /lk-jwt-service-healthcheck
+COPY --from=builder /lk-jwt-service /lk-jwt-service
+COPY --from=builder /lk-jwt-service-healthcheck /lk-jwt-service-healthcheck
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /etc/nsswitch.conf /etc/nsswitch.conf
 
 EXPOSE 8080
 

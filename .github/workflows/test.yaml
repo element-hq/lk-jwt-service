@@ -7,18 +7,22 @@ on:
 
 jobs:
   test:
-    name: Testing
+    name: Unit tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Install Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Test
-        run: go test -timeout 30s
+        run: cargo test --locked
 
   integration:
     name: Integration tests
@@ -27,29 +31,34 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - name: Install Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            integration-tests/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('integration-tests/Cargo.lock') }}
+          toolchain: stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The suite in integration-tests/ builds the service from the
+          # repository root, so both target directories are cached.
+          workspaces: |
+            .
+            integration-tests
       - name: Test
         working-directory: integration-tests
         run: cargo test --locked
 
   ess:
+    name: ESS tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Get current branch name
         id: current-branch
@@ -68,18 +77,26 @@ jobs:
             echo "ref=main" | tee -a $GITHUB_OUTPUT
           fi
 
-      - name: Get go version
-        run: echo "GO_VERSION=$(go mod edit -json | jq -r .Toolchain | sed "s,^go,,")" >> $GITHUB_ENV
-
       - name: Install ESS test dependencies
         uses: element-hq/setup-ess-cluster-action@23c5b953699591752a7385e143af59607a68c85e # release/v2
         with:
           ess-helm-ref: ${{ steps.check-branch.outputs.ref }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        with:
+          # The buildx container needs host networking to reach the ESS
+          # cluster's registry at localhost:5000.
+          driver-opts: network=host
+
       - name: Build lk-jwt-service docker image to local registry
-        run: |
-          docker build -t localhost:5000/lk-jwt-service:ci --build-arg "GO_VERSION=${GO_VERSION}" -f ./Dockerfile .
-          docker push localhost:5000/lk-jwt-service:ci
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          push: true
+          tags: localhost:5000/lk-jwt-service:ci
+          cache-from: type=gha,scope=ess
+          cache-to: type=gha,mode=max,scope=ess
 
       - name: Build Additional values file
         run: |
