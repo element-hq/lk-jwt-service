@@ -54,21 +54,26 @@ jobs:
           pattern: build-*
           merge-multiple: true
       - name: "Create release"
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          files: build/*
-          fail_on_unmatched_files: true
-          draft: true
-          generate_release_notes: true
-          body: |
-            ## Docker image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          ## Docker image
 
-            The service is available as a Docker image from the [GitHub Container Registry](https://github.com/element-hq/lk-jwt-service/pkgs/container/lk-jwt-service).
+          The service is available as a Docker image from the [GitHub Container Registry](https://github.com/element-hq/lk-jwt-service/pkgs/container/lk-jwt-service).
 
-            ```
-            docker pull ghcr.io/element-hq/lk-jwt-service:${{env.IMAGE_VERSION}}
-            ```
+          ```
+          docker pull ghcr.io/element-hq/lk-jwt-service:__IMAGE_VERSION__
+          ```
 
-            ## Precompiled binaries
+          ## Precompiled binaries
 
-            The service is available as static precompiled binaries for amd64 and arm64 on linux attached to this release below.
+          The service is available as static precompiled binaries for amd64 and arm64 on linux attached to this release below.
+          EOF
+          sed -i "s/__IMAGE_VERSION__/$IMAGE_VERSION/" notes.md
+          gh release create "$TAG" \
+            --draft \
+            --generate-notes \
+            --notes-file notes.md \
+            build/*
