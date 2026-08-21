@@ -73,6 +73,9 @@ impl FakeHomeserver {
         // Register /openid/userinfo handler.
         let federation_listener =
             TcpListener::bind("127.0.0.1:0").expect("failed to bind federation listener");
+        federation_listener
+            .set_nonblocking(true)
+            .expect("failed to set federation listener non-blocking");
         let server_name = federation_listener.local_addr().unwrap().to_string();
         let federation_app = Router::new()
             .route(
@@ -82,6 +85,7 @@ impl FakeHomeserver {
             .with_state(Arc::clone(&state));
         tokio::spawn(
             axum_server::from_tcp_rustls(federation_listener, tls_config)
+                .expect("failed to build federation TLS server")
                 .serve(federation_app.into_make_service()),
         );
 

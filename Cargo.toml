@@ -1,6 +1,6 @@
 [package]
 name = "lk-jwt-service"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Service for delegating authentication and delayed leave events for MatrixRTC on LiveKit"
@@ -18,7 +18,7 @@ livekit-api = { version = "0.6", features = ["rustls-tls-native-roots"] }
 livekit-protocol = "0.7"
 # Must match livekit-protocol's prost version; the RoomService Twirp client
 # in helper.rs encodes/decodes its message types directly.
-prost = "0.14"
+prost = "0.12"
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -31,7 +31,7 @@ serde_json = "1"
 async-trait = "0.1"
 thiserror = "2"
 
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls", "charset", "http2", "macos-system-configuration"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2", "query", "system-proxy"] }
 redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 
 chrono = { version = "0.4", features = ["serde"] }

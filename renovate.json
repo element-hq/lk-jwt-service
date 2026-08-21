@@ -24,6 +24,12 @@
       "groupName": "all non-major dependencies",
       "groupSlug": "all-minor-patch",
       "matchUpdateTypes": ["minor", "patch"]
+    },
+    {
+      "description": "prost must match the version livekit-protocol depends on internally, or the two crates' Message traits diverge and the build breaks. Bump it manually alongside livekit-protocol/livekit-api instead.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["prost"],
+      "enabled": false
     }
   ],
   "semanticCommits": "disabled",
