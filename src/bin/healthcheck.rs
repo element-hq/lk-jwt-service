@@ -6,12 +6,12 @@
 //! Container health check: GETs /healthz on the local service and exits
 //! non-zero on failure.
 
-use lk_jwt_service::config::{bind_addresses, parse_config};
+use lk_jwt_service::config::{bind_addresses, parse_bind};
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    let config = parse_config()?;
-    let addrs = bind_addresses(&config.lk_jwt_bind);
+    let lk_jwt_bind = parse_bind()?;
+    let addrs = bind_addresses(&lk_jwt_bind);
 
     for addr in addrs {
         let resp = match reqwest::get(format!("http://{addr}/healthz")).await {
