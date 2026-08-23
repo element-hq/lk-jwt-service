@@ -6,26 +6,30 @@
 //! Container health check: GETs /healthz on the local service and exits
 //! non-zero on failure.
 
-#[tokio::main]
-async fn main() {
-    let mut lk_jwt_bind = std::env::var("LIVEKIT_JWT_BIND").unwrap_or_default();
-    if lk_jwt_bind.is_empty() {
-        lk_jwt_bind = "8080".into();
-    }
+use lk_jwt_service::config::{bind_addresses, parse_config};
 
-    let resp = match reqwest::get(format!("http://localhost:{lk_jwt_bind}/healthz")).await {
-        Ok(resp) => resp,
-        Err(err) => {
-            println!("Connection error: {err}");
+#[tokio::main]
+async fn main() -> Result<(), String> {
+    let config = parse_config()?;
+    let addrs = bind_addresses(&config.lk_jwt_bind);
+
+    for addr in addrs {
+        let resp = match reqwest::get(format!("http://{addr}/healthz")).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                println!("Connection error: {err}");
+                std::process::exit(1);
+            }
+        };
+
+        if resp.status().as_u16() != 200 {
+            println!(
+                "Healthcheck failed with status code {}",
+                resp.status().as_u16()
+            );
             std::process::exit(1);
         }
-    };
-
-    if resp.status().as_u16() != 200 {
-        println!(
-            "Healthcheck failed with status code {}",
-            resp.status().as_u16()
-        );
-        std::process::exit(1);
     }
+
+    Ok(())
 }
