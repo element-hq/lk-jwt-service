@@ -182,6 +182,43 @@ pub async fn wait_for_delayed_event_request_count(
     }
 }
 
+/// Assert that no /is_joined request has been recorded.
+#[track_caller]
+pub fn expect_no_is_joined_requests(hs: &FakeHomeserver) {
+    let requests = hs.is_joined_requests();
+    assert!(
+        requests.is_empty(),
+        "expected no is_joined requests, got {:?}",
+        requests
+    );
+}
+
+/// Assert that an /is_joined request for the given room and mxid has been
+/// recorded.
+#[track_caller]
+pub fn expect_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &str) {
+    let requests = hs.is_joined_requests();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.room_id == room_id && r.mxid == mxid),
+        "expected an is_joined request for room {room_id:?}, mxid {mxid:?}, got {requests:?}"
+    );
+}
+
+/// Assert that no /is_joined request for the given room and mxid has been
+/// recorded.
+#[track_caller]
+pub fn expect_no_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &str) {
+    let requests = hs.is_joined_requests();
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.room_id == room_id && r.mxid == mxid),
+        "expected an is_joined request for room {room_id:?}, mxid {mxid:?}, got {requests:?}"
+    );
+}
+
 pub fn livekit_room_alias(matrix_room: &str, slot_id: &str) -> String {
     let marshalled =
         serde_json::to_vec(&[matrix_room, slot_id]).expect("string arrays always serialize");

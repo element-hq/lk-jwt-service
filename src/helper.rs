@@ -216,6 +216,15 @@ pub fn livekit_identity_for(matrix_id: &str, device_id: &str, member_id: &str) -
     ])))
 }
 
+/// Extracts the server name from a Matrix User Identifier.
+pub fn matrix_server_name(mxid: &str) -> Option<&str> {
+    let (localpart, server_name) = mxid.strip_prefix('@')?.split_once(':')?;
+    if localpart.is_empty() || server_name.is_empty() {
+        return None;
+    }
+    Some(server_name)
+}
+
 // ── OpenID / well-known DTOs ─────────────────────────────────────────────────
 
 /// The response of the Matrix federation OpenID userinfo endpoint.
@@ -770,6 +779,132 @@ pub trait Deps: Send + Sync {
         }
     }
 
+    /// Checks whether `mxid` is currently a member of `room_id`, via the
+    /// `/is_joined` endpoint from https://github.com/matrix-org/matrix-spec-proposals/pull/4502.
+    async fn is_room_member(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        mxid: &str,
+        as_token: &str,
+    ) -> Result<bool, String> {
+        let path_prefix = self.resolve_is_joined_path_prefix(cs_api_url).await?;
+
+        let mut endpoint = url::Url::parse(cs_api_url.as_str())
+            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
+        {
+            let mut segments = endpoint
+                .path_segments_mut()
+                .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?;
+            segments.pop_if_empty();
+            for segment in path_prefix.trim_matches('/').split('/') {
+                segments.push(segment);
+            }
+            segments.push("rooms");
+            segments.push(room_id);
+            segments.push("is_joined");
+        }
+        endpoint.query_pairs_mut().append_pair("mxid", mxid);
+
+        let resp = http_client(self.skip_verify_tls())
+            .get(endpoint.clone())
+            .bearer_auth(as_token)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "is_room_member");
+                format!("failed to check room membership: {msg}")
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!(
+                "failed to check room membership: http status code {}",
+                status.as_u16()
+            ));
+        }
+
+        #[derive(Deserialize, Default)]
+        struct IsJoinedResponse {
+            #[serde(default)]
+            joined: bool,
+        }
+        let parsed: IsJoinedResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse is_joined response: {e}"))?;
+        Ok(parsed.joined)
+    }
+
+    /// Feature-detects whether the homeserver behind `cs_api_url` supports
+    /// the stable or unstable `is_joined` endpoint (MSC4502) via `/versions`,
+    /// returning the path prefix to use. The stable flag wins over the
+    /// unstable one when both are advertised. Successful resolutions are
+    /// cached so `/versions` isn't fetched on every request.
+    async fn resolve_is_joined_path_prefix(
+        &self,
+        cs_api_url: &CsApiUrl,
+    ) -> Result<&'static str, String> {
+        static CACHE: std::sync::LazyLock<TtlCache<&'static str>> =
+            std::sync::LazyLock::new(TtlCache::new);
+        const TTL: Duration = Duration::from_secs(60 * 60);
+
+        if let Some(prefix) = CACHE.get(cs_api_url.as_str()) {
+            return Ok(prefix);
+        }
+
+        #[derive(Deserialize, Default)]
+        struct VersionsResponse {
+            #[serde(default)]
+            unstable_features: HashMap<String, bool>,
+        }
+
+        let mut endpoint = url::Url::parse(cs_api_url.as_str())
+            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
+        {
+            let mut segments = endpoint
+                .path_segments_mut()
+                .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?;
+            segments
+                .pop_if_empty()
+                .extend(["_matrix", "client", "versions"]);
+        }
+
+        let resp = http_client(self.skip_verify_tls())
+            .get(endpoint.clone())
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("failed to fetch /versions: {}", error_chain(&e)))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "failed to fetch /versions: http status code {}",
+                resp.status().as_u16()
+            ));
+        }
+        let versions: VersionsResponse = resp.json().await.map_err(|e| e.to_string())?;
+
+        let is_supported = |flag: &str| {
+            versions
+                .unstable_features
+                .get(flag)
+                .copied()
+                .unwrap_or(false)
+        };
+        let prefix = if is_supported("io.element.msc4502.stable") {
+            "_matrix/client/v3"
+        } else if is_supported("io.element.msc4502") {
+            "_matrix/client/unstable/io.element.msc4502"
+        } else {
+            return Err("homeserver does not support is_joined (MSC4502)".into());
+        };
+
+        CACHE.set(cs_api_url.as_str(), prefix, TTL);
+        Ok(prefix)
+    }
+
     /// Triggers a ping round-trip to ensure the service and the homeserver
     /// can reach each other.
     async fn trigger_appservice_ping(
@@ -1212,6 +1347,27 @@ mod tests {
         let id = livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
         assert!(!id.0.is_empty(), "identity is empty");
         assert!(!id.0.contains('='), "identity contains padding '=': {id}");
+    }
+
+    // ── matrix_server_name ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_matrix_server_name() {
+        for (mxid, want) in [
+            ("@alice:example.com", Some("example.com")),
+            ("@alice:example.com:8448", Some("example.com:8448")),
+            ("alice:example.com", None),
+            ("@alice", None),
+            ("@:example.com", None),
+            ("@alice:", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                matrix_server_name(mxid),
+                want,
+                "matrix_server_name({mxid:?})"
+            );
+        }
     }
 
     // ── TtlCache ──────────────────────────────────────────────────────────────
@@ -1772,6 +1928,272 @@ mod tests {
 
         let _ = exec(&server.url, "id", DelayEventAction::Restart).await;
         assert_eq!(*captured.lock().unwrap(), "application/json");
+    }
+
+    // ── is_room_member ───────────────────────────────────────────────────────
+
+    /// A homeserver stub serving /versions and /is_joined.
+    struct IsJoinedServer {
+        server: TestHttpServer,
+        requests: Arc<Mutex<Vec<(String, http::HeaderMap)>>>,
+    }
+
+    async fn spawn_is_joined_server(
+        unstable_features: serde_json::Value,
+        is_joined_path: &'static str,
+        joined: bool,
+    ) -> IsJoinedServer {
+        let requests: Arc<Mutex<Vec<(String, http::HeaderMap)>>> = Arc::new(Mutex::new(Vec::new()));
+        let requests_clone = requests.clone();
+        let router = Router::new()
+            .route(
+                "/_matrix/client/versions",
+                any(move || {
+                    let unstable_features = unstable_features.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "versions": ["v1.1"],
+                            "unstable_features": unstable_features,
+                        }))
+                    }
+                }),
+            )
+            .route(
+                is_joined_path,
+                any(move |req: Request| {
+                    let requests = requests_clone.clone();
+                    async move {
+                        let uri = req.uri().to_string();
+                        let headers = req.headers().clone();
+                        requests.lock().unwrap().push((uri, headers));
+                        axum::Json(serde_json::json!({ "joined": joined }))
+                    }
+                }),
+            );
+        let server = spawn_http_server(router).await;
+        IsJoinedServer { server, requests }
+    }
+
+    /// The stable endpoint (v3) is used when the homeserver
+    /// advertises the post-acceptance stable flag.
+    #[tokio::test]
+    async fn test_is_room_member_uses_stable_endpoint_when_advertised() {
+        let hs = spawn_is_joined_server(
+            serde_json::json!({ "io.element.msc4502.stable": true }),
+            "/_matrix/client/v3/rooms/{room_id}/is_joined",
+            true,
+        )
+        .await;
+
+        let joined = RealDeps::default()
+            .is_room_member(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "@alice:example.com",
+                "as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert!(joined);
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "expected exactly one is_joined request");
+        assert!(
+            requests[0].0.starts_with("/_matrix/client/v3/rooms/"),
+            "expected the stable endpoint to be used, got {:?}",
+            requests[0].0
+        );
+    }
+
+    /// The unstable endpoint is used when only the unstable
+    /// flag is advertised.
+    #[tokio::test]
+    async fn test_is_room_member_uses_unstable_endpoint_when_advertised() {
+        let hs = spawn_is_joined_server(
+            serde_json::json!({ "io.element.msc4502": true }),
+            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+            true,
+        )
+        .await;
+
+        let joined = RealDeps::default()
+            .is_room_member(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "@alice:example.com",
+                "as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert!(joined);
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "expected exactly one is_joined request");
+        assert!(
+            requests[0]
+                .0
+                .starts_with("/_matrix/client/unstable/io.element.msc4502/rooms/"),
+            "expected the unstable endpoint to be used, got {:?}",
+            requests[0].0
+        );
+    }
+
+    /// The stable flag wins when both are advertised.
+    #[tokio::test]
+    async fn test_is_room_member_prefers_stable_over_unstable() {
+        let hs = spawn_is_joined_server(
+            serde_json::json!({
+                "io.element.msc4502": true,
+                "io.element.msc4502.stable": true,
+            }),
+            "/_matrix/client/v3/rooms/{room_id}/is_joined",
+            true,
+        )
+        .await;
+
+        let joined = RealDeps::default()
+            .is_room_member(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "@alice:example.com",
+                "as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert!(joined);
+    }
+
+    /// The request is shaped correctly.
+    #[tokio::test]
+    async fn test_is_room_member_request_shape() {
+        let hs = spawn_is_joined_server(
+            serde_json::json!({ "io.element.msc4502": true }),
+            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+            true,
+        )
+        .await;
+
+        let _ = RealDeps::default()
+            .is_room_member(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "@alice:example.com",
+                "the_as_token",
+            )
+            .await
+            .expect("unexpected error");
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let (uri, headers) = &requests[0];
+        assert!(
+            uri.contains("mxid=%40alice%3Aexample.com") || uri.contains("mxid=@alice:example.com"),
+            "expected mxid query param, got {uri:?}"
+        );
+        assert!(
+            uri.contains("%21room%3Aexample.com") || uri.contains("!room:example.com"),
+            "expected the room ID in the path, got {uri:?}"
+        );
+        assert_eq!(
+            headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer the_as_token"),
+        );
+    }
+
+    /// A homeserver advertising neither flag is treated as unsupported.
+    #[tokio::test]
+    async fn test_is_room_member_fails_when_unsupported() {
+        let hs = spawn_is_joined_server(
+            serde_json::json!({}),
+            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+            true,
+        )
+        .await;
+
+        let err = RealDeps::default()
+            .is_room_member(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "@alice:example.com",
+                "as_token",
+            )
+            .await
+            .expect_err("expected an error when MSC4502 isn't advertised");
+        assert!(err.contains("MSC4502"), "unexpected error message: {err}");
+    }
+
+    /// `joined: false` responses propagate as Ok(false), not an error.
+    #[tokio::test]
+    async fn test_is_room_member_not_joined() {
+        let hs = spawn_is_joined_server(
+            serde_json::json!({ "io.element.msc4502": true }),
+            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+            false,
+        )
+        .await;
+
+        let joined = RealDeps::default()
+            .is_room_member(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "@alice:example.com",
+                "as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert!(!joined);
+    }
+
+    /// A transport failure while fetching /versions surfaces as an error.
+    #[tokio::test]
+    async fn test_is_room_member_versions_fetch_error() {
+        let err = RealDeps::default()
+            .is_room_member(
+                &CsApiUrl("http://127.0.0.1:1".into()),
+                "!room:example.com",
+                "@alice:example.com",
+                "as_token",
+            )
+            .await
+            .expect_err("expected an error for an unreachable homeserver");
+        assert!(err.contains("/versions"), "unexpected error message: {err}");
+    }
+
+    /// A non-2xx response from the is_joined endpoint itself surfaces as an error.
+    #[tokio::test]
+    async fn test_is_room_member_is_joined_http_error() {
+        let unstable_features = serde_json::json!({ "io.element.msc4502": true });
+        let router = Router::new()
+            .route(
+                "/_matrix/client/versions",
+                any(move || {
+                    let unstable_features = unstable_features.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "versions": ["v1.1"],
+                            "unstable_features": unstable_features,
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+                any(|| async { http::StatusCode::FORBIDDEN }),
+            );
+        let server = spawn_http_server(router).await;
+
+        let err = RealDeps::default()
+            .is_room_member(
+                &CsApiUrl(server.url.clone()),
+                "!room:example.com",
+                "@alice:example.com",
+                "as_token",
+            )
+            .await
+            .expect_err("expected an error for a non-2xx is_joined response");
+        assert!(err.contains("403"), "unexpected error message: {err}");
     }
 
     // ── resolve_cs_api_url ────────────────────────────────────────────────────

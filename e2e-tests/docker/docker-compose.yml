@@ -18,16 +18,25 @@ services:
     networks:
       - e2e
 
+  livekit:
+    image: livekit/livekit-server:latest
+    hostname: livekit
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "17880:7880"
+    networks:
+      - e2e
+
   jwt-service:
     build:
       context: ../..
     hostname: jwt-service
     environment:
-      # No SFU involved in this test; the value just needs to satisfy config
-      # validation.
-      - LIVEKIT_URL=ws://127.0.0.1:9
-      - LIVEKIT_KEY=devkey
-      - LIVEKIT_SECRET=secret
+      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_KEY=e2e_livekit_key
+      - LIVEKIT_SECRET=e2e_livekit_secret_0123456789ab
       - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse.e2e.test
       - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service.yaml
       - LIVEKIT_CS_API_URL_OVERRIDES=synapse.e2e.test=http://synapse:8008
@@ -37,5 +46,6 @@ services:
       - "18080:8080"
     depends_on:
       - synapse
+      - livekit
     networks:
       - e2e

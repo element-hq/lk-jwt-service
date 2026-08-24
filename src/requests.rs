@@ -89,6 +89,43 @@ pub struct SfuResponse {
     pub jwt: String,
 }
 
+/// Request body of the `/rtc/livekit/get_token` endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetTokenCsRequest {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub room_id: String,
+    #[serde(default)]
+    pub slot_id: String,
+    #[serde(default)]
+    pub member: MatrixRtcMemberType,
+}
+
+impl GetTokenCsRequest {
+    pub fn validate(&self) -> Result<(), MatrixErrorResponse> {
+        if self.url.is_empty() || self.room_id.is_empty() || self.slot_id.is_empty() {
+            error!(url = %self.url, room_id = %self.room_id, slot_id = %self.slot_id,
+                "Missing url, room_id or slot_id");
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body is missing `url`, `room_id` or `slot_id`".into(),
+            });
+        }
+        if self.member.id.is_empty() || self.member.claimed_device_id.is_empty() {
+            error!(member = ?self.member, "Handler -> GetTokenCsRequest: Missing member parameters");
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body `member` is missing `id` or `claimed_device_id`".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// DelegateDelayedLeaveRequest is the body of POST /delegate_delayed_leave.
 /// It is used when the client is already connected to the SFU and wants to
 /// hand over the delayed disconnect event after the fact — i.e. no JWT is
@@ -427,6 +464,68 @@ mod tests {
                 "{name}: expected no validation error for delayed-event params without URL"
             );
         }
+    }
+
+    // ── GetTokenCsRequest::validate() ──────────────────────────────────────────────
+
+    fn valid_get_token_cs_request() -> GetTokenCsRequest {
+        GetTokenCsRequest {
+            url: "wss://lk.local".into(),
+            room_id: "!testRoom:example.com".into(),
+            slot_id: "m.call#ROOM".into(),
+            member: MatrixRtcMemberType {
+                id: "member-id".into(),
+                claimed_user_id: "@user:example.com".into(),
+                claimed_device_id: "device-id".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_get_token_cs_request_validate_valid() {
+        assert!(valid_get_token_cs_request().validate().is_ok());
+    }
+
+    #[test]
+    fn test_get_token_cs_request_validate_missing_url_room_id_or_slot_id() {
+        for (name, mutate) in [
+            (
+                "missing url",
+                (|r: &mut GetTokenCsRequest| r.url = String::new()) as fn(&mut GetTokenCsRequest),
+            ),
+            ("missing room_id", |r| r.room_id = String::new()),
+            ("missing slot_id", |r| r.slot_id = String::new()),
+        ] {
+            let mut req = valid_get_token_cs_request();
+            mutate(&mut req);
+            assert_validation_error(req.validate(), "M_BAD_JSON");
+            let _ = name;
+        }
+    }
+
+    #[test]
+    fn test_get_token_cs_request_validate_missing_member_fields() {
+        type Mutator = fn(&mut GetTokenCsRequest);
+        let cases: Vec<(&str, Mutator)> = vec![
+            ("missing id", |r| r.member.id = String::new()),
+            ("missing claimed_device_id", |r| {
+                r.member.claimed_device_id = String::new()
+            }),
+        ];
+        for (name, mutate) in cases {
+            let mut req = valid_get_token_cs_request();
+            mutate(&mut req);
+            let result = req.validate();
+            assert!(result.is_err(), "{name}: expected validation error");
+            assert_validation_error(result, "M_BAD_JSON");
+        }
+    }
+
+    #[test]
+    fn test_cs_sfu_request_validate_ignores_claimed_user_id() {
+        let mut req = valid_get_token_cs_request();
+        req.member.claimed_user_id = String::new();
+        assert!(req.validate().is_ok());
     }
 
     // ── DelegateDelayedLeaveRequest::validate() ───────────────────────────────

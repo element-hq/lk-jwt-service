@@ -28,3 +28,13 @@ report_stats: false
 
 app_service_config_files:
   - /config/app-service.yaml
+
+# Enable registration so that the test suite can provision its own users.
+enable_registration: true
+enable_registration_without_verification: true
+
+experimental_features:
+  # Enable membership look-up via /is_joined.
+  msc4502_enabled: true
+  # Enable C-S & S-S request proxying for application services.
+  msc4512_enabled: true

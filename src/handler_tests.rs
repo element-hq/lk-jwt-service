@@ -36,6 +36,7 @@ type ExistsFn = Box<
 >;
 type ExecFn =
     Box<dyn Fn(&CsApiUrl, &str, DelayEventAction) -> Result<u16, ActionError> + Send + Sync>;
+type IsJoinedFn = Box<dyn Fn(&CsApiUrl, &str, &str) -> Result<bool, String> + Send + Sync>;
 
 /// A [`Deps`] implementation with per-test swappable behaviours. Un-mocked
 /// methods panic, except CS-API URL resolution, which falls back to the real
@@ -47,6 +48,7 @@ struct HandlerTestDeps {
     create_room: Option<CreateRoomMockFn>,
     exists: Option<ExistsFn>,
     exec: Option<ExecFn>,
+    is_joined: Option<IsJoinedFn>,
 }
 
 #[async_trait::async_trait]
@@ -122,6 +124,19 @@ impl Deps for HandlerTestDeps {
             None => panic!("execute_delayed_event_action not mocked in HandlerTestDeps"),
         }
     }
+
+    async fn is_room_member(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        mxid: &str,
+        _as_token: &str,
+    ) -> Result<bool, String> {
+        match &self.is_joined {
+            Some(f) => f(cs_api_url, room_id, mxid),
+            None => panic!("is_room_member not mocked in HandlerTestDeps"),
+        }
+    }
 }
 
 /// A participant_exists mock that pends until the surrounding job is
@@ -137,6 +152,10 @@ fn exchange_ok(sub: &str) -> Option<ExchangeFn> {
 
 fn exec_ok() -> Option<ExecFn> {
     Some(Box::new(|_, _, _| Ok(200)))
+}
+
+fn is_joined_ok(joined: bool) -> Option<IsJoinedFn> {
+    Some(Box::new(move |_, _, _| Ok(joined)))
 }
 
 // ── construction helpers ──────────────────────────────────────────────────────
@@ -165,6 +184,9 @@ fn new_handler_with(
     )
 }
 
+const HS_TOKEN: &str = "hs_token";
+const LIVEKIT_URL: &str = "wss://lk.local";
+
 /// Creates a Handler configured for testing /get_token, with example.com as
 /// the only full-access homeserver.
 fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
@@ -172,10 +194,30 @@ fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
         LiveKitAuth {
             key: "key".into(),
             secret: "secret".into(),
-            lk_url: "wss://lk.local".into(),
+            lk_url: LIVEKIT_URL.into(),
         },
         vec!["example.com".into()],
         Default::default(),
+        Duration::ZERO,
+        HashMap::new(),
+        None,
+        Arc::new(deps),
+    )
+}
+
+/// Creates a Handler configured for testing the /get_token C-S requests.
+fn new_get_token_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+    Handler::new(
+        LiveKitAuth {
+            key: "key".into(),
+            secret: "secret".into(),
+            lk_url: LIVEKIT_URL.into(),
+        },
+        vec!["example.com".into()],
+        crate::config::AppServiceConfig {
+            as_token: "as_token".into(),
+            hs_token: HS_TOKEN.into(),
+        },
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -254,6 +296,41 @@ fn marshal_sfu_request(mutate: impl FnOnce(&mut SfuRequest)) -> String {
     let mut req = valid_sfu_request();
     mutate(&mut req);
     serde_json::to_string(&req).expect("failed to marshal request")
+}
+
+const GET_TOKEN_CS_MXID: &str = "@user:example.com";
+
+/// A fully populated, valid /get_token C-S request.
+fn valid_get_token_cs_request() -> GetTokenCsRequest {
+    GetTokenCsRequest {
+        room_id: "!testRoom:example.com".into(),
+        slot_id: "m.call#ROOM".into(),
+        url: LIVEKIT_URL.into(),
+        member: MatrixRtcMemberType {
+            id: "member-id".into(),
+            claimed_user_id: GET_TOKEN_CS_MXID.into(),
+            claimed_device_id: "device-id".into(),
+        },
+    }
+}
+
+/// A valid /get_token C-S request body with an optional mutation applied before
+/// marshalling.
+fn marshal_get_token_cs_request(mutate: impl FnOnce(&mut GetTokenCsRequest)) -> String {
+    let mut req = valid_get_token_cs_request();
+    mutate(&mut req);
+    serde_json::to_string(&req).expect("failed to marshal request")
+}
+
+/// POSTs to /_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token.
+fn post_get_token_cs_request(body: String, header_mxid: &str) -> http::Request<Body> {
+    http::Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .header("Authorization", format!("Bearer {HS_TOKEN}"))
+        .header("X-Matrix-User-Identifier", header_mxid)
+        .body(Body::from(body))
+        .unwrap()
 }
 
 fn valid_delegate_delayed_leave_request() -> DelegateDelayedLeaveRequest {
@@ -1832,6 +1909,494 @@ async fn test_process_sfu_request() {
             ..Default::default()
         };
         let result = handler.process_sfu_request(&req).await;
+        if tc.expect_error {
+            assert!(result.is_err(), "{}: expected error but got Ok", tc.name);
+        } else {
+            assert!(result.is_ok(), "{}: unexpected error: {result:?}", tc.name);
+        }
+        assert_eq!(
+            create_called.load(std::sync::atomic::Ordering::SeqCst),
+            tc.expect_create_room,
+            "{}: create_livekit_room called mismatch",
+            tc.name
+        );
+        handler.close().await;
+    }
+}
+
+// ── /rtc/livekit/get_token C-S endpoint ─────────────────────────────
+
+/// Non-POST/OPTIONS requests return 405.
+#[tokio::test]
+async fn test_handle_get_token_cs_method_not_allowed() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    for method in ["GET", "PUT", "DELETE", "PATCH"] {
+        let req = http::Request::builder()
+            .method(method)
+            .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send_request(&handler, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method}: expected 405"
+        );
+    }
+    handler.close().await;
+}
+
+/// OPTIONS returns 200.
+#[tokio::test]
+async fn test_handle_get_token_cs_options() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    let req = http::Request::builder()
+        .method("OPTIONS")
+        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .body(Body::empty())
+        .unwrap();
+    let resp = send_request(&handler, req).await;
+    assert_eq!(resp.status(), StatusCode::OK, "expected 200 for OPTIONS");
+    handler.close().await;
+}
+
+/// Malformed JSON returns 400.
+#[tokio::test]
+async fn test_handle_get_token_cs_invalid_json() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    let resp = send_request(
+        &handler,
+        post_get_token_cs_request("{invalid json}".into(), GET_TOKEN_CS_MXID),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for invalid JSON"
+    );
+    handler.close().await;
+}
+
+/// A request without a homeserver access token is rejected.
+#[tokio::test]
+async fn test_handle_get_token_cs_missing_hs_token() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_cs_request(|_| {});
+    let req = http::Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .header("X-Matrix-User-Identifier", GET_TOKEN_CS_MXID)
+        .body(Body::from(body))
+        .unwrap();
+    let resp = send_request(&handler, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 for a missing homeserver access token"
+    );
+    handler.close().await;
+}
+
+/// A request with an incorrect homeserver access token is rejected.
+#[tokio::test]
+async fn test_handle_get_token_cs_wrong_hs_token() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_cs_request(|_| {});
+    let req = http::Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .header("Authorization", "Bearer wrong_token")
+        .header("X-Matrix-User-Identifier", GET_TOKEN_CS_MXID)
+        .body(Body::from(body))
+        .unwrap();
+    let resp = send_request(&handler, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 for an incorrect homeserver access token"
+    );
+    handler.close().await;
+}
+
+/// A valid request produces a 200 response.
+#[tokio::test]
+async fn test_handle_get_token_cs_success() {
+    let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let create_called_clone = create_called.clone();
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_joined: is_joined_ok(true),
+        create_room: Some(Box::new(move |_, _, _| {
+            create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+
+    let body = marshal_get_token_cs_request(|_| {});
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "status");
+    assert!(
+        create_called.load(std::sync::atomic::Ordering::SeqCst),
+        "expected create_livekit_room to be called for full-access user"
+    );
+
+    let body = body_bytes(resp).await;
+    let sfu_response: SfuResponse =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(sfu_response.url, handler.livekit_auth.lk_url, "resp.url");
+    assert!(!sfu_response.jwt.is_empty(), "expected JWT to be non-empty");
+    handler.close().await;
+}
+
+/// A restricted (non-full-access) user's request still succeeds but does not trigger LiveKit
+/// room creation.
+#[tokio::test]
+async fn test_handle_get_token_cs_restricted_no_room_creation() {
+    const HEADER_MXID: &str = "@user:other.com";
+    let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let create_called_clone = create_called.clone();
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.other.com".into()))
+        })),
+        is_joined: is_joined_ok(true),
+        create_room: Some(Box::new(move |_, _, _| {
+            create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    // new_cs_get_token_handler configures full access only for example.com.
+    let handler = new_get_token_cs_handler(deps);
+
+    let body = marshal_get_token_cs_request(|r| {
+        r.member.claimed_user_id = HEADER_MXID.into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, HEADER_MXID)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "status");
+    assert!(
+        !create_called.load(std::sync::atomic::Ordering::SeqCst),
+        "expected create_livekit_room not to be called for a restricted user"
+    );
+    handler.close().await;
+}
+
+/// A mismatch between the X-Matrix-User-Identifier header and
+/// the claimed_user_id in the body does not affect the outcome.
+#[tokio::test]
+async fn test_handle_get_token_cs_ignores_claimed_user_id_mismatch() {
+    const HEADER_MXID: &str = "@real:example.com";
+    let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let create_called_clone = create_called.clone();
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_joined: is_joined_ok(true),
+        create_room: Some(Box::new(move |_, matrix_user, _| {
+            create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                matrix_user, HEADER_MXID,
+                "expected identity derived from the header, not the body"
+            );
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.member.claimed_user_id = "@attacker:example.com".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, HEADER_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "expected the claimed_user_id mismatch to be ignored"
+    );
+    assert!(
+        create_called.load(std::sync::atomic::Ordering::SeqCst),
+        "expected create_livekit_room to be called for full-access user"
+    );
+    handler.close().await;
+}
+
+/// A missing X-Matrix-User-Identifier header returns 401.
+#[tokio::test]
+async fn test_handle_get_token_cs_missing_header() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_cs_request(|_| {});
+    let req = http::Request::builder()
+        .method("POST")
+        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .header("Authorization", format!("Bearer {HS_TOKEN}"))
+        .body(Body::from(body))
+        .unwrap();
+    let resp = send_request(&handler, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 for a missing header"
+    );
+    handler.close().await;
+}
+
+/// A header that isn't shaped like an MXID returns 400.
+#[tokio::test]
+async fn test_handle_get_token_cs_malformed_header() {
+    const MALFORMED: &str = "not-an-mxid";
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_cs_request(|r| {
+        r.member.claimed_user_id = MALFORMED.into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, MALFORMED)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for a malformed header"
+    );
+    handler.close().await;
+}
+
+/// A `url` not matching the configured LIVEKIT_URL is rejected with
+/// 400 M_INVALID_PARAM, before any homeserver calls are made.
+#[tokio::test]
+async fn test_handle_get_token_cs_url_mismatch() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_cs_request(|r| {
+        r.url = "wss://not-the-configured-sfu.example.com".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for a `url` mismatch"
+    );
+    handler.close().await;
+}
+
+/// A missing `url` is rejected by CsSfuRequest::validate() with
+/// 400 M_BAD_JSON, before the handler is even invoked.
+#[tokio::test]
+async fn test_handle_get_token_cs_missing_url() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_cs_request(|r| {
+        r.url = String::new();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for a missing `url`"
+    );
+    handler.close().await;
+}
+
+/// A user who isn't a member of the room is rejected.
+#[tokio::test]
+async fn test_handle_get_token_cs_not_a_member() {
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_joined: is_joined_ok(false),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|_| {});
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "expected 403 for a non-member"
+    );
+    handler.close().await;
+}
+
+/// A transport failure while checking room membership surfaces as 502.
+#[tokio::test]
+async fn test_handle_get_token_cs_membership_check_error() {
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_joined: Some(Box::new(|_, _, _| Err("boom".into()))),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|_| {});
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "expected 502 when the membership check fails"
+    );
+    handler.close().await;
+}
+
+/// A C-S API resolution error returns 400.
+#[tokio::test]
+async fn test_handle_get_token_cs_cs_api_url_resolution_error() {
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|_| Err("M_NOT_FOUND: no".into()))),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|_| {});
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 when CS API URL resolution fails"
+    );
+    handler.close().await;
+}
+
+/// Various unit tests for process_get_token_cs_request.
+#[tokio::test]
+async fn test_process_cs_sfu_request() {
+    const LK_URL: &str = "wss://lk.local:8080/foo";
+
+    struct Case {
+        name: &'static str,
+        header_mxid: &'static str,
+        claimed_user_id: &'static str,
+        url: &'static str,
+        fail_resolution: bool,
+        fail_membership: bool,
+        is_member: bool,
+        fail_join_token: bool,
+        expect_create_room: bool,
+        expect_error: bool,
+    }
+    let base = Case {
+        name: "",
+        header_mxid: "@user:example.com",
+        claimed_user_id: "@user:example.com",
+        url: LK_URL,
+        fail_resolution: false,
+        fail_membership: false,
+        is_member: true,
+        fail_join_token: false,
+        expect_create_room: false,
+        expect_error: false,
+    };
+    for tc in [
+        Case {
+            name: "Full access — all OK",
+            expect_create_room: true,
+            ..base
+        },
+        Case {
+            name: "Restricted — all OK",
+            header_mxid: "@user:other.com",
+            claimed_user_id: "@user:other.com",
+            ..base
+        },
+        Case {
+            name: "URL mismatch",
+            url: "wss://wrong.local",
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "claimed_user_id mismatch is ignored — identity comes from header",
+            claimed_user_id: "@user:faked.com",
+            expect_create_room: true,
+            ..base
+        },
+        Case {
+            name: "Not a member",
+            is_member: false,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Membership check transport error",
+            fail_membership: true,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "CS API resolution error",
+            fail_resolution: true,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Token key empty",
+            fail_join_token: true,
+            expect_error: true,
+            ..base
+        },
+    ] {
+        let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let create_called_clone = create_called.clone();
+
+        let fail_resolution = tc.fail_resolution;
+        let fail_membership = tc.fail_membership;
+        let is_member = tc.is_member;
+
+        let deps = HandlerTestDeps {
+            create_room: Some(Box::new(move |room, _, _| {
+                create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert!(!room.is_empty(), "expected non-empty room name");
+                Ok(())
+            })),
+            resolve: Some(Box::new(move |_| {
+                if fail_resolution {
+                    Err("M_NOT_FOUND: no".into())
+                } else {
+                    Ok(CsApiUrl("https://matrix.example.com".into()))
+                }
+            })),
+            is_joined: Some(Box::new(move |_, _, _| {
+                if fail_membership {
+                    Err("boom".into())
+                } else {
+                    Ok(is_member)
+                }
+            })),
+            ..Default::default()
+        };
+
+        let api_key = if tc.fail_join_token {
+            ""
+        } else {
+            "the_api_key"
+        };
+        let handler = Handler::new(
+            LiveKitAuth {
+                key: api_key.into(),
+                secret: "secret".into(),
+                lk_url: LK_URL.into(),
+            },
+            vec!["example.com".into()],
+            crate::config::AppServiceConfig {
+                as_token: "as_token".into(),
+                hs_token: "hs_token".into(),
+            },
+            Duration::ZERO,
+            HashMap::new(),
+            None,
+            Arc::new(deps),
+        );
+        let req = GetTokenCsRequest {
+            room_id: "!room:example.com".into(),
+            slot_id: "slot".into(),
+            url: tc.url.into(),
+            member: MatrixRtcMemberType {
+                id: "device".into(),
+                claimed_user_id: tc.claimed_user_id.into(),
+                claimed_device_id: "dev".into(),
+            },
+        };
+        let result = handler
+            .process_get_token_cs_request(&req, tc.header_mxid)
+            .await;
         if tc.expect_error {
             assert!(result.is_err(), "{}: expected error but got Ok", tc.name);
         } else {
