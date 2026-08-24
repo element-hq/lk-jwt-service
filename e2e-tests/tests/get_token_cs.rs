@@ -45,11 +45,6 @@ async fn get_token_round_trip_succeeds() {
         "expected a successful response, got {status}: {body}"
     );
 
-    assert_eq!(
-        body["url"].as_str(),
-        Some(LIVEKIT_URL),
-        "expected the response to echo the configured LiveKit URL, got {body}"
-    );
     let jwt = body["jwt"]
         .as_str()
         .unwrap_or_else(|| panic!("expected a `jwt` field in the response, got {body}"));

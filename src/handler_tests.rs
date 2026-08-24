@@ -2045,10 +2045,9 @@ async fn test_handle_get_token_cs_success() {
     );
 
     let body = body_bytes(resp).await;
-    let sfu_response: SfuResponse =
+    let response: GetTokenCsResponse =
         serde_json::from_slice(&body).expect("failed to decode response body");
-    assert_eq!(sfu_response.url, handler.livekit_auth.lk_url, "resp.url");
-    assert!(!sfu_response.jwt.is_empty(), "expected JWT to be non-empty");
+    assert!(!response.jwt.is_empty(), "expected JWT to be non-empty");
     handler.close().await;
 }
 

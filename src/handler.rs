@@ -34,8 +34,8 @@ use crate::helper::{
 };
 use crate::requests::{
     AppservicePingTriggerRequest, DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse,
-    GetTokenCsRequest, LegacySfuRequest, MatrixErrorBody, MatrixErrorResponse, OpenIdTokenType,
-    SfuRequest, SfuResponse,
+    GetTokenCsRequest, GetTokenCsResponse, LegacySfuRequest, MatrixErrorBody, MatrixErrorResponse,
+    OpenIdTokenType, SfuRequest, SfuResponse,
 };
 use crate::store::{Store, StoredJob};
 
@@ -909,7 +909,7 @@ impl Handler {
         &self,
         req: &GetTokenCsRequest,
         header_mxid: &str,
-    ) -> Result<SfuResponse, MatrixErrorResponse> {
+    ) -> Result<GetTokenCsResponse, MatrixErrorResponse> {
         if req.url != self.livekit_auth.lk_url {
             warn!(request_url = %req.url, configured_url = %self.livekit_auth.lk_url,
                 "Handler: request `url` does not match the configured LiveKit URL");
@@ -1012,10 +1012,7 @@ impl Handler {
             lk_id = %lk_identity, room = %lk_room_alias,
             "Handler: generated SFU access token (app-service)");
 
-        Ok(SfuResponse {
-            url: self.livekit_auth.lk_url.clone(),
-            jwt: token,
-        })
+        Ok(GetTokenCsResponse { jwt: token })
     }
 
     /// Handles /delegate_delayed_leave: schedules a delayed-leave job for a

@@ -103,6 +103,12 @@ pub struct GetTokenCsRequest {
     pub member: MatrixRtcMemberType,
 }
 
+/// Response body of the `/rtc/livekit/get_token` endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GetTokenCsResponse {
+    pub jwt: String,
+}
+
 impl GetTokenCsRequest {
     pub fn validate(&self) -> Result<(), MatrixErrorResponse> {
         if self.url.is_empty() || self.room_id.is_empty() || self.slot_id.is_empty() {

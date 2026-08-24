@@ -374,7 +374,6 @@ async fn full_access_token_unstable_is_joined() {
     assert_eq!(status, 200, "body: {body}");
 
     let response: Value = serde_json::from_str(&body).expect("response is not JSON");
-    assert_eq!(response["url"].as_str(), Some(sfu.url()));
     let jwt = response["jwt"].as_str().unwrap_or_default();
 
     let claims = decode_livekit_jwt(jwt);
@@ -424,7 +423,6 @@ async fn full_access_token_stable_is_joined() {
     assert_eq!(status, 200, "body: {body}");
 
     let response: Value = serde_json::from_str(&body).expect("response is not JSON");
-    assert_eq!(response["url"].as_str(), Some(sfu.url()));
     let jwt = response["jwt"].as_str().unwrap_or_default();
 
     let claims = decode_livekit_jwt(jwt);
@@ -474,7 +472,6 @@ async fn restricted_homeserver_joined_user() {
     assert_eq!(status, 200, "body: {body}");
 
     let response: Value = serde_json::from_str(&body).expect("response is not JSON");
-    assert_eq!(response["url"].as_str(), Some(sfu.url()));
     let jwt = response["jwt"].as_str().unwrap_or_default();
     let claims = decode_livekit_jwt(jwt);
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
