@@ -1,0 +1,9 @@
+id: "lk-jwt-service"
+as_token: "e2e_as_token"
+hs_token: "e2e_hs_token"
+sender_localpart: "_lk_jwt_service"
+namespaces:
+  users:
+    - exclusive: false
+      regex: ".*"
+url: "http://jwt-service:8080" # Required for Synapse to call POST /_matrix/app/v1/ping on this service.

@@ -1,0 +1,30 @@
+server_name: "synapse.e2e.test"
+public_baseurl: http://synapse.e2e.test/
+
+pid_file: /tmp/homeserver.pid
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    # Some Docker setups disable IPv6 on the container's network interface,
+    # which otherwise leaves the default dual-stack bind reachable only via
+    # loopback.
+    bind_addresses: ["0.0.0.0"]
+    resources:
+      - names: [client]
+        compress: false
+
+database:
+  name: sqlite3
+  args:
+    database: /tmp/homeserver.db
+
+media_store_path: /tmp
+signing_key_path: "/tmp/homeserver.signing.key"
+
+report_stats: false
+
+app_service_config_files:
+  - /config/app-service.yaml

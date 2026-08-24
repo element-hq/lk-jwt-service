@@ -161,6 +161,16 @@ impl DelegateDelayedLeaveRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DelegateDelayedLeaveResponse {}
 
+/// The request body of POST /appservice-ping.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppservicePingTriggerRequest {
+    #[serde(default)]
+    pub server_name: String,
+    #[serde(default)]
+    pub appservice_id: String,
+}
+
 /// A Matrix-style error response. Doubles as the error type carried through
 /// request processing so that HTTP handlers can map it onto the wire.
 #[derive(Debug, Clone, thiserror::Error)]

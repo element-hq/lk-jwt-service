@@ -157,6 +157,7 @@ fn new_handler_with(
     Handler::new(
         default_auth(),
         full_access.iter().map(|s| s.to_string()).collect(),
+        Default::default(),
         Duration::ZERO, // sanity check interval disabled
         HashMap::new(),
         store,
@@ -174,6 +175,7 @@ fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
             lk_url: "wss://lk.local".into(),
         },
         vec!["example.com".into()],
+        Default::default(),
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -186,6 +188,7 @@ fn new_delegate_delayed_leave_handler(deps: HandlerTestDeps) -> Arc<Handler> {
     Handler::new(
         default_auth(),
         vec!["example.com".into()],
+        Default::default(),
         Duration::ZERO,
         HashMap::from([(
             "example.com".to_owned(),
@@ -320,6 +323,7 @@ async fn test_is_full_access_user() {
             lk_url: "wss://lk.local:8080/foo".into(),
         },
         vec!["example.com".into(), "another.example.com".into()],
+        Default::default(),
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -489,6 +493,7 @@ async fn test_handler_close_timeout() {
     let (handler, _rx) = Handler::new_without_loop(
         default_auth(),
         vec!["*".into()],
+        Default::default(),
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -700,6 +705,7 @@ fn new_sfu_webhook_test_handler(key: &str, secret: &str) -> (Arc<Handler>, LoopR
             lk_url: String::new(),
         },
         vec![],
+        Default::default(),
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -1802,6 +1808,7 @@ async fn test_process_sfu_request() {
                 lk_url: "wss://lk.local:8080/foo".into(),
             },
             vec!["example.com".into()],
+            Default::default(),
             Duration::ZERO,
             HashMap::new(),
             None,
@@ -1920,6 +1927,7 @@ async fn test_handle_sfu_get_success() {
             lk_url: "wss://lk.local:8080/foo".into(),
         },
         vec![MATRIX_SERVER_NAME.into()],
+        Default::default(),
         Duration::ZERO,
         HashMap::new(),
         Some(new_in_memory_store()),
@@ -2069,6 +2077,7 @@ async fn test_process_legacy_sfu_request() {
                 lk_url: "wss://lk.local:8080/foo".into(),
             },
             vec!["example.com".into()],
+            Default::default(),
             Duration::ZERO,
             HashMap::new(),
             Some(new_in_memory_store()),

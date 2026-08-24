@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -22,17 +23,19 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::config::AppServiceConfig;
 use crate::delayed_event_manager::{
     start_participant_lookup, DelayedEventJob, DelayedEventJobParams, DelayedEventSignal, JobKey,
     JobRestartedRequest, LookupCsApiUrlFn, SfuMessage,
 };
 use crate::helper::{
-    livekit_identity_for, livekit_room_alias_for, CsApiUrl, CsApiUrlCache, Deps, LiveKitAuth,
-    LiveKitIdentity, LiveKitRoomAlias, UniqueId,
+    livekit_identity_for, livekit_room_alias_for, new_unique_id, CsApiUrl, CsApiUrlCache, Deps,
+    LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId,
 };
 use crate::requests::{
-    DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse, LegacySfuRequest, MatrixErrorBody,
-    MatrixErrorResponse, OpenIdTokenType, SfuRequest, SfuResponse,
+    AppservicePingTriggerRequest, DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse,
+    LegacySfuRequest, MatrixErrorBody, MatrixErrorResponse, OpenIdTokenType, SfuRequest,
+    SfuResponse,
 };
 use crate::store::{Store, StoredJob};
 
@@ -124,6 +127,8 @@ pub struct Handler {
     cancel: CancellationToken,
     pub(crate) livekit_auth: LiveKitAuth,
     full_access_homeservers: Vec<String>,
+    /// Configuration options used for running as an application service.
+    app_service_config: AppServiceConfig,
     /// The period between room-worker sanity checks. Zero disables the sanity
     /// check.
     sanity_check_interval: Duration,
@@ -146,6 +151,7 @@ impl Handler {
     pub fn new(
         lk_auth: LiveKitAuth,
         full_access_homeservers: Vec<String>,
+        app_service_config: AppServiceConfig,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
@@ -154,6 +160,7 @@ impl Handler {
         let (handler, receivers) = Self::new_without_loop(
             lk_auth,
             full_access_homeservers,
+            app_service_config,
             sanity_check_interval,
             cs_api_url_overrides,
             store,
@@ -169,6 +176,7 @@ impl Handler {
     pub(crate) fn new_without_loop(
         lk_auth: LiveKitAuth,
         full_access_homeservers: Vec<String>,
+        app_service_config: AppServiceConfig,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
@@ -185,6 +193,7 @@ impl Handler {
             cancel: CancellationToken::new(),
             livekit_auth: lk_auth,
             full_access_homeservers,
+            app_service_config,
             sanity_check_interval,
             cs_api_url_overrides: Arc::new(cs_api_url_overrides),
             cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
@@ -941,7 +950,7 @@ impl Handler {
     }
 
     pub fn prepare_router(self: &Arc<Self>) -> Router {
-        Router::new()
+        let mut router = Router::new()
             // Deprecated: pre-Matrix-2.0; remove once clients migrate to
             // /get_token.
             .route("/sfu/get", any(handle_legacy))
@@ -951,8 +960,27 @@ impl Handler {
                 any(handle_delegate_delayed_leave),
             )
             .route("/sfu_webhook", any(handle_sfu_webhook))
-            .route("/healthz", any(healthcheck))
-            .with_state(self.clone())
+            .route("/healthz", any(healthcheck));
+
+        if self.app_service_config.is_set_up() {
+            router = router
+                .route("/appservice-ping", any(handle_appservice_ping_trigger))
+                .route("/_matrix/app/v1/ping", any(handle_appservice_ping))
+                .route(
+                    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token",
+                    any(handle_cs_get_token),
+                )
+                .route(
+                    "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token",
+                    any(handle_ss_get_token),
+                )
+                .route(
+                    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave",
+                    any(handle_cs_delegate_delayed_leave),
+                );
+        }
+
+        router.with_state(self.clone())
     }
 }
 
@@ -1141,6 +1169,119 @@ async fn healthcheck(req: Request) -> Response {
     } else {
         StatusCode::METHOD_NOT_ALLOWED.into_response()
     }
+}
+
+/// Handles /appservice-ping requests.
+async fn handle_appservice_ping_trigger(
+    State(handler): State<Arc<Handler>>,
+    req: Request,
+) -> Response {
+    let req = match gate_post(req) {
+        PostGate::Handle(req) => req,
+        PostGate::Reply(resp) => return resp,
+    };
+
+    let trigger: AppservicePingTriggerRequest = match decode_json_body(req).await {
+        Ok(r) => r,
+        Err(err) => {
+            error!(err = %err, "Handler: appservice ping trigger: error reading body");
+            return matrix_error_response(400, "M_NOT_JSON", "Error reading request");
+        }
+    };
+
+    if trigger.server_name.is_empty() || trigger.appservice_id.is_empty() {
+        return matrix_error_response(
+            400,
+            "M_BAD_JSON",
+            "The request body is missing `server_name` or `appservice_id`",
+        );
+    }
+
+    let cs_api_url = match handler
+        .deps
+        .resolve_cs_api_url(
+            &trigger.server_name,
+            &handler.cs_api_url_overrides,
+            Some(&handler.cs_api_url_cache),
+        )
+        .await
+    {
+        Ok(url) => url,
+        Err(err) => {
+            warn!(server_name = %trigger.server_name, err = %err,
+                "Handler: appservice ping trigger: could not resolve C-S API URL");
+            return matrix_error_response(
+                502,
+                "M_CONNECTION_FAILED",
+                &format!("Could not resolve C-S API URL: {err}"),
+            );
+        }
+    };
+
+    let transaction_id = new_unique_id().to_string();
+    match handler
+        .deps
+        .trigger_appservice_ping(
+            &cs_api_url,
+            &trigger.appservice_id,
+            &handler.app_service_config.as_token,
+            &transaction_id,
+        )
+        .await
+    {
+        Ok((status, body)) => Response::builder()
+            .status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(err) => {
+            warn!(server_name = %trigger.server_name, err = %err,
+                "Handler: appservice ping trigger: request failed");
+            matrix_error_response(
+                502,
+                "M_CONNECTION_FAILED",
+                &format!("Failed to reach homeserver: {err}"),
+            )
+        }
+    }
+}
+
+/// Handles /_matrix/app/v1/ping requests.
+async fn handle_appservice_ping(State(handler): State<Arc<Handler>>, req: Request) -> Response {
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+
+    if token.is_empty() {
+        return matrix_error_response(401, "M_MISSING_TOKEN", "Missing homeserver access token");
+    }
+    if token != handler.app_service_config.hs_token {
+        return matrix_error_response(
+            401,
+            "M_UNKNOWN_TOKEN",
+            "Unrecognised homeserver access token",
+        );
+    }
+
+    Json(serde_json::json!({})).into_response()
+}
+
+/// Handles /get_token C-S requests.
+async fn handle_cs_get_token() -> Response {
+    apply_cors_json(matrix_error_response(501, "M_UNRECOGNIZED", "TODO"))
+}
+
+/// Handles /get_token S-S requests.
+async fn handle_ss_get_token() -> Response {
+    matrix_error_response(501, "M_UNRECOGNIZED", "TODO")
+}
+
+/// Handles /delegate_delayed_leave requests.
+async fn handle_cs_delegate_delayed_leave() -> Response {
+    apply_cors_json(matrix_error_response(501, "M_UNRECOGNIZED", "TODO"))
 }
 
 /// Translates a validated LiveKit webhook event into a

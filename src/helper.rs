@@ -769,6 +769,49 @@ pub trait Deps: Send + Sync {
             }),
         }
     }
+
+    /// Triggers a ping round-trip to ensure the service and the homeserver
+    /// can reach each other.
+    async fn trigger_appservice_ping(
+        &self,
+        cs_api_url: &CsApiUrl,
+        appservice_id: &str,
+        as_token: &str,
+        transaction_id: &str,
+    ) -> Result<(u16, Vec<u8>), String> {
+        let mut endpoint = url::Url::parse(cs_api_url.as_str())
+            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
+        endpoint
+            .path_segments_mut()
+            .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?
+            .pop_if_empty()
+            .extend([
+                "_matrix",
+                "client",
+                "v1",
+                "appservice",
+                appservice_id,
+                "ping",
+            ]);
+
+        let resp = http_client(self.skip_verify_tls())
+            .post(endpoint.clone())
+            .bearer_auth(as_token)
+            .json(&serde_json::json!({ "transaction_id": transaction_id }))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "trigger_appservice_ping");
+                msg
+            })?;
+
+        let status = resp.status().as_u16();
+        let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        debug!(url = %endpoint, status, "trigger_appservice_ping");
+        Ok((status, body))
+    }
 }
 
 /// The production [`Deps`] implementation — all behaviour comes from the

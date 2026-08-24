@@ -77,6 +77,7 @@ async fn main() {
             lk_url: config.lk_url.clone(),
         },
         config.full_access_homeservers.clone(),
+        config.app_service_config,
         config.sanity_check_interval,
         config.cs_api_url_overrides.clone(),
         store,
@@ -113,7 +114,8 @@ async fn main() {
         eprintln!("Failed to bind {}", config.lk_jwt_bind);
         std::process::exit(1);
     };
-    if let Err(err) = axum::serve(listener, handler.prepare_router()).await {
+    let router = handler.prepare_router();
+    if let Err(err) = axum::serve(listener, router).await {
         eprintln!("{err}");
         std::process::exit(1);
     }

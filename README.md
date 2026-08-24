@@ -132,7 +132,7 @@ without being joined to any rooms itself. This requires the `urn:matrix:client:r
 scope to be set. The service does not require any event traffic, however. So make sure to set
 `url` to `null`.
 
-Additionally, request proxying needs to be enabled for the `/livekit` subpath in the Client-Server
+Additionally, request proxying needs to be enabled for the `/rtc/livekit` subpath in the Client-Server
 and Server-Server API. This is done via the `proxy_prefix` and `proxy_url` properties.
 
 Below is an example application service registration file.
@@ -151,7 +151,7 @@ url: null # No event traffic required
 scopes: [ "urn:matrix:client:rooms:is_joined" ]
 # Unstable scope for membership look-up
 io.element.msc4502.scope: [ "urn:matrix:client:io.element.msc4502:rooms:is_joined" ],
-proxy_prefix: "livekit" # Proxy /livekit requests on the C-S and S-S API
+proxy_prefix: "rtc/livekit" # Proxy /rtc/livekit requests on the C-S and S-S API
 proxy_url: "http://127.0.0.1:1234" # Forward proxied requests to this URL
 ```
 

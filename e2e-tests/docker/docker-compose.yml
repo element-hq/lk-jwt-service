@@ -1,0 +1,41 @@
+networks:
+  e2e:
+
+services:
+  synapse:
+    hostname: homeserver
+    # Built from https://github.com/element-hq/synapse/pull/19977 while it is unmerged.
+    build:
+      context: https://github.com/Johennes/synapse.git#johannes/outgoing-fed-proxy
+      dockerfile: docker/Dockerfile
+    environment:
+      - SYNAPSE_CONFIG_PATH=/config/homeserver.yaml
+    volumes:
+      - ./homeserver.yaml:/config/homeserver.yaml:ro
+      - ./app-service.yaml:/config/app-service.yaml:ro
+    ports:
+      - "18008:8008"
+    networks:
+      - e2e
+
+  jwt-service:
+    build:
+      context: ../..
+    hostname: jwt-service
+    environment:
+      # No SFU involved in this test; the value just needs to satisfy config
+      # validation.
+      - LIVEKIT_URL=ws://127.0.0.1:9
+      - LIVEKIT_KEY=devkey
+      - LIVEKIT_SECRET=secret
+      - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse.e2e.test
+      - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service.yaml
+      - LIVEKIT_CS_API_URL_OVERRIDES=synapse.e2e.test=http://synapse:8008
+    volumes:
+      - ./app-service.yaml:/etc/lk-jwt-service/app-service.yaml:ro
+    ports:
+      - "18080:8080"
+    depends_on:
+      - synapse
+    networks:
+      - e2e
