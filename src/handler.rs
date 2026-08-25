@@ -27,8 +27,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::AppServiceConfig;
 use crate::delayed_event_manager::{
-    DelayedEventJob, DelayedEventJobParams, DelayedEventSignal, JobKey, JobRestartedRequest,
-    LookupCsApiUrlFn, SfuMessage, start_participant_lookup,
+    AppServiceIdentity, DelayedEventJob, DelayedEventJobParams, DelayedEventSignal, JobKey,
+    JobRestartedRequest, LookupCsApiUrlFn, SfuMessage, start_participant_lookup,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::helper::new_unique_id;
@@ -715,6 +715,43 @@ impl Handler {
             })
     }
 
+    /// Looks up the delay of `delay_id` on the homeserver, for delegation
+    /// requests that do not carry one.
+    async fn look_up_delay_timeout(
+        &self,
+        cs_api_url: &CsApiUrl,
+        delay_id: &str,
+        owner_user_id: &str,
+    ) -> Result<Duration, MatrixErrorResponse> {
+        self.deps
+            .get_delayed_event_delay(
+                cs_api_url,
+                delay_id,
+                AppServiceIdentity {
+                    as_token: &self.app_service_config.as_token,
+                    user_id: owner_user_id,
+                },
+            )
+            .await
+            .map_err(|err| {
+                warn!(delay_id = %delay_id, matrix_id = %owner_user_id, err = %err,
+                    "Handler: could not look up the delay of the delayed event");
+                if err.is_delayed_event_not_found() {
+                    MatrixErrorResponse {
+                        status: 404,
+                        errcode: "M_NOT_FOUND".into(),
+                        err: "Unknown `delay_id`".into(),
+                    }
+                } else {
+                    MatrixErrorResponse {
+                        status: 503,
+                        errcode: "M_UNKNOWN".into(),
+                        err: "Unable to look up the delayed event".into(),
+                    }
+                }
+            })
+    }
+
     /// Mints a LiveKit join token for `(lk_room_alias, lk_identity)`, mapping
     /// any failure onto the standard 500. `matrix_id` identifies the
     /// requester in the error log.
@@ -1174,17 +1211,27 @@ impl Handler {
 
         // Verify that the Client-Server API can be resolved and prime the
         // cache.
-        self.resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
+        let cs_api_url = self
+            .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
+        // When no timeout is specified, try to read it by looking up the event on the server.
+        let delay_timeout = match req.delay_timeout {
+            Some(timeout) => Duration::from_millis(timeout.max(0) as u64),
+            None => {
+                self.look_up_delay_timeout(&cs_api_url, &req.delay_id, mxid_header)
+                    .await?
+            }
+        };
+
         info!(room = %lk_room_alias, lk_id = %lk_identity, delay_id = %req.delay_id,
-            matrix_id = %mxid_header,
+            matrix_id = %mxid_header, delay_timeout = ?delay_timeout,
             "Handler: scheduling delayed event job (delegate_delayed_leave, app-service)");
 
         self.add_delayed_event_job(DelayedEventJobParams {
             server_name: self.app_service_config.hs_server_name.clone(),
             delay_id: req.delay_id.clone(),
-            delay_timeout: Duration::from_millis(req.delay_timeout.max(0) as u64),
+            delay_timeout,
             livekit_room: lk_room_alias.clone(),
             livekit_identity: lk_identity.clone(),
             owner_user_id: mxid_header.to_owned(),

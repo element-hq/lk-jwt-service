@@ -276,43 +276,185 @@ pub async fn join_room_via(
 /// Connects to the LiveKit SFU at `sfu_addr`'s RTC signalling endpoint using
 /// the given access token and confirms the SFU accepts it.
 pub async fn verify_livekit_token_is_usable(sfu_addr: &str, access_token: &str) {
-    use futures_util::StreamExt;
-    use tokio_tungstenite::tungstenite::Message;
-
-    let url = format!(
-        "ws://{sfu_addr}/rtc?access_token={access_token}&protocol=15&sdk=other&version=1.0.0&auto_subscribe=1"
-    );
-    let connect = tokio_tungstenite::connect_async(&url);
-    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), connect)
+    LiveKitParticipant::connect(sfu_addr, access_token)
         .await
-        .unwrap_or_else(|_| panic!("timed out connecting to the LiveKit SFU"))
-        .unwrap_or_else(|e| panic!("failed to connect to the LiveKit SFU: {e}"));
+        .disconnect()
+        .await;
+}
 
-    let read_deadline = Duration::from_secs(10);
-    loop {
-        let msg = tokio::time::timeout(read_deadline, socket.next())
+/// A participant held open on the LiveKit SFU through its RTC signalling
+/// endpoint.
+///
+/// Only the signalling connection is established — no media is negotiated —
+/// which is enough for the SFU to consider the participant present.
+///
+/// The connection is kept alive by a background task that drains incoming
+/// signalling messages and sends the protocol-level pings the SFU expects.
+pub struct LiveKitParticipant {
+    /// Signals the background task to leave the room. Taken by
+    /// [`LiveKitParticipant::disconnect`].
+    leave_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LiveKitParticipant {
+    /// Connects to the SFU at `sfu_addr` with the given access token and
+    /// returns once the SFU has admitted the participant into the room.
+    pub async fn connect(sfu_addr: &str, access_token: &str) -> LiveKitParticipant {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let url = format!(
+            "ws://{sfu_addr}/rtc?access_token={access_token}&protocol=15&sdk=other&version=1.0.0&auto_subscribe=1"
+        );
+        let connect = tokio_tungstenite::connect_async(&url);
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), connect)
             .await
-            .unwrap_or_else(|_| panic!("timed out waiting for a JoinResponse from the SFU"))
-            .unwrap_or_else(|| panic!("the SFU closed the connection before joining"))
-            .unwrap_or_else(|e| panic!("error reading from the SFU: {e}"));
+            .unwrap_or_else(|_| panic!("timed out connecting to the LiveKit SFU"))
+            .unwrap_or_else(|e| panic!("failed to connect to the LiveKit SFU: {e}"));
 
-        let bytes = match msg {
-            Message::Binary(bytes) => bytes,
-            Message::Close(frame) => {
-                panic!("the SFU rejected the connection (likely an invalid token): {frame:?}")
+        // Wait for the JoinResponse — the point at which the SFU has admitted
+        // the participant. It also carries the ping interval to honour.
+        let read_deadline = Duration::from_secs(10);
+        let ping_interval = loop {
+            let msg = tokio::time::timeout(read_deadline, socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for a JoinResponse from the SFU"))
+                .unwrap_or_else(|| panic!("the SFU closed the connection before joining"))
+                .unwrap_or_else(|e| panic!("error reading from the SFU: {e}"));
+
+            let bytes = match msg {
+                Message::Binary(bytes) => bytes,
+                Message::Close(frame) => {
+                    panic!("the SFU rejected the connection (likely an invalid token): {frame:?}")
+                }
+                _ => continue,
+            };
+
+            let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
+                .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
+            if let Some(livekit_protocol::signal_response::Message::Join(join)) = response.message {
+                assert!(
+                    join.room.is_some(),
+                    "expected the JoinResponse to carry room info"
+                );
+                break Duration::from_secs(join.ping_interval.max(1) as u64);
             }
-            _ => continue,
         };
 
-        let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
-            .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
-        if let Some(livekit_protocol::signal_response::Message::Join(join)) = response.message {
-            assert!(
-                join.room.is_some(),
-                "expected the JoinResponse to carry room info"
-            );
-            let _ = socket.close(None).await;
-            return;
+        let (leave_tx, mut leave_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            use futures_util::SinkExt;
+
+            let mut ticker = tokio::time::interval(ping_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            ticker.tick().await; // The first tick completes immediately.
+
+            loop {
+                tokio::select! {
+                    _ = &mut leave_rx => {
+                        // Leave explicitly rather than just dropping the
+                        // socket: it makes the SFU report the departure as
+                        // client-initiated, which is what a participant
+                        // hanging up looks like.
+                        let leave = livekit_protocol::SignalRequest {
+                            message: Some(livekit_protocol::signal_request::Message::Leave(
+                                livekit_protocol::LeaveRequest {
+                                    can_reconnect: false,
+                                    reason: livekit_protocol::DisconnectReason::ClientInitiated as i32,
+                                    action: livekit_protocol::leave_request::Action::Disconnect as i32,
+                                    regions: None,
+                                },
+                            )),
+                        };
+                        let _ = socket.send(Message::binary(prost::Message::encode_to_vec(&leave))).await;
+                        let _ = socket.close(None).await;
+                        return;
+                    }
+                    _ = ticker.tick() => {
+                        let ping = livekit_protocol::SignalRequest {
+                            message: Some(livekit_protocol::signal_request::Message::PingReq(
+                                livekit_protocol::Ping { timestamp: 0, rtt: 0 },
+                            )),
+                        };
+                        if socket.send(Message::binary(prost::Message::encode_to_vec(&ping))).await.is_err() {
+                            return;
+                        }
+                    }
+                    // Drain incoming messages so that the connection stays
+                    // responsive (this is also what answers WebSocket pings).
+                    msg = socket.next() => {
+                        match msg {
+                            None | Some(Err(_)) => return,
+                            Some(Ok(_)) => {}
+                        }
+                    }
+                }
+            }
+        });
+
+        LiveKitParticipant {
+            leave_tx: Some(leave_tx),
+            task,
         }
     }
+
+    /// Leaves the room and waits until the signalling connection is closed.
+    pub async fn disconnect(mut self) {
+        if let Some(tx) = self.leave_tx.take() {
+            let _ = tx.send(());
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(10), &mut self.task).await;
+    }
+}
+
+impl Drop for LiveKitParticipant {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+
+/// Requests a LiveKit access token for `member_id` / `device_id` in
+/// `room_id` / `slot_id` through the homeserver's C-S API.
+pub async fn get_livekit_token(
+    cs_api_url: &str,
+    user: &MatrixUser,
+    livekit_url: &str,
+    room_id: &str,
+    slot_id: &str,
+    member_id: &str,
+    device_id: &str,
+) -> String {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{cs_api_url}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+        ))
+        .bearer_auth(&user.access_token)
+        .json(&serde_json::json!({
+            "room_id": room_id,
+            "slot_id": slot_id,
+            "url": livekit_url,
+            "member": {
+                "id": member_id,
+                "claimed_device_id": device_id,
+            },
+        }))
+        .send()
+        .await
+        .expect("request to /rtc/livekit/get_token failed");
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .expect("get_token response was not valid JSON");
+    assert!(
+        status.is_success(),
+        "expected a successful get_token response, got {status}: {body}"
+    );
+    body["jwt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("get_token response is missing `jwt`: {body}"))
+        .to_owned()
 }

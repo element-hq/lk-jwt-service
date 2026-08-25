@@ -473,6 +473,51 @@ struct LimitExceededBody {
     retry_after_ms: i64,
 }
 
+/// Classifies a rate-limited (429) CS-API response: [`ActionError::RetryAfter`]
+/// when it carries a usable retry hint, [`ActionError::Transient`] when it does not.
+async fn retry_after_from_response(resp: reqwest::Response, status: u16) -> ActionError {
+    // Prefer the standard Retry-After header (RFC 7231 §7.1.3).
+    let retry_after_header = resp
+        .headers()
+        .get(http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    if let Ok(seconds) = retry_after_header.parse::<i64>() {
+        let seconds = seconds.max(0) as u64;
+        return ActionError::RetryAfter {
+            status,
+            retry_after: Duration::from_secs(seconds),
+        };
+    }
+    if let Ok(t) = httpdate::parse_http_date(&retry_after_header) {
+        let d = t
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
+        return ActionError::RetryAfter {
+            status,
+            retry_after: Duration::from_secs(d.as_secs()),
+        };
+    }
+    // Fall back to the retry_after_ms field of M_LIMIT_EXCEEDED bodies —
+    // deprecated in Matrix v1.10 but still emitted by common homeservers.
+    if let Ok(body) = resp.json::<LimitExceededBody>().await
+        && body.retry_after_ms > 0
+    {
+        // Ceil ms → s (e.g. 500 ms → 1 s, 1500 ms → 2 s).
+        let seconds = (body.retry_after_ms as u64).div_ceil(1000);
+        return ActionError::RetryAfter {
+            status,
+            retry_after: Duration::from_secs(seconds),
+        };
+    }
+    // No usable hint.
+    ActionError::Transient {
+        status,
+        msg: "CS API temporarily unavailable (http status code 429)".into(),
+    }
+}
+
 /// The subject of an `/is_joined` query (MSC4502): either a specific Matrix
 /// user ID or a server name.
 pub enum IsJoinedSubject<'a> {
@@ -674,6 +719,103 @@ pub trait Deps: Send + Sync {
         }
     }
 
+    /// GETs the delay of the delayed event identified by `delay_id` from the C-S API.
+    ///
+    ///   - 200 with a usable delay → `Ok(delay)`
+    ///   - 404, or 200 with a missing/non-positive delay
+    ///                            → permanent [`ActionError::DelayedEventNotFound`]
+    ///   - 429 with a usable retry hint → [`ActionError::RetryAfter`]
+    ///   - anything else                → [`ActionError::Transient`]
+    async fn get_delayed_event_delay(
+        &self,
+        cs_api_url: &CsApiUrl,
+        delay_id: &str,
+        identity: AppServiceIdentity<'_>,
+    ) -> Result<Duration, ActionError> {
+        let mut endpoint =
+            url::Url::parse(cs_api_url.as_str()).map_err(|e| ActionError::Transient {
+                status: 0,
+                msg: format!("get_delayed_event_delay: invalid URL: {e}"),
+            })?;
+        {
+            let mut segments =
+                endpoint
+                    .path_segments_mut()
+                    .map_err(|_| ActionError::Transient {
+                        status: 0,
+                        msg: "get_delayed_event_delay: invalid URL: cannot be a base".into(),
+                    })?;
+            segments.pop_if_empty();
+            for segment in DELAYED_EVENTS_ENDPOINT.trim_matches('/').split('/') {
+                segments.push(segment);
+            }
+            segments.push(delay_id);
+        }
+        endpoint
+            .query_pairs_mut()
+            .append_pair("user_id", identity.user_id);
+
+        let resp = http_client(self.skip_verify_tls())
+            .get(endpoint.clone())
+            .bearer_auth(identity.as_token)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "get_delayed_event_delay");
+                ActionError::Transient { status: 0, msg }
+            })?;
+
+        let status = resp.status().as_u16();
+        debug!(url = %endpoint, status, "get_delayed_event_delay");
+
+        match status {
+            200 => {
+                #[derive(Deserialize, Default)]
+                struct DelayedEventResponse {
+                    /// The field name MSC4140 specifies.
+                    #[serde(default)]
+                    delay_ms: i64,
+                    /// The name earlier revisions of the MSC used, still
+                    /// emitted by homeservers implementing those.
+                    #[serde(default)]
+                    delay: i64,
+                }
+                let parsed: DelayedEventResponse =
+                    resp.json().await.map_err(|e| ActionError::Transient {
+                        status,
+                        msg: format!("failed to parse delayed event response: {e}"),
+                    })?;
+                let delay_ms = if parsed.delay_ms > 0 {
+                    parsed.delay_ms
+                } else {
+                    parsed.delay
+                };
+                if delay_ms <= 0 {
+                    // A delayed event without a usable delay is as good as
+                    // absent — there is nothing to schedule a job for.
+                    return Err(ActionError::DelayedEventNotFound { status });
+                }
+                Ok(Duration::from_millis(delay_ms as u64))
+            }
+
+            404 => Err(ActionError::DelayedEventNotFound { status }),
+
+            500..=599 => Err(ActionError::Transient {
+                status,
+                msg: format!("CS API temporarily unavailable (http status code {status})"),
+            }),
+
+            429 => Err(retry_after_from_response(resp, status).await),
+
+            _ => Err(ActionError::Transient {
+                status,
+                msg: format!("CS API returned unexpected status: {status}"),
+            }),
+        }
+    }
+
     /// POSTs the given action (restart or send) to the Matrix CS-API for
     /// `delay_id`.
     ///
@@ -760,49 +902,7 @@ pub trait Deps: Send + Sync {
                 msg: format!("CS API temporarily unavailable (http status code {status})"),
             }),
 
-            429 => {
-                // Prefer the standard Retry-After header (RFC 7231 §7.1.3).
-                let retry_after_header = resp
-                    .headers()
-                    .get(http::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default()
-                    .to_owned();
-                if let Ok(seconds) = retry_after_header.parse::<i64>() {
-                    let seconds = seconds.max(0) as u64;
-                    return Err(ActionError::RetryAfter {
-                        status,
-                        retry_after: Duration::from_secs(seconds),
-                    });
-                }
-                if let Ok(t) = httpdate::parse_http_date(&retry_after_header) {
-                    let d = t
-                        .duration_since(SystemTime::now())
-                        .unwrap_or(Duration::ZERO);
-                    return Err(ActionError::RetryAfter {
-                        status,
-                        retry_after: Duration::from_secs(d.as_secs()),
-                    });
-                }
-                // Fall back to the retry_after_ms field of M_LIMIT_EXCEEDED
-                // bodies — deprecated in Matrix v1.10 but still emitted by
-                // common homeservers.
-                if let Ok(body) = resp.json::<LimitExceededBody>().await
-                    && body.retry_after_ms > 0
-                {
-                    // Ceil ms → s (e.g. 500 ms → 1 s, 1500 ms → 2 s).
-                    let seconds = (body.retry_after_ms as u64).div_ceil(1000);
-                    return Err(ActionError::RetryAfter {
-                        status,
-                        retry_after: Duration::from_secs(seconds),
-                    });
-                }
-                // No usable hint.
-                Err(ActionError::Transient {
-                    status,
-                    msg: "CS API temporarily unavailable (http status code 429)".into(),
-                })
-            }
+            429 => Err(retry_after_from_response(resp, status).await),
 
             // Everything else is treated as transient — many 4xx codes are
             // genuinely retriable (408, 421, 423, 425, …).
@@ -1656,6 +1756,206 @@ mod tests {
         RealDeps::default()
             .execute_delayed_event_action(&CsApiUrl(url.to_owned()), delay_id, action, identity)
             .await
+    }
+
+    // ── get_delayed_event_delay ───────────────────────────────────────────
+
+    async fn get_delay(url: &str, delay_id: &str) -> Result<Duration, ActionError> {
+        RealDeps::default()
+            .get_delayed_event_delay(
+                &CsApiUrl(url.to_owned()),
+                delay_id,
+                AppServiceIdentity {
+                    as_token: "as_token",
+                    user_id: "@user:example.com",
+                },
+            )
+            .await
+    }
+
+    /// The delay is read off a 200 response and the request is a GET against the delayed
+    /// event's own path, authenticated by an application-service identity assertion.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_success() {
+        let captured: Arc<Mutex<(String, String, String, String)>> = Arc::new(Mutex::new((
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )));
+        let captured_clone = captured.clone();
+        let router = Router::new().route(
+            "/{*path}",
+            any(move |req: Request| {
+                let captured = captured_clone.clone();
+                async move {
+                    *captured.lock().unwrap() = (
+                        req.method().to_string(),
+                        req.uri().path().to_owned(),
+                        req.uri().query().unwrap_or_default().to_owned(),
+                        req.headers()
+                            .get(http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                    axum::Json(serde_json::json!({"delay_ms": 30000}))
+                }
+            }),
+        );
+        let server = spawn_http_server(router).await;
+
+        let delay = get_delay(&server.url, "delay id/1")
+            .await
+            .expect("unexpected error");
+        assert_eq!(delay, Duration::from_secs(30));
+
+        let (method, path, query, auth) = captured.lock().unwrap().clone();
+        assert_eq!(method, "GET", "expected GET");
+        assert_eq!(
+            path,
+            format!("{DELAYED_EVENTS_ENDPOINT}/delay%20id%2F1"),
+            "expected the delay_id to be escaped into the path"
+        );
+        assert_eq!(query, "user_id=%40user%3Aexample.com");
+        assert_eq!(auth, "Bearer as_token");
+    }
+
+    /// The field name used by earlier revisions of MSC4140 is still understood.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_legacy_field() {
+        let router = Router::new().route(
+            "/{*path}",
+            any(|| async { axum::Json(serde_json::json!({"delay": 15000})) }),
+        );
+        let server = spawn_http_server(router).await;
+
+        let delay = get_delay(&server.url, "id")
+            .await
+            .expect("unexpected error");
+        assert_eq!(delay, Duration::from_secs(15));
+    }
+
+    /// An unknown delay_id, and a delayed event without a usable delay, both surface
+    /// as the permanent not-found error.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_not_found() {
+        struct Case {
+            name: &'static str,
+            status: http::StatusCode,
+            body: serde_json::Value,
+        }
+        for tc in [
+            Case {
+                name: "404",
+                status: http::StatusCode::NOT_FOUND,
+                body: serde_json::json!({"errcode": "M_NOT_FOUND"}),
+            },
+            Case {
+                name: "200 without a delay",
+                status: http::StatusCode::OK,
+                body: serde_json::json!({"room_id": "!room:example.com"}),
+            },
+            Case {
+                name: "200 with a zero delay",
+                status: http::StatusCode::OK,
+                body: serde_json::json!({"delay_ms": 0}),
+            },
+            Case {
+                name: "200 with a negative delay",
+                status: http::StatusCode::OK,
+                body: serde_json::json!({"delay_ms": -1}),
+            },
+        ] {
+            let status = tc.status;
+            let body = tc.body.clone();
+            let router = Router::new().route(
+                "/{*path}",
+                any(move || {
+                    let body = body.clone();
+                    async move { (status, axum::Json(body)) }
+                }),
+            );
+            let server = spawn_http_server(router).await;
+
+            let err = get_delay(&server.url, "id")
+                .await
+                .expect_err(&format!("{}: expected an error", tc.name));
+            assert!(
+                err.is_delayed_event_not_found(),
+                "{}: expected DelayedEventNotFound, got {err:?}",
+                tc.name
+            );
+        }
+    }
+
+    /// A rate-limited lookup surfaces its retry hint, so callers can classify it as
+    /// retry-after rather than as a hard failure.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_rate_limited() {
+        let router = Router::new().route(
+            "/{*path}",
+            any(|| async {
+                (
+                    http::StatusCode::TOO_MANY_REQUESTS,
+                    [(http::header::RETRY_AFTER, "3")],
+                    axum::Json(serde_json::json!({"errcode": "M_LIMIT_EXCEEDED"})),
+                )
+            }),
+        );
+        let server = spawn_http_server(router).await;
+
+        let err = get_delay(&server.url, "id")
+            .await
+            .expect_err("expected an error for 429");
+        match err {
+            ActionError::RetryAfter { retry_after, .. } => {
+                assert_eq!(retry_after, Duration::from_secs(3))
+            }
+            other => panic!("expected RetryAfter, got {other:?}"),
+        }
+    }
+
+    /// Server errors and unparseable bodies stay transient — the delayed event may well still be there.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_transient() {
+        struct Case {
+            name: &'static str,
+            status: http::StatusCode,
+            body: &'static str,
+        }
+        for tc in [
+            Case {
+                name: "500",
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                body: "{}",
+            },
+            Case {
+                name: "403",
+                status: http::StatusCode::FORBIDDEN,
+                body: "{}",
+            },
+            Case {
+                name: "200 with a malformed body",
+                status: http::StatusCode::OK,
+                body: "not json",
+            },
+        ] {
+            let status = tc.status;
+            let body = tc.body;
+            let router =
+                Router::new().route("/{*path}", any(move || async move { (status, body) }));
+            let server = spawn_http_server(router).await;
+
+            let err = get_delay(&server.url, "id")
+                .await
+                .expect_err(&format!("{}: expected an error", tc.name));
+            assert!(
+                matches!(err, ActionError::Transient { .. }),
+                "{}: expected Transient, got {err:?}",
+                tc.name
+            );
+        }
     }
 
     /// Verifies that a 200 OK response returns the status code without error.

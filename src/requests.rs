@@ -269,8 +269,10 @@ pub struct DelegateDelayedLeaveCsRequest {
     pub member: MatrixRtcMemberType,
     #[serde(default)]
     pub delay_id: String,
+    /// Deprecated. This is only used while the endpoint for querying delayed events by ID
+    /// has not been merged yet in Synapse.
     #[serde(default)]
-    pub delay_timeout: i64,
+    pub delay_timeout: Option<i64>,
 }
 
 impl DelegateDelayedLeaveCsRequest {
@@ -284,11 +286,19 @@ impl DelegateDelayedLeaveCsRequest {
         }
         self.member
             .validate_id_and_device("DelegateDelayedLeaveCsRequest")?;
-        if self.delay_id.is_empty() || self.delay_timeout <= 0 {
+        if self.delay_id.is_empty() {
             return Err(MatrixErrorResponse {
                 status: 400,
                 errcode: "M_BAD_JSON".into(),
-                err: "The request body is missing `delay_id` or `delay_timeout`".into(),
+                err: "The request body is missing `delay_id`".into(),
+            });
+        }
+        // Absent means "look it up"; present but non-positive is a mistake.
+        if self.delay_timeout.is_some_and(|timeout| timeout <= 0) {
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body has an invalid `delay_timeout`".into(),
             });
         }
         Ok(())
@@ -748,7 +758,7 @@ mod tests {
                 claimed_device_id: "device-id".into(),
             },
             delay_id: "syd_delay123".into(),
-            delay_timeout: 30000, // 30 s in ms
+            delay_timeout: Some(30000), // 30 s in ms
         }
     }
 
@@ -802,8 +812,8 @@ mod tests {
         type Mutator = fn(&mut DelegateDelayedLeaveCsRequest);
         let cases: Vec<(&str, Mutator)> = vec![
             ("missing DelayId", |r| r.delay_id = String::new()),
-            ("zero DelayTimeout", |r| r.delay_timeout = 0),
-            ("negative DelayTimeout", |r| r.delay_timeout = -1),
+            ("zero DelayTimeout", |r| r.delay_timeout = Some(0)),
+            ("negative DelayTimeout", |r| r.delay_timeout = Some(-1)),
         ];
         for (name, mutate) in cases {
             let mut req = valid_delegate_delayed_leave_cs_request();
@@ -812,5 +822,34 @@ mod tests {
             assert!(result.is_err(), "{name}: expected validation error");
             assert_validation_error(result, "M_BAD_JSON");
         }
+    }
+
+    /// An absent delay timeout is valid — the service looks the delay up on
+    /// the homeserver instead.
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_validate_absent_delay_timeout() {
+        let mut req = valid_delegate_delayed_leave_cs_request();
+        req.delay_timeout = None;
+        assert!(
+            req.validate().is_ok(),
+            "expected no error for a request without a delay timeout"
+        );
+    }
+
+    /// A body that omits `delay_timeout` deserializes to an absent one, rather
+    /// than being rejected as malformed.
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_deserialize_without_delay_timeout() {
+        let req: DelegateDelayedLeaveCsRequest = serde_json::from_str(
+            r#"{
+                "room_id": "!testRoom:example.com",
+                "slot_id": "m.call#ROOM",
+                "member": {"id": "member-id", "claimed_device_id": "device-id"},
+                "delay_id": "syd_delay123"
+            }"#,
+        )
+        .expect("expected the body to deserialize");
+        assert_eq!(req.delay_timeout, None);
+        assert!(req.validate().is_ok());
     }
 }

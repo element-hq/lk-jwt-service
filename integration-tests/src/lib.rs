@@ -10,8 +10,8 @@ mod harness;
 mod helpers;
 
 pub use fake_homeserver::{
-    DelayedEventRequest, FakeHomeserver, FakeUser, FedProxyRequest, IsJoinedRequest,
-    Msc4502Support, UserInfoRequest,
+    DelayedEventLookup, DelayedEventRequest, FakeHomeserver, FakeUser, FedProxyRequest,
+    IsJoinedRequest, Msc4502Support, UserInfoRequest,
 };
 pub use fake_redis::FakeRedis;
 pub use fake_sfu::{CreateRoomRequest, FakeSfu, GetParticipantRequest};

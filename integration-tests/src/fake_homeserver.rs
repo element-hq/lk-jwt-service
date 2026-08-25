@@ -61,6 +61,13 @@ pub struct DelayedEventRequest {
     pub action: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct DelayedEventLookup {
+    pub authorization: String,
+    pub user_id: String,
+    pub delay_id: String,
+}
+
 struct HsState {
     /// The user IDs known to the homeserver, keyed by
     /// the associated OpenID token.
@@ -75,6 +82,17 @@ struct HsState {
 
     /// The recorded /delayed_events requests.
     delayed_event_requests: Vec<DelayedEventRequest>,
+
+    /// The delay (in ms) `GET /delayed_events/{delay_id}` reports, keyed by
+    /// delay ID.
+    delays: HashMap<String, i64>,
+
+    /// The HTTP status to return on delayed-event look-ups, overriding the
+    /// scripted delays.
+    delay_look_up_status: Option<u16>,
+
+    /// The recorded delayed-event look-ups.
+    delay_look_ups: Vec<DelayedEventLookup>,
 
     /// Which level of MSC4502 (targeted and unrestricted room member queries) support
     /// the fake homeserver advertises via `/versions`.
@@ -102,6 +120,9 @@ impl Default for HsState {
             user_info_requests: Vec::new(),
             delayed_event_status: None,
             delayed_event_requests: Vec::new(),
+            delays: HashMap::new(),
+            delay_look_up_status: None,
+            delay_look_ups: Vec::new(),
             msc4502_support: Msc4502Support::None,
             not_joined: HashSet::new(),
             is_joined_requests: Vec::new(),
@@ -164,6 +185,10 @@ impl FakeHomeserver {
             .route(
                 "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}/{action}",
                 post(handle_delayed_event),
+            )
+            .route(
+                "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}",
+                get(handle_delayed_event_look_up),
             )
             .route("/_matrix/client/versions", get(handle_versions))
             .route(
@@ -229,6 +254,27 @@ impl FakeHomeserver {
     /// The recorded /delayed_events requests.
     pub fn delayed_event_requests(&self) -> Vec<DelayedEventRequest> {
         self.state.lock().unwrap().delayed_event_requests.clone()
+    }
+
+    /// Makes `GET /delayed_events/{delay_id}` report the given delay for
+    /// `delay_id`.
+    pub fn set_delay(&self, delay_id: &str, delay_ms: i64) {
+        self.state
+            .lock()
+            .unwrap()
+            .delays
+            .insert(delay_id.to_owned(), delay_ms);
+    }
+
+    /// Sets the HTTP status delayed-event look-ups fail with, regardless of the
+    /// scripted delays.
+    pub fn set_delay_lookup_status(&self, status: u16) {
+        self.state.lock().unwrap().delay_look_up_status = Some(status);
+    }
+
+    /// The recorded delayed-event look-ups.
+    pub fn delay_lookups(&self) -> Vec<DelayedEventLookup> {
+        self.state.lock().unwrap().delay_look_ups.clone()
     }
 
     /// Sets which level of MSC4502 (targeted and unrestricted room member queries) support
@@ -321,6 +367,57 @@ async fn handle_delayed_event(
         StatusCode::from_u16(status).expect("invalid scripted status"),
         Json(json!({})),
     )
+}
+
+/// Handler for `GET /delayed_events/{delay_id}` look-ups.
+async fn handle_delayed_event_look_up(
+    State(state): State<Arc<Mutex<HsState>>>,
+    Path(delay_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let authorization = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let user_id = query.get("user_id").cloned().unwrap_or_default();
+
+    let mut state = state.lock().unwrap();
+
+    // Record the look-up.
+    state.delay_look_ups.push(DelayedEventLookup {
+        authorization,
+        user_id,
+        delay_id: delay_id.clone(),
+    });
+
+    if let Some(status) = state.delay_look_up_status {
+        return (
+            StatusCode::from_u16(status).expect("invalid scripted status"),
+            Json(json!({"errcode": "M_UNKNOWN"})),
+        );
+    }
+
+    match state.delays.get(&delay_id) {
+        Some(delay_ms) => (
+            StatusCode::OK,
+            Json(json!({
+                "delay_id": delay_id,
+                "room_id": "!room:example.com",
+                "type": "m.room.member",
+                "delay_ms": delay_ms,
+                "content": {},
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "errcode": "M_NOT_FOUND",
+                "error": "Delayed event not found",
+            })),
+        ),
+    }
 }
 
 /// Handler for /_matrix/client/versions requests.

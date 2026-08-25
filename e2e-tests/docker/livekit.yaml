@@ -10,3 +10,7 @@ room:
   auto_create: false
 logging:
   level: info
+webhook:
+  api_key: e2e_livekit_key
+  urls:
+    - http://jwt-service:8080/sfu_webhook

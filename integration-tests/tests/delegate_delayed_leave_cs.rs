@@ -9,7 +9,7 @@ use std::time::Duration;
 use lk_jwt_service_integration_tests::{
     FakeHomeserver, FakeRedis, Service, ServiceConfig, expect_delayed_event_request_identity,
     expect_job_persisted, expect_matrix_error, expect_no_delayed_event_requests, livekit_identity,
-    livekit_room_alias, send_sfu_webhook, wait_for_job_removed,
+    livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request, wait_for_job_removed,
 };
 use serde_json::{Value, json};
 
@@ -325,4 +325,151 @@ async fn restart_and_send_use_identity_assertion() {
         AS_TOKEN,
         &user.user_id,
     );
+}
+
+// ── delay look-up (MSC4140) ───────────────────────────────────────────────────
+
+/// A request may omit the delay timeout. The service then reads the delay off
+/// the delayed event itself, asserting the caller's identity as it does so.
+#[tokio::test]
+async fn delay_timeout_looked_up_when_absent() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_delay("syd_cs_integration_1", 8000);
+
+    let redis = FakeRedis::new().await;
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        redis_url: Some(redis.url().to_owned()),
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = delegate_request();
+    request.as_object_mut().unwrap().remove("delay_timeout");
+    let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+    assert_eq!(status, 200, "body: {body}");
+
+    let lookups = hs.delay_lookups();
+    assert_eq!(
+        lookups.len(),
+        1,
+        "expected exactly one lookup, got {lookups:?}"
+    );
+    assert_eq!(lookups[0].delay_id, "syd_cs_integration_1");
+    assert_eq!(
+        lookups[0].authorization,
+        format!("Bearer {AS_TOKEN}"),
+        "expected the lookup to authenticate with the as_token"
+    );
+    assert_eq!(
+        lookups[0].user_id, user.user_id,
+        "expected the lookup to assert the caller's identity"
+    );
+
+    // The job is scheduled off the looked-up delay.
+    let room = livekit_room_alias("!room:example.com", "m.call#");
+    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    expect_job_persisted(&redis, &room, &identity);
+}
+
+/// A request that carries a delay timeout is taken at its word — the service
+/// does not look the delay up.
+#[tokio::test]
+async fn delay_timeout_not_looked_up_when_given() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) =
+        post_delegate_cs(&svc, delegate_request().to_string(), Some(&user.user_id)).await;
+    assert_eq!(status, 200, "body: {body}");
+
+    let lookups = hs.delay_lookups();
+    assert!(lookups.is_empty(), "expected no lookups, got {lookups:?}");
+}
+
+/// The looked-up delay becomes the job's timeout: with a short delay and no
+/// participant ever showing up on the SFU, the waiting-state timeout fires and
+/// the leave event is sent.
+#[tokio::test]
+async fn looked_up_delay_drives_the_job() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_delay("syd_cs_integration_1", 300);
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = delegate_request();
+    request.as_object_mut().unwrap().remove("delay_timeout");
+    let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+    assert_eq!(status, 200, "body: {body}");
+
+    wait_for_delayed_event_request(&hs, "syd_cs_integration_1", "send", Duration::from_secs(5))
+        .await;
+}
+
+/// An unknown delay ID is rejected with 404 M_NOT_FOUND, and no job is
+/// scheduled for it.
+#[tokio::test]
+async fn unknown_delay_id_rejected() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    // No delay scripted for the request's delay ID.
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = delegate_request();
+    request.as_object_mut().unwrap().remove("delay_timeout");
+    let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+
+    expect_matrix_error(status, &body, 404, "M_NOT_FOUND");
+    expect_no_delayed_event_requests(&hs);
+}
+
+/// A homeserver that cannot answer the look-up makes the request fail with
+/// 503 M_UNKNOWN, so the client knows it may retry.
+#[tokio::test]
+async fn delay_lookup_failure_rejected() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_delay("syd_cs_integration_1", 8000);
+    hs.set_delay_lookup_status(500);
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = delegate_request();
+    request.as_object_mut().unwrap().remove("delay_timeout");
+    let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+
+    expect_matrix_error(status, &body, 503, "M_UNKNOWN");
+    expect_no_delayed_event_requests(&hs);
 }
