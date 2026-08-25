@@ -159,10 +159,14 @@ pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
 fn read_app_service_registration_field(parsed: &Value, field: &str) -> Result<String, String> {
     Ok(parsed
         .get_str(field)
-        .ok_or_else(|| format!("Could not parse app service registration file: no {field} property"))?
+        .ok_or_else(|| {
+            format!("Could not parse app service registration file: no {field} property")
+        })?
         .as_str()
         .ok_or_else(|| {
-            format!("Could not parse app service registration file: invalid value for {field} property")
+            format!(
+                "Could not parse app service registration file: invalid value for {field} property"
+            )
         })?
         .trim()
         .to_owned())
@@ -379,7 +383,7 @@ mod tests {
                 extra_env: vec![
                     ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
                     ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
-                    ("LIVEKIT_HS_SERVER_NAME", "example.com")
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
                 ],
                 expected: Some(AppServiceConfig {
                     as_token: "as_token_env_pheethiewixohp9eecheeGh".into(),
@@ -485,17 +489,13 @@ mod tests {
             },
             Case {
                 name: "Registration file as_token wrong type",
-                registration_file_content: Some(
-                    "as_token: [1, 2, 3]\nhs_token: hs_token_value\n",
-                ),
+                registration_file_content: Some("as_token: [1, 2, 3]\nhs_token: hs_token_value\n"),
                 extra_env: vec![],
                 expected: None,
             },
             Case {
                 name: "Registration file hs_token wrong type",
-                registration_file_content: Some(
-                    "as_token: as_token_value\nhs_token: [1, 2, 3]\n",
-                ),
+                registration_file_content: Some("as_token: as_token_value\nhs_token: [1, 2, 3]\n"),
                 extra_env: vec![],
                 expected: None,
             },
@@ -545,7 +545,12 @@ mod tests {
             expected_err: bool,
         }
         let cases = [
-            Case { name: "Empty", env: "", expected_map: Some(vec![]), expected_err: false },
+            Case {
+                name: "Empty",
+                env: "",
+                expected_map: Some(vec![]),
+                expected_err: false,
+            },
             Case {
                 name: "DNS name",
                 env: "example.com=https://matrix-client.example.com",
@@ -700,7 +705,10 @@ mod tests {
                     ("LIVEKIT_URL", "wss://test.livekit.cloud"),
                     ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "example.com, test.com"),
                     ("LIVEKIT_JWT_BIND", ":9090"),
-                    ("LIVEKIT_INSECURE_SKIP_VERIFY_TLS", "YES_I_KNOW_WHAT_I_AM_DOING"),
+                    (
+                        "LIVEKIT_INSECURE_SKIP_VERIFY_TLS",
+                        "YES_I_KNOW_WHAT_I_AM_DOING",
+                    ),
                     ("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS", "30"),
                     (
                         "LIVEKIT_CS_API_URL_OVERRIDES",

@@ -282,7 +282,8 @@ impl DelegateDelayedLeaveCsRequest {
                 err: "The request body is missing `room_id` or `slot_id`".into(),
             });
         }
-        self.member.validate_id_and_device("DelegateDelayedLeaveCsRequest")?;
+        self.member
+            .validate_id_and_device("DelegateDelayedLeaveCsRequest")?;
         if self.delay_id.is_empty() || self.delay_timeout <= 0 {
             return Err(MatrixErrorResponse {
                 status: 400,

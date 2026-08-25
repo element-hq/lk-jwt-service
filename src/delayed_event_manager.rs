@@ -14,15 +14,15 @@ use std::time::{Duration, SystemTime};
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::helper::{
-    new_unique_id, CsApiUrl, Deps, LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId,
+    CsApiUrl, Deps, LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId, new_unique_id,
 };
-use crate::retry::{retry, Classify, ErrorClass, ExponentialBackoff, RetryError};
+use crate::retry::{Classify, ErrorClass, ExponentialBackoff, RetryError, retry};
 
 /// The Matrix CS-API path for delayed events.
 ///
@@ -2099,10 +2099,11 @@ mod tests {
                 .try_send(DelayedEventSignal::SfuNotAvailable)
                 .unwrap();
         }
-        assert!(job
-            .event_tx
-            .try_send(DelayedEventSignal::SfuNotAvailable)
-            .is_err());
+        assert!(
+            job.event_tx
+                .try_send(DelayedEventSignal::SfuNotAvailable)
+                .is_err()
+        );
 
         job.spawn_loop();
 

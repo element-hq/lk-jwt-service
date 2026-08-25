@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 use lk_jwt_service::config::{bind_addresses, parse_config};
 use lk_jwt_service::handler::Handler;
 use lk_jwt_service::helper::{LiveKitAuth, RealDeps};
-use lk_jwt_service::store::{new_redis_store, Store};
+use lk_jwt_service::store::{Store, new_redis_store};
 
 #[tokio::main]
 async fn main() {

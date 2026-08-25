@@ -9,18 +9,18 @@
 use std::sync::Mutex;
 
 use axum::body::Body;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures::future::BoxFuture;
 use sha2::Digest;
 use tower::util::ServiceExt;
 
 use super::*;
 use crate::delayed_event_manager::{AppServiceIdentity, DelayEventAction};
-use crate::helper::{resolve_cs_api_url_via, ActionError, RoomServiceClient, UserInfo};
+use crate::helper::{ActionError, RoomServiceClient, UserInfo, resolve_cs_api_url_via};
 use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, MatrixRtcMemberType};
 use crate::store::test_support::{
-    new_in_memory_store, new_notifying_store, FailingStore, GatedStore,
+    FailingStore, GatedStore, new_in_memory_store, new_notifying_store,
 };
 
 // ── test deps ─────────────────────────────────────────────────────────────────
@@ -1884,7 +1884,7 @@ async fn test_handle_get_token_restricted_user() {
     let body = marshal_sfu_request(|r| {
         r.member.claimed_user_id = "@user:restricted.com".into();
         r.openid_token.matrix_server_name = "restricted.com".into(); // not in full-access list
-                                                                     // Delegation params trigger the restricted-user reject path.
+        // Delegation params trigger the restricted-user reject path.
         r.delay_id = "delay-id".into();
         r.delay_timeout = 30000; // 30 s in ms
         r.delay_cs_api_url = "https://restricted.com".into();

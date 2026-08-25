@@ -1,7 +1,10 @@
+[workspace]
+members = ["integration-tests", "e2e-tests"]
+
 [package]
 name = "lk-jwt-service"
 version = "0.6.0"
-edition = "2021"
+edition = "2024"
 license = "AGPL-3.0-only"
 description = "Service for delegating authentication and delayed leave events for MatrixRTC on LiveKit"
 

@@ -12,14 +12,14 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD_NO_PAD;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 
-use crate::delayed_event_manager::{AppServiceIdentity, DelayEventAction, DELAYED_EVENTS_ENDPOINT};
+use crate::delayed_event_manager::{AppServiceIdentity, DELAYED_EVENTS_ENDPOINT, DelayEventAction};
 use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, OpenIdTokenType};
 use crate::retry::{Classify, ErrorClass};
 
@@ -178,12 +178,13 @@ impl<V: Clone> TtlCache<V> {
     pub fn set(&self, server_name: &str, value: V, ttl: Duration) {
         let now = Instant::now();
         let mut entries = self.entries.write().unwrap();
-        if let Some(max) = self.max_entries {
-            if entries.len() >= max && !entries.contains_key(server_name) {
-                entries.retain(|_, (_, expires_at)| now <= *expires_at);
-                if entries.len() >= max {
-                    return;
-                }
+        if let Some(max) = self.max_entries
+            && entries.len() >= max
+            && !entries.contains_key(server_name)
+        {
+            entries.retain(|_, (_, expires_at)| now <= *expires_at);
+            if entries.len() >= max {
+                return;
             }
         }
         entries.insert(server_name.to_owned(), (value, now + ttl));
@@ -786,15 +787,15 @@ pub trait Deps: Send + Sync {
                 // Fall back to the retry_after_ms field of M_LIMIT_EXCEEDED
                 // bodies — deprecated in Matrix v1.10 but still emitted by
                 // common homeservers.
-                if let Ok(body) = resp.json::<LimitExceededBody>().await {
-                    if body.retry_after_ms > 0 {
-                        // Ceil ms → s (e.g. 500 ms → 1 s, 1500 ms → 2 s).
-                        let seconds = (body.retry_after_ms as u64).div_ceil(1000);
-                        return Err(ActionError::RetryAfter {
-                            status,
-                            retry_after: Duration::from_secs(seconds),
-                        });
-                    }
+                if let Ok(body) = resp.json::<LimitExceededBody>().await
+                    && body.retry_after_ms > 0
+                {
+                    // Ceil ms → s (e.g. 500 ms → 1 s, 1500 ms → 2 s).
+                    let seconds = (body.retry_after_ms as u64).div_ceil(1000);
+                    return Err(ActionError::RetryAfter {
+                        status,
+                        retry_after: Duration::from_secs(seconds),
+                    });
                 }
                 // No usable hint.
                 Err(ActionError::Transient {
@@ -1113,34 +1114,34 @@ pub async fn resolve_cs_api_url_via<D: Deps + ?Sized>(
     cache: Option<&CsApiUrlCache>,
 ) -> Result<CsApiUrl, String> {
     // Prefer explicit overrides.
-    if let Some(url) = overrides.get(server_name) {
-        if !url.is_empty() {
-            return Ok(url.clone());
-        }
+    if let Some(url) = overrides.get(server_name)
+        && !url.is_empty()
+    {
+        return Ok(url.clone());
     }
 
     // Next, check the cache.
-    if let Some(cache) = cache {
-        if let Some(url) = cache.get(server_name) {
-            return Ok(url);
-        }
+    if let Some(cache) = cache
+        && let Some(url) = cache.get(server_name)
+    {
+        return Ok(url);
     }
 
     // Try .well-known resolution.
     let discovered = deps.discover_client_api(server_name).await;
-    if let Ok(Some(well_known)) = &discovered {
-        if !well_known.homeserver_base_url.is_empty() {
-            if let Some(cache) = cache {
-                // TODO: Read the TTL from cache-control headers and limit
-                // them to a minimum of say 1 hour to prevent DDos-ing.
-                cache.set(
-                    server_name,
-                    CsApiUrl(well_known.homeserver_base_url.clone()),
-                    Duration::from_secs(4 * 60 * 60),
-                );
-            }
-            return Ok(CsApiUrl(well_known.homeserver_base_url.clone()));
+    if let Ok(Some(well_known)) = &discovered
+        && !well_known.homeserver_base_url.is_empty()
+    {
+        if let Some(cache) = cache {
+            // TODO: Read the TTL from cache-control headers and limit
+            // them to a minimum of say 1 hour to prevent DDos-ing.
+            cache.set(
+                server_name,
+                CsApiUrl(well_known.homeserver_base_url.clone()),
+                Duration::from_secs(4 * 60 * 60),
+            );
         }
+        return Ok(CsApiUrl(well_known.homeserver_base_url.clone()));
     }
 
     // We're out of options.
@@ -1209,17 +1210,16 @@ async fn resolve_federation_base_url_with(
     };
 
     let mut base = fallback;
-    if resp.status().is_success() {
-        if let Ok(parsed) = resp.json::<WellKnownServer>().await {
-            if !parsed.server.is_empty() {
-                let delegated = if has_explicit_port(&parsed.server) {
-                    parsed.server
-                } else {
-                    format!("{}:8448", parsed.server)
-                };
-                base = format!("https://{delegated}");
-            }
-        }
+    if resp.status().is_success()
+        && let Ok(parsed) = resp.json::<WellKnownServer>().await
+        && !parsed.server.is_empty()
+    {
+        let delegated = if has_explicit_port(&parsed.server) {
+            parsed.server
+        } else {
+            format!("{}:8448", parsed.server)
+        };
+        base = format!("https://{delegated}");
     }
     // The server answered definitively (delegation or no well-known record),
     // so the result is cacheable.
@@ -1305,12 +1305,12 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
+    use axum::Router;
     use axum::extract::Request;
     use axum::routing::any;
-    use axum::Router;
 
     use super::test_support::*;
     use super::*;
@@ -2899,18 +2899,22 @@ mod tests {
             }),
         };
 
-        assert!(deps
-            .participant_exists(&auth, &room, &identity)
-            .await
-            .unwrap());
-        assert!(!deps
-            .participant_exists(&auth, &room, &identity)
-            .await
-            .unwrap());
-        assert!(deps
-            .participant_exists(&auth, &room, &identity)
-            .await
-            .is_err());
+        assert!(
+            deps.participant_exists(&auth, &room, &identity)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !deps
+                .participant_exists(&auth, &room, &identity)
+                .await
+                .unwrap()
+        );
+        assert!(
+            deps.participant_exists(&auth, &room, &identity)
+                .await
+                .is_err()
+        );
     }
 
     // ── real Twirp room-service client ────────────────────────────────────────

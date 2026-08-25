@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::{Json, Router};
 use chrono::Utc;
-use http::{header, HeaderValue, Method, StatusCode};
+use http::{HeaderValue, Method, StatusCode, header};
 use livekit_api::access_token::{AccessToken, TokenVerifier, VideoGrants};
 use livekit_api::webhooks::WebhookReceiver;
 use subtle::ConstantTimeEq;
@@ -27,23 +27,22 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::AppServiceConfig;
 use crate::delayed_event_manager::{
-    start_participant_lookup, DelayedEventJob, DelayedEventJobParams, DelayedEventSignal, JobKey,
-    JobRestartedRequest, LookupCsApiUrlFn, SfuMessage,
+    DelayedEventJob, DelayedEventJobParams, DelayedEventSignal, JobKey, JobRestartedRequest,
+    LookupCsApiUrlFn, SfuMessage, start_participant_lookup,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::helper::new_unique_id;
 use crate::helper::{
-    livekit_identity_for, livekit_room_alias_for, matrix_server_name, CsApiUrl, CsApiUrlCache,
-    Deps, LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId, GET_TOKEN_SS_PATH,
-};
-use crate::requests::{
-    DelegateDelayedLeaveCsRequest, DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse,
-    GetTokenCsRequest, GetTokenCsResponse, GetTokenSsRequest, GetTokenSsResponse,
-    LegacySfuRequest, MatrixErrorBody, MatrixErrorResponse, OpenIdTokenType, SfuRequest,
-    SfuResponse,
+    CsApiUrl, CsApiUrlCache, Deps, GET_TOKEN_SS_PATH, LiveKitAuth, LiveKitIdentity,
+    LiveKitRoomAlias, UniqueId, livekit_identity_for, livekit_room_alias_for, matrix_server_name,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::requests::AppservicePingTriggerRequest;
+use crate::requests::{
+    DelegateDelayedLeaveCsRequest, DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse,
+    GetTokenCsRequest, GetTokenCsResponse, GetTokenSsRequest, GetTokenSsResponse, LegacySfuRequest,
+    MatrixErrorBody, MatrixErrorResponse, OpenIdTokenType, SfuRequest, SfuResponse,
+};
 use crate::store::{Store, StoredJob};
 
 /// Mints the LiveKit join JWT for a (room, identity) pair.
@@ -332,10 +331,10 @@ impl Handler {
         // Enqueues block only when the writer is 256 operations behind,
         // providing backpressure instead of unbounded queueing.
         let enqueue_store_op = |op: StoreOp| async {
-            if let Some(tx) = &store_tx {
-                if tx.send(op).await.is_err() {
-                    error!("Handler: store writer is gone, dropping store operation");
-                }
+            if let Some(tx) = &store_tx
+                && tx.send(op).await.is_err()
+            {
+                error!("Handler: store writer is gone, dropping store operation");
             }
         };
 
@@ -762,7 +761,11 @@ impl Handler {
     /// Returns 400 M_INVALID_PARAM if `url` doesn't match this service's
     /// configured LiveKit URL. `endpoint` identifies the call site in the
     /// warning log.
-    fn require_matching_lk_url(&self, url: &str, endpoint: &str) -> Result<(), MatrixErrorResponse> {
+    fn require_matching_lk_url(
+        &self,
+        url: &str,
+        endpoint: &str,
+    ) -> Result<(), MatrixErrorResponse> {
         if url != self.livekit_auth.lk_url {
             warn!(endpoint, request_url = url, configured_url = %self.livekit_auth.lk_url,
                 "Handler: request `url` does not match the configured LiveKit URL");
