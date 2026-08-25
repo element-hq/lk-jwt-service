@@ -21,11 +21,10 @@ async fn main() -> Result<(), String> {
     for addr in addrs.to_vec() {
         if let Ok(resp) = reqwest::get(get_healthz_url(&addr)).await {
             if resp.status().as_u16() != 200 {
-                println!(
+                return Err(format!(
                     "Healthcheck failed with status code {}",
                     resp.status().as_u16()
-                );
-                std::process::exit(1);
+                ));
             }
 
             return Ok(());
