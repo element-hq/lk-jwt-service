@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 
 use crate::delayed_event_manager::{DelayEventAction, DELAYED_EVENTS_ENDPOINT};
-use crate::requests::OpenIdTokenType;
+use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, OpenIdTokenType};
 use crate::retry::{Classify, ErrorClass};
 
 /// The authentication bundle for talking to LiveKit.
@@ -838,21 +838,18 @@ pub trait Deps: Send + Sync {
         Ok(parsed.joined)
     }
 
-    /// Feature-detects whether the homeserver behind `cs_api_url` supports
-    /// the stable or unstable `is_joined` endpoint (MSC4502) via `/versions`,
-    /// returning the path prefix to use. The stable flag wins over the
-    /// unstable one when both are advertised. Successful resolutions are
-    /// cached so `/versions` isn't fetched on every request.
-    async fn resolve_is_joined_path_prefix(
+    /// Fetches the `unstable_features` map from `cs_api_url`'s `/versions`,
+    /// caching the result per server.
+    async fn fetch_unstable_features(
         &self,
         cs_api_url: &CsApiUrl,
-    ) -> Result<&'static str, String> {
-        static CACHE: std::sync::LazyLock<TtlCache<&'static str>> =
+    ) -> Result<HashMap<String, bool>, String> {
+        static CACHE: std::sync::LazyLock<TtlCache<HashMap<String, bool>>> =
             std::sync::LazyLock::new(TtlCache::new);
         const TTL: Duration = Duration::from_secs(60 * 60);
 
-        if let Some(prefix) = CACHE.get(cs_api_url.as_str()) {
-            return Ok(prefix);
+        if let Some(unstable_features) = CACHE.get(cs_api_url.as_str()) {
+            return Ok(unstable_features);
         }
 
         #[derive(Deserialize, Default)]
@@ -886,23 +883,59 @@ pub trait Deps: Send + Sync {
         }
         let versions: VersionsResponse = resp.json().await.map_err(|e| e.to_string())?;
 
-        let is_supported = |flag: &str| {
-            versions
-                .unstable_features
-                .get(flag)
-                .copied()
-                .unwrap_or(false)
-        };
-        let prefix = if is_supported("io.element.msc4502.stable") {
-            "_matrix/client/v3"
-        } else if is_supported("io.element.msc4502") {
-            "_matrix/client/unstable/io.element.msc4502"
-        } else {
-            return Err("homeserver does not support is_joined (MSC4502)".into());
-        };
+        CACHE.set(cs_api_url.as_str(), versions.unstable_features.clone(), TTL);
+        Ok(versions.unstable_features)
+    }
 
-        CACHE.set(cs_api_url.as_str(), prefix, TTL);
-        Ok(prefix)
+    /// Feature-detects whether the homeserver behind `cs_api_url` supports
+    /// the stable or unstable `is_joined` endpoint (MSC4502) via `/versions`,
+    /// returning the path prefix to use.
+    async fn resolve_is_joined_path_prefix(
+        &self,
+        cs_api_url: &CsApiUrl,
+    ) -> Result<&'static str, String> {
+        let unstable_features = self.fetch_unstable_features(cs_api_url).await?;
+        let is_supported = |flag: &str| unstable_features.get(flag).copied().unwrap_or(false);
+        if is_supported("io.element.msc4502.stable") {
+            Ok("_matrix/client/v3")
+        } else if is_supported("io.element.msc4502") {
+            Ok("_matrix/client/unstable/io.element.msc4502")
+        } else {
+            Err("homeserver does not support is_joined (MSC4502)".into())
+        }
+    }
+
+    /// Feature-detects whether the homeserver behind `cs_api_url` supports
+    /// the stable or unstable `/rtc/livekit/get_token` S-S endpoint
+    /// (MSC4195) via `/versions`, returning the path to use.
+    async fn resolve_get_token_ss_path(
+        &self,
+        cs_api_url: &CsApiUrl,
+    ) -> Result<&'static str, String> {
+        let unstable_features = self.fetch_unstable_features(cs_api_url).await?;
+        let is_supported = |flag: &str| unstable_features.get(flag).copied().unwrap_or(false);
+        if is_supported("io.element.msc4195.stable") {
+            Ok("/_matrix/federation/v1/rtc/livekit/get_token")
+        } else if is_supported("io.element.msc4195") {
+            Ok("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        } else {
+            Err("homeserver does not support get_token federation relay (MSC4195)".into())
+        }
+    }
+
+    /// Feature-detects whether the homeserver behind `cs_api_url` supports
+    /// the stable or unstable `/fed_proxy` endpoint (MSC4512) via `/versions`,
+    /// returning the path to use.
+    async fn resolve_fed_proxy_path(&self, cs_api_url: &CsApiUrl) -> Result<&'static str, String> {
+        let unstable_features = self.fetch_unstable_features(cs_api_url).await?;
+        let is_supported = |flag: &str| unstable_features.get(flag).copied().unwrap_or(false);
+        if is_supported("io.element.msc4512.stable") {
+            Ok("_matrix/client/v1/appservice/fed_proxy")
+        } else if is_supported("io.element.msc4512") {
+            Ok("_matrix/client/unstable/io.element.msc4512/appservice/fed_proxy")
+        } else {
+            Err("homeserver does not support the federation proxy (MSC4512)".into())
+        }
     }
 
     /// Triggers a ping round-trip to ensure the service and the homeserver
@@ -946,6 +979,82 @@ pub trait Deps: Send + Sync {
         let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
         debug!(url = %endpoint, status, "trigger_appservice_ping");
         Ok((status, body))
+    }
+
+    /// Relays a `/rtc/livekit/get_token` S-S request to `destination` via
+    /// this homeserver's federation proxy.
+    async fn request_get_token_via_federation(
+        &self,
+        own_cs_api_url: &CsApiUrl,
+        destination_cs_api_url: &CsApiUrl,
+        as_token: &str,
+        destination: &str,
+        req: &GetTokenSsRequest,
+    ) -> Result<GetTokenSsResponse, String> {
+        let ss_path = self
+        .resolve_get_token_ss_path(destination_cs_api_url)
+        .await?;
+    
+        let fed_proxy_path = self.resolve_fed_proxy_path(own_cs_api_url).await?;
+        let mut endpoint = url::Url::parse(own_cs_api_url.as_str())
+            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
+        {
+            let mut segments = endpoint
+                .path_segments_mut()
+                .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?;
+            segments.pop_if_empty();
+            for segment in fed_proxy_path.trim_matches('/').split('/') {
+                segments.push(segment);
+            }
+        }
+
+        let resp = http_client(self.skip_verify_tls())
+            .post(endpoint.clone())
+            .bearer_auth(as_token)
+            .json(&serde_json::json!({
+                "destination": destination,
+                "method": "POST",
+                "path": ss_path,
+                "body": req,
+            }))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "request_get_token_via_federation");
+                format!("failed to reach the federation proxy: {msg}")
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!(
+                "federation proxy request failed: http status code {}",
+                status.as_u16()
+            ));
+        }
+
+        #[derive(Deserialize)]
+        struct FedProxyResponse {
+            status: u16,
+            #[serde(default)]
+            content: Option<GetTokenSsResponse>,
+        }
+        let parsed: FedProxyResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse federation proxy response: {e}"))?;
+
+        if !(200..300).contains(&parsed.status) {
+            return Err(format!(
+                "destination homeserver returned http status code {}",
+                parsed.status
+            ));
+        }
+
+        parsed
+            .content
+            .ok_or_else(|| "destination homeserver returned an empty response".to_string())
     }
 }
 
@@ -2194,6 +2303,163 @@ mod tests {
             .await
             .expect_err("expected an error for a non-2xx is_joined response");
         assert!(err.contains("403"), "unexpected error message: {err}");
+    }
+
+    // ── resolve_get_token_ss_path ────────────────────────────────────────────
+
+    /// A homeserver stub serving only /versions.
+    async fn spawn_versions_server(unstable_features: serde_json::Value) -> TestHttpServer {
+        let router = Router::new().route(
+            "/_matrix/client/versions",
+            any(move || {
+                let unstable_features = unstable_features.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "versions": ["v1.1"],
+                        "unstable_features": unstable_features,
+                    }))
+                }
+            }),
+        );
+        spawn_http_server(router).await
+    }
+
+    /// The stable S-S path is used when the destination advertises the
+    /// stable flag.
+    #[tokio::test]
+    async fn test_resolve_get_token_ss_path_uses_stable_when_advertised() {
+        let server =
+            spawn_versions_server(serde_json::json!({ "io.element.msc4195.stable": true })).await;
+
+        let path = RealDeps::default()
+            .resolve_get_token_ss_path(&CsApiUrl(server.url.clone()))
+            .await
+            .expect("unexpected error");
+        assert_eq!(path, "/_matrix/federation/v1/rtc/livekit/get_token");
+    }
+
+    /// The unstable S-S path is used when only the unstable flag is
+    /// advertised.
+    #[tokio::test]
+    async fn test_resolve_get_token_ss_path_uses_unstable_when_advertised() {
+        let server = spawn_versions_server(serde_json::json!({ "io.element.msc4195": true })).await;
+
+        let path = RealDeps::default()
+            .resolve_get_token_ss_path(&CsApiUrl(server.url.clone()))
+            .await
+            .expect("unexpected error");
+        assert_eq!(
+            path,
+            "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token"
+        );
+    }
+
+    /// The stable flag wins when both are advertised.
+    #[tokio::test]
+    async fn test_resolve_get_token_ss_path_prefers_stable_over_unstable() {
+        let server = spawn_versions_server(serde_json::json!({
+            "io.element.msc4195": true,
+            "io.element.msc4195.stable": true,
+        }))
+        .await;
+
+        let path = RealDeps::default()
+            .resolve_get_token_ss_path(&CsApiUrl(server.url.clone()))
+            .await
+            .expect("unexpected error");
+        assert_eq!(path, "/_matrix/federation/v1/rtc/livekit/get_token");
+    }
+
+    /// A destination advertising neither flag is treated as unsupported.
+    #[tokio::test]
+    async fn test_resolve_get_token_ss_path_fails_when_unsupported() {
+        let server = spawn_versions_server(serde_json::json!({})).await;
+
+        let err = RealDeps::default()
+            .resolve_get_token_ss_path(&CsApiUrl(server.url.clone()))
+            .await
+            .expect_err("expected an error when MSC4195 isn't advertised");
+        assert!(err.contains("MSC4195"), "unexpected error message: {err}");
+    }
+
+    /// A transport failure while fetching /versions surfaces as an error.
+    #[tokio::test]
+    async fn test_resolve_get_token_ss_path_versions_fetch_error() {
+        let err = RealDeps::default()
+            .resolve_get_token_ss_path(&CsApiUrl("http://127.0.0.1:1".into()))
+            .await
+            .expect_err("expected an error for an unreachable homeserver");
+        assert!(err.contains("/versions"), "unexpected error message: {err}");
+    }
+
+    // ── resolve_fed_proxy_path ────────────────────────────────────────────────
+
+    /// The stable federation proxy path is used when the homeserver
+    /// advertises the stable flag.
+    #[tokio::test]
+    async fn test_resolve_fed_proxy_path_uses_stable_when_advertised() {
+        let server =
+            spawn_versions_server(serde_json::json!({ "io.element.msc4512.stable": true })).await;
+
+        let path = RealDeps::default()
+            .resolve_fed_proxy_path(&CsApiUrl(server.url.clone()))
+            .await
+            .expect("unexpected error");
+        assert_eq!(path, "_matrix/client/v1/appservice/fed_proxy");
+    }
+
+    /// The unstable federation proxy path is used when only the unstable
+    /// flag is advertised.
+    #[tokio::test]
+    async fn test_resolve_fed_proxy_path_uses_unstable_when_advertised() {
+        let server = spawn_versions_server(serde_json::json!({ "io.element.msc4512": true })).await;
+
+        let path = RealDeps::default()
+            .resolve_fed_proxy_path(&CsApiUrl(server.url.clone()))
+            .await
+            .expect("unexpected error");
+        assert_eq!(
+            path,
+            "_matrix/client/unstable/io.element.msc4512/appservice/fed_proxy"
+        );
+    }
+
+    /// The stable flag wins when both are advertised.
+    #[tokio::test]
+    async fn test_resolve_fed_proxy_path_prefers_stable_over_unstable() {
+        let server = spawn_versions_server(serde_json::json!({
+            "io.element.msc4512": true,
+            "io.element.msc4512.stable": true,
+        }))
+        .await;
+
+        let path = RealDeps::default()
+            .resolve_fed_proxy_path(&CsApiUrl(server.url.clone()))
+            .await
+            .expect("unexpected error");
+        assert_eq!(path, "_matrix/client/v1/appservice/fed_proxy");
+    }
+
+    /// A homeserver advertising neither flag is treated as unsupported.
+    #[tokio::test]
+    async fn test_resolve_fed_proxy_path_fails_when_unsupported() {
+        let server = spawn_versions_server(serde_json::json!({})).await;
+
+        let err = RealDeps::default()
+            .resolve_fed_proxy_path(&CsApiUrl(server.url.clone()))
+            .await
+            .expect_err("expected an error when MSC4512 isn't advertised");
+        assert!(err.contains("MSC4512"), "unexpected error message: {err}");
+    }
+
+    /// A transport failure while fetching /versions surfaces as an error.
+    #[tokio::test]
+    async fn test_resolve_fed_proxy_path_versions_fetch_error() {
+        let err = RealDeps::default()
+            .resolve_fed_proxy_path(&CsApiUrl("http://127.0.0.1:1".into()))
+            .await
+            .expect_err("expected an error for an unreachable homeserver");
+        assert!(err.contains("/versions"), "unexpected error message: {err}");
     }
 
     // ── resolve_cs_api_url ────────────────────────────────────────────────────

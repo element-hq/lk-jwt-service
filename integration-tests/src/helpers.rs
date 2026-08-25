@@ -194,15 +194,15 @@ pub fn expect_no_is_joined_requests(hs: &FakeHomeserver) {
 }
 
 /// Assert that an /is_joined request for the given room and mxid has been
-/// recorded.
+/// recorded with the given `as_token` as its authorization.
 #[track_caller]
-pub fn expect_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &str) {
+pub fn expect_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &str, as_token: &str) {
     let requests = hs.is_joined_requests();
     assert!(
-        requests
-            .iter()
-            .any(|r| r.room_id == room_id && r.mxid == mxid),
-        "expected an is_joined request for room {room_id:?}, mxid {mxid:?}, got {requests:?}"
+        requests.iter().any(|r| r.room_id == room_id
+            && r.mxid == mxid
+            && r.authorization == format!("Bearer {as_token}")),
+        "expected an is_joined request for room {room_id:?}, mxid {mxid:?}, as_token {as_token:?}, got {requests:?}"
     );
 }
 
@@ -216,6 +216,52 @@ pub fn expect_no_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &st
             .iter()
             .any(|r| r.room_id == room_id && r.mxid == mxid),
         "expected an is_joined request for room {room_id:?}, mxid {mxid:?}, got {requests:?}"
+    );
+}
+
+/// Assert that no fed_proxy request has been recorded.
+#[track_caller]
+pub fn expect_no_fed_proxy_requests(hs: &FakeHomeserver) {
+    let requests = hs.fed_proxy_requests();
+    assert!(
+        requests.is_empty(),
+        "expected no fed_proxy requests, got {:?}",
+        requests
+    );
+}
+
+/// Assert that exactly one /fed_proxy request targeting `destination` has
+/// been recorded with the specified parameters.
+#[track_caller]
+pub fn expect_fed_proxy_request(
+    hs: &FakeHomeserver,
+    destination: &str,
+    as_token: &str,
+    path: &str,
+    expected_body: &Value,
+) {
+    let requests = hs.fed_proxy_requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "expected exactly one fed_proxy request to destination {destination:?}, got {requests:?}"
+    );
+    let r = &requests[0];
+    assert_eq!(
+        r.destination, destination,
+        "unexpected fed_proxy destination"
+    );
+    assert_eq!(r.method, "POST", "unexpected fed_proxy method");
+    assert_eq!(
+        r.authorization,
+        format!("Bearer {as_token}"),
+        "unexpected fed_proxy authorization"
+    );
+    assert_eq!(r.path, path, "unexpected fed_proxy S-S path");
+    assert_eq!(
+        r.body.as_ref(),
+        Some(expected_body),
+        "unexpected fed_proxy relayed body"
     );
 }
 

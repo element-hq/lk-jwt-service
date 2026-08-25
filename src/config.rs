@@ -42,12 +42,19 @@ pub struct AppServiceConfig {
     pub as_token: String,
     /// A secret token that the homeserver will use to authenticate requests to this service.
     pub hs_token: String,
+    /// The associated homeserver's server_name.
+    pub hs_server_name: String,
 }
 
 impl AppServiceConfig {
+   /// Whether the config is fully empty.
+    pub fn is_empty(&self) -> bool {
+        self.as_token.is_empty() && self.hs_token.is_empty() && self.hs_server_name.is_empty()
+    }
+
     /// Whether the config has been set up or is (partially) empty.
     pub fn is_set_up(&self) -> bool {
-        !self.as_token.is_empty() && !self.hs_token.is_empty()
+        !self.as_token.is_empty() && !self.hs_token.is_empty() && !self.hs_server_name.is_empty()
     }
 }
 
@@ -99,12 +106,12 @@ pub fn read_key_secret() -> Result<(String, String), String> {
     ))
 }
 
-/// Read the application service configuration, either from the service registration file or from
-/// dedicated environment variables.
+/// Read the application service configuration from environment variables.
 pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
+    let hs_server_name = env_var("LIVEKIT_HS_SERVER_NAME");
     let path = env_var("LIVEKIT_AS_REGISTRATION_FILE");
 
-    if !path.is_empty() {
+    let config = if !path.is_empty() {
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let yaml = Yaml::new();
         let parsed = yaml.load_str(&content).map_err(|e| e.to_string())?;
@@ -129,13 +136,32 @@ pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
             path,
             "Using application service configuration from LIVEKIT_AS_REGISTRATION_FILE"
         );
-        Ok(AppServiceConfig { as_token, hs_token })
+        AppServiceConfig {
+            as_token,
+            hs_token,
+            hs_server_name,
+        }
     } else {
         let as_token = env_var("LIVEKIT_AS_TOKEN").trim().to_owned();
         let hs_token = env_var("LIVEKIT_HS_TOKEN").trim().to_owned();
         info!("Using application service configuration from LIVEKIT_AS_TOKEN and LIVEKIT_HS_TOKEN");
-        Ok(AppServiceConfig { as_token, hs_token })
+        AppServiceConfig {
+            as_token,
+            hs_token,
+            hs_server_name,
+        }
+    };
+
+    if !config.is_empty() && !config.is_set_up() {
+        return Err(
+            "The app service token(s) (LIVEKIT_AS_TOKEN/LIVEKIT_HS_TOKEN or \
+             LIVEKIT_AS_REGISTRATION_FILE) and LIVEKIT_HS_SERVER_NAME must either all be set or \
+             all be left empty"
+                .into(),
+        );
     }
+
+    Ok(config)
 }
 
 pub fn read_cs_api_url_overrides(raw: &str) -> Result<HashMap<String, CsApiUrl>, String> {
@@ -329,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_as_tokens() {
+    fn test_read_app_service_config() {
         struct Case {
             name: &'static str,
             registration_file_content: Option<&'static str>,
@@ -349,10 +375,12 @@ mod tests {
                 extra_env: vec![
                     ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
                     ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com")
                 ],
                 expected: Some(AppServiceConfig {
                     as_token: "as_token_env_pheethiewixohp9eecheeGh".into(),
                     hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".into(),
+                    hs_server_name: "example.com".to_owned(),
                 }),
             },
             Case {
@@ -360,10 +388,11 @@ mod tests {
                 registration_file_content: Some(
                     "as_token: as_token_yaml_iethuB2LeLiNuishiaKe\nhs_token: hs_token_yaml_xefaingo4oos6ohla9ph\n",
                 ),
-                extra_env: vec![],
+                extra_env: vec![("LIVEKIT_HS_SERVER_NAME", "example.com")],
                 expected: Some(AppServiceConfig {
                     as_token: "as_token_yaml_iethuB2LeLiNuishiaKe".into(),
                     hs_token: "hs_token_yaml_xefaingo4oos6ohla9ph".into(),
+                    hs_server_name: "example.com".to_owned(),
                 }),
             },
             Case {
@@ -374,11 +403,48 @@ mod tests {
                 extra_env: vec![
                     ("LIVEKIT_AS_TOKEN", "as_token_env_ignored"),
                     ("LIVEKIT_HS_TOKEN", "hs_token_env_ignored"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
                 ],
                 expected: Some(AppServiceConfig {
                     as_token: "as_token_yaml_iethuB2LeLiNuishiaKe".into(),
                     hs_token: "hs_token_yaml_xefaingo4oos6ohla9ph".into(),
+                    hs_server_name: "example.com".to_owned(),
                 }),
+            },
+            Case {
+                name: "Registration file tokens without hs_server_name is rejected",
+                registration_file_content: Some(
+                    "as_token: as_token_yaml_iethuB2LeLiNuishiaKe\nhs_token: hs_token_yaml_xefaingo4oos6ohla9ph\n",
+                ),
+                extra_env: vec![],
+                expected: None,
+            },
+            Case {
+                name: "Only LIVEKIT_AS_TOKEN set is rejected",
+                registration_file_content: None,
+                extra_env: vec![("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh")],
+                expected: None,
+            },
+            Case {
+                name: "Only LIVEKIT_HS_TOKEN set is rejected",
+                registration_file_content: None,
+                extra_env: vec![("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg")],
+                expected: None,
+            },
+            Case {
+                name: "Only LIVEKIT_HS_SERVER_NAME set is rejected",
+                registration_file_content: None,
+                extra_env: vec![("LIVEKIT_HS_SERVER_NAME", "example.com")],
+                expected: None,
+            },
+            Case {
+                name: "AS/HS tokens without LIVEKIT_HS_SERVER_NAME is rejected",
+                registration_file_content: None,
+                extra_env: vec![
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                ],
+                expected: None,
             },
             Case {
                 name: "Registration file does not exist",
@@ -639,6 +705,7 @@ mod tests {
                     ("LIVEKIT_REDIS_URL", "localhost:6379"),
                     ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
                     ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
                 ],
                 want_config: Some(Config {
                     key: "test_key".into(),
@@ -656,6 +723,7 @@ mod tests {
                     app_service_config: AppServiceConfig {
                         as_token: "as_token_env_pheethiewixohp9eecheeGh".to_owned(),
                         hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".to_owned(),
+                        hs_server_name: "example.com".to_owned(),
                     },
                 }),
                 want_err_msg: "",
@@ -711,6 +779,21 @@ mod tests {
                 ],
                 want_config: None,
                 want_err_msg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together",
+            },
+            Case {
+                name: "App service tokens without hs_server_name rejected",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                ],
+                want_config: None,
+                want_err_msg: "The app service token(s) (LIVEKIT_AS_TOKEN/LIVEKIT_HS_TOKEN or \
+                    LIVEKIT_AS_REGISTRATION_FILE) and LIVEKIT_HS_SERVER_NAME must either all be \
+                    set or all be left empty",
             },
             Case {
                 name: "Sanity check interval invalid",

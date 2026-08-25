@@ -34,8 +34,8 @@ use crate::helper::{
 };
 use crate::requests::{
     AppservicePingTriggerRequest, DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse,
-    GetTokenCsRequest, GetTokenCsResponse, LegacySfuRequest, MatrixErrorBody, MatrixErrorResponse,
-    OpenIdTokenType, SfuRequest, SfuResponse,
+    GetTokenCsRequest, GetTokenCsResponse, GetTokenSsRequest, LegacySfuRequest, MatrixErrorBody,
+    MatrixErrorResponse, OpenIdTokenType, SfuRequest, SfuResponse,
 };
 use crate::store::{Store, StoredJob};
 
@@ -910,7 +910,11 @@ impl Handler {
         req: &GetTokenCsRequest,
         header_mxid: &str,
     ) -> Result<GetTokenCsResponse, MatrixErrorResponse> {
-        if req.url != self.livekit_auth.lk_url {
+        let target_server_name = req.server_name.as_str();
+        let is_local = target_server_name.is_empty()
+            || target_server_name == self.app_service_config.hs_server_name;
+
+        if is_local && req.url != self.livekit_auth.lk_url {
             warn!(request_url = %req.url, configured_url = %self.livekit_auth.lk_url,
                 "Handler: request `url` does not match the configured LiveKit URL");
             return Err(MatrixErrorResponse {
@@ -928,7 +932,8 @@ impl Handler {
             err: "Malformed user identifier".into(),
         })?;
 
-        let is_full_access_user = self.is_full_access_user(server_name);
+        // Local users always have full access.
+        let is_full_access_user = is_local;
         debug!(matrix_id = %matrix_id,
             access = if is_full_access_user { "full" } else { "restricted" },
             "Handler: got Matrix user info (app-service)");
@@ -973,46 +978,100 @@ impl Handler {
             });
         }
 
-        let lk_identity =
-            livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
-        let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+        if is_local {
+            let lk_identity =
+                livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
+            let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
-        let token = get_join_token(
-            &self.livekit_auth.key,
-            &self.livekit_auth.secret,
-            &lk_room_alias,
-            &lk_identity,
-        )
-        .map_err(|err| {
-            error!(matrix_id = %matrix_id, err = %err, "Handler: error getting LiveKit token");
-            MatrixErrorResponse {
-                status: 500,
-                errcode: "M_UNKNOWN".into(),
-                err: "Internal Server Error".into(),
+            let token = get_join_token(
+                &self.livekit_auth.key,
+                &self.livekit_auth.secret,
+                &lk_room_alias,
+                &lk_identity,
+            )
+            .map_err(|err| {
+                error!(matrix_id = %matrix_id, err = %err, "Handler: error getting LiveKit token");
+                MatrixErrorResponse {
+                    status: 500,
+                    errcode: "M_UNKNOWN".into(),
+                    err: "Internal Server Error".into(),
+                }
+            })?;
+
+            if is_full_access_user
+                && self
+                    .deps
+                    .create_livekit_room(
+                        &self.livekit_auth,
+                        &lk_room_alias,
+                        &matrix_id,
+                        &lk_identity,
+                    )
+                    .await
+                    .is_err()
+            {
+                return Err(MatrixErrorResponse {
+                    status: 500,
+                    errcode: "M_UNKNOWN".into(),
+                    err: "Unable to create room on SFU".into(),
+                });
             }
-        })?;
 
-        if is_full_access_user
-            && self
+            info!(matrix_id = %matrix_id, claimed_device_id = %req.member.claimed_device_id,
+                access = if is_full_access_user { "full" } else { "restricted" },
+                matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
+                lk_id = %lk_identity, room = %lk_room_alias,
+                "Handler: generated SFU access token (app-service)");
+
+            return Ok(GetTokenCsResponse { jwt: token });
+        } else {
+            let destination_cs_api_url = self
                 .deps
-                .create_livekit_room(&self.livekit_auth, &lk_room_alias, &matrix_id, &lk_identity)
+                .resolve_cs_api_url(
+                    target_server_name,
+                    &self.cs_api_url_overrides,
+                    Some(&self.cs_api_url_cache),
+                )
                 .await
-                .is_err()
-        {
-            return Err(MatrixErrorResponse {
-                status: 500,
-                errcode: "M_UNKNOWN".into(),
-                err: "Unable to create room on SFU".into(),
-            });
+                .map_err(|_| MatrixErrorResponse {
+                    status: 400,
+                    errcode: "M_BAD_JSON".into(),
+                    err: "Unable to resolve the specified homeserver's client-server API".into(),
+                })?;
+
+            let ss_req = GetTokenSsRequest {
+                user_id: matrix_id.clone(),
+                url: req.url.clone(),
+                room_id: req.room_id.clone(),
+                slot_id: req.slot_id.clone(),
+                member: req.member.clone(),
+            };
+            let resp = self
+                .deps
+                .request_get_token_via_federation(
+                    &cs_api_url,
+                    &destination_cs_api_url,
+                    &self.app_service_config.as_token,
+                    target_server_name,
+                    &ss_req,
+                )
+                .await
+                .map_err(|err| {
+                    error!(matrix_id = %matrix_id, destination = %target_server_name, err = %err,
+                        "Handler: error relaying get_token via federation proxy");
+                    MatrixErrorResponse {
+                        status: 502,
+                        errcode: "M_CONNECTION_FAILED".into(),
+                        err: "Unable to reach the specified homeserver".into(),
+                    }
+                })?;
+
+            info!(matrix_id = %matrix_id, destination = %target_server_name,
+                matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
+                "Handler: relayed SFU access token via federation proxy (app-service)");
+
+            return Ok(GetTokenCsResponse { jwt: resp.jwt });
         }
-
-        info!(matrix_id = %matrix_id, claimed_device_id = %req.member.claimed_device_id,
-            access = if is_full_access_user { "full" } else { "restricted" },
-            matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
-            lk_id = %lk_identity, room = %lk_room_alias,
-            "Handler: generated SFU access token (app-service)");
-
-        Ok(GetTokenCsResponse { jwt: token })
     }
 
     /// Handles /delegate_delayed_leave: schedules a delayed-leave job for a
@@ -1098,10 +1157,7 @@ impl Handler {
                     "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token",
                     any(handle_get_token_cs),
                 )
-                .route(
-                    "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token",
-                    any(handle_ss_get_token),
-                )
+                .route("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token", any(handle_ss_get_token))
                 .route(
                     "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave",
                     any(handle_cs_delegate_delayed_leave),

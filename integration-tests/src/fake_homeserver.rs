@@ -12,10 +12,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
-use serde_json::json;
+use serde_json::{Value, json};
 
-/// Which form of the MSC4502 `is_joined` endpoint (if any) the fake
-/// homeserver advertises via `/versions`.
+/// Which level of MSC4502 (targeted and unrestricted room member queries) support
+/// the fake homeserver advertises via `/versions`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Msc4502Support {
     Unstable,
@@ -23,11 +23,40 @@ pub enum Msc4502Support {
     None,
 }
 
+/// Which level of MSC4195 (MatrixRTC Transport using LiveKit Backend) support
+/// the fake homeserver advertises via `/versions`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Msc4195Support {
+    Unstable,
+    Stable,
+    None,
+}
+
+/// Which level of MSC4512 (Delegating parts of the Client-Server and Server-Server
+/// API to application services) support the fake homeserver advertises via `/versions`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Msc4512Support {
+    Unstable,
+    Stable,
+    None,
+}
+
+/// A request to the MSC4502 /is_joined endpoint.
 #[derive(Clone, Debug)]
 pub struct IsJoinedRequest {
+    pub authorization: String,
     pub room_id: String,
     pub mxid: String,
+}
+
+/// A request to the MSC4512 /fed_proxy endpoint.
+#[derive(Clone, Debug)]
+pub struct FedProxyRequest {
     pub authorization: String,
+    pub destination: String,
+    pub method: String,
+    pub path: String,
+    pub body: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -62,7 +91,8 @@ struct HsState {
     /// The recorded /delayed_events requests.
     delayed_event_requests: Vec<DelayedEventRequest>,
 
-    /// Which form of the is_joined endpoint /versions advertises.
+    /// Which level of MSC4502 (targeted and unrestricted room member queries) support
+    /// the fake homeserver advertises via `/versions`.
     msc4502_support: Msc4502Support,
 
     /// (room_id, mxid) pairs considered NOT joined. Everything else is
@@ -71,6 +101,21 @@ struct HsState {
 
     /// The recorded /is_joined requests.
     is_joined_requests: Vec<IsJoinedRequest>,
+
+    /// Which level of MSC4195 (MatrixRTC Transport using LiveKit Backend) support
+    /// the fake homeserver advertises via `/versions`.
+    msc4195_support: Msc4195Support,
+
+    /// Which level of MSC4512 (Delegating parts of the Client-Server and Server-Server
+    /// API to application services) support the fake homeserver advertises via `/versions`.
+    msc4512_support: Msc4512Support,
+
+    /// The recorded /fed_proxy requests.
+    fed_proxy_requests: Vec<FedProxyRequest>,
+
+    /// The (destination status, destination content) pair the /fed_proxy endpoint
+    /// reports back.
+    fed_proxy_response: (u16, Option<serde_json::Value>),
 }
 
 impl Default for HsState {
@@ -80,9 +125,16 @@ impl Default for HsState {
             user_info_requests: Vec::new(),
             delayed_event_status: None,
             delayed_event_requests: Vec::new(),
-            msc4502_support: Msc4502Support::Unstable,
+            msc4502_support: Msc4502Support::None,
             not_joined: HashSet::new(),
             is_joined_requests: Vec::new(),
+            msc4195_support: Msc4195Support::None,
+            msc4512_support: Msc4512Support::None,
+            fed_proxy_requests: Vec::new(),
+            fed_proxy_response: (
+                200,
+                Some(json!({ "url": "wss://remote.example.org", "jwt": "remote-jwt" })),
+            ),
         }
     }
 }
@@ -141,11 +193,19 @@ impl FakeHomeserver {
             .route("/_matrix/client/versions", get(handle_versions))
             .route(
                 "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
-                get(handle_is_joined),
+                get(handle_is_joined_unstable),
             )
             .route(
                 "/_matrix/client/v3/rooms/{room_id}/is_joined",
-                get(handle_is_joined),
+                get(handle_is_joined_stable),
+            )
+            .route(
+                "/_matrix/client/unstable/io.element.msc4512/appservice/fed_proxy",
+                post(handle_fed_proxy_unstable),
+            )
+            .route(
+                "/_matrix/client/v1/appservice/fed_proxy",
+                post(handle_fed_proxy_stable),
             )
             .with_state(Arc::clone(&state));
         tokio::spawn(axum::serve(cs_api_listener, cs_api_app).into_future());
@@ -200,10 +260,22 @@ impl FakeHomeserver {
         self.state.lock().unwrap().delayed_event_requests.clone()
     }
 
-    /// Sets which form of the is_joined endpoint (MSC4502) /versions
-    /// advertises. Defaults to `Unstable`.
+    /// Sets which level of MSC4502 (targeted and unrestricted room member queries) support
+    /// the fake homeserver advertises via `/versions`.
     pub fn set_msc4502_support(&self, support: Msc4502Support) {
         self.state.lock().unwrap().msc4502_support = support;
+    }
+
+    /// Sets which level of MSC4195 (MatrixRTC Transport using LiveKit Backend) support
+    /// the fake homeserver advertises via `/versions`.
+    pub fn set_msc4195_support(&self, support: Msc4195Support) {
+        self.state.lock().unwrap().msc4195_support = support;
+    }
+
+    /// Sets which level of MSC4512 (Delegating parts of the Client-Server and Server-Server
+    /// API to application services) support the fake homeserver advertises via `/versions`.
+    pub fn set_msc4512_support(&self, support: Msc4512Support) {
+        self.state.lock().unwrap().msc4512_support = support;
     }
 
     /// Marks (room_id, mxid) as NOT a member of the room. Every other pair
@@ -219,6 +291,17 @@ impl FakeHomeserver {
     /// The recorded /is_joined requests.
     pub fn is_joined_requests(&self) -> Vec<IsJoinedRequest> {
         self.state.lock().unwrap().is_joined_requests.clone()
+    }
+
+    /// The recorded /fed_proxy requests.
+    pub fn fed_proxy_requests(&self) -> Vec<FedProxyRequest> {
+        self.state.lock().unwrap().fed_proxy_requests.clone()
+    }
+
+    /// Sets the (destination status, destination content) pair the /fed_proxy endpoint
+    /// reports back.
+    pub fn set_fed_proxy_response(&self, status: u16, content: Option<serde_json::Value>) {
+        self.state.lock().unwrap().fed_proxy_response = (status, content);
     }
 }
 
@@ -271,26 +354,128 @@ async fn handle_delayed_event(
 
 /// Handler for /_matrix/client/versions requests.
 async fn handle_versions(State(state): State<Arc<Mutex<HsState>>>) -> impl IntoResponse {
-    let msc4502_support = state.lock().unwrap().msc4502_support;
-    let unstable_features = match msc4502_support {
-        Msc4502Support::Unstable => json!({ "io.element.msc4502": true }),
-        Msc4502Support::Stable => json!({ "io.element.msc4502.stable": true }),
-        Msc4502Support::None => json!({}),
+    let (msc4502_support, msc4195_support, msc4512_support) = {
+        let state = state.lock().unwrap();
+        (
+            state.msc4502_support,
+            state.msc4195_support,
+            state.msc4512_support,
+        )
     };
+
+    let mut unstable_features = serde_json::Map::new();
+    match msc4502_support {
+        Msc4502Support::Unstable => {
+            unstable_features.insert("io.element.msc4502".to_owned(), json!(true));
+        }
+        Msc4502Support::Stable => {
+            unstable_features.insert("io.element.msc4502.stable".to_owned(), json!(true));
+        }
+        Msc4502Support::None => {}
+    }
+    match msc4195_support {
+        Msc4195Support::Unstable => {
+            unstable_features.insert("io.element.msc4195".to_owned(), json!(true));
+        }
+        Msc4195Support::Stable => {
+            unstable_features.insert("io.element.msc4195.stable".to_owned(), json!(true));
+        }
+        Msc4195Support::None => {}
+    }
+    match msc4512_support {
+        Msc4512Support::Unstable => {
+            unstable_features.insert("io.element.msc4512".to_owned(), json!(true));
+        }
+        Msc4512Support::Stable => {
+            unstable_features.insert("io.element.msc4512.stable".to_owned(), json!(true));
+        }
+        Msc4512Support::None => {}
+    }
+
     Json(json!({
         "versions": ["v1.1"],
-        "unstable_features": unstable_features,
+        "unstable_features": Value::Object(unstable_features),
     }))
 }
 
-/// Handler for the stable and unstable /is_joined requests (MSC4502).
+/// Handler for unstable /is_joined requests (MSC4502).
+async fn handle_is_joined_unstable(
+    state: State<Arc<Mutex<HsState>>>,
+    room_id: Path<String>,
+    query: Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    handle_is_joined(state, room_id, query, headers, false).await
+}
+
+/// Handler for stable /is_joined requests (MSC4502).
+async fn handle_is_joined_stable(
+    state: State<Arc<Mutex<HsState>>>,
+    room_id: Path<String>,
+    query: Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    handle_is_joined(state, room_id, query, headers, true).await
+}
+
+/// Handler for unstable and stable /is_joined requests (MSC4502).
 async fn handle_is_joined(
     State(state): State<Arc<Mutex<HsState>>>,
     Path(room_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
+    stable: bool,
 ) -> impl IntoResponse {
+    let authorization = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
     let mxid = query.get("mxid").cloned().unwrap_or_default();
+
+    let mut state = state.lock().unwrap();
+    let matches_advertised_support = match state.msc4502_support {
+        Msc4502Support::Stable => stable,
+        Msc4502Support::Unstable => !stable,
+        Msc4502Support::None => false,
+    };
+    if matches_advertised_support {
+        state.is_joined_requests.push(IsJoinedRequest {
+            authorization,
+            room_id: room_id.clone(),
+            mxid: mxid.clone(),
+        });
+    }
+
+    let joined = !state.not_joined.contains(&(room_id, mxid));
+    Json(json!({ "joined": joined }))
+}
+
+/// Handler for unstable /fed_proxy requests (MSC4512).
+async fn handle_fed_proxy_unstable(
+    state: State<Arc<Mutex<HsState>>>,
+    headers: HeaderMap,
+    body: Json<serde_json::Value>,
+) -> impl IntoResponse {
+    handle_fed_proxy(state, headers, body, false).await
+}
+
+/// Handler for stable /fed_proxy requests (MSC4512).
+async fn handle_fed_proxy_stable(
+    state: State<Arc<Mutex<HsState>>>,
+    headers: HeaderMap,
+    body: Json<serde_json::Value>,
+) -> impl IntoResponse {
+    handle_fed_proxy(state, headers, body, true).await
+}
+
+/// Handler for unstable and stable /fed_proxy requests (MSC4512).
+async fn handle_fed_proxy(
+    State(state): State<Arc<Mutex<HsState>>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+    stable: bool,
+) -> impl IntoResponse {
     let authorization = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -298,12 +483,21 @@ async fn handle_is_joined(
         .to_owned();
 
     let mut state = state.lock().unwrap();
-    state.is_joined_requests.push(IsJoinedRequest {
-        room_id: room_id.clone(),
-        mxid: mxid.clone(),
-        authorization,
-    });
+    let matches_advertised_support = match state.msc4512_support {
+        Msc4512Support::Stable => stable,
+        Msc4512Support::Unstable => !stable,
+        Msc4512Support::None => false,
+    };
+    if matches_advertised_support {
+        state.fed_proxy_requests.push(FedProxyRequest {
+            authorization,
+            destination: body["destination"].as_str().unwrap_or_default().to_owned(),
+            method: body["method"].as_str().unwrap_or_default().to_owned(),
+            path: body["path"].as_str().unwrap_or_default().to_owned(),
+            body: body.get("body").cloned(),
+        });
+    }
 
-    let joined = !state.not_joined.contains(&(room_id, mxid));
-    Json(json!({ "joined": joined }))
+    let (status, content) = state.fed_proxy_response.clone();
+    Json(json!({ "status": status, "content": content }))
 }

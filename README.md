@@ -96,14 +96,15 @@ Set environment variables to configure the service:
 | `LIVEKIT_KEY_FILE`                            | File path with `APIkey: secret` format                        | ⚠️ mutually exclusive with <code>LIVEKIT_{KEY&#124;SECRET}</code>    |         |
 | `LIVEKIT_JWT_BIND`                            | Address to bind the server to                                 | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_PORT` | `:8080` |
 | `LIVEKIT_JWT_PORT`                            | ⚠️ Deprecated Port to bind the server to                      | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_BIND` |         |
-| `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all — see security note below) | ✅ Yes                                               |         |
+| `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all — see security note below). Ignored when serving C-S and S-S endpoints as an application service. | ✅ Yes                                               |         |
 | `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS`       | Interval (seconds) at which delegated-leave jobs re-check that a connected participant is still on the SFU. Guards against missed SFU webhooks. Unset/`0` disables the sanity check. | ❌ No                                                | `0` (disabled) |
 | `LIVEKIT_LOG_LEVEL`                           | One of `debug`, `info`, `warn`/`warning`, `error`             | ❌ No                                                | `info` |
 | `LIVEKIT_CS_API_URL_OVERRIDES`                | Comma-separated list of overrides for Client-Server API locations that cannot be inferred using .well-known discovery (e.g. `example.com=matrix-client.example.com`) | ❌ No                                                | |
 | `LIVEKIT_REDIS_URL`                           | Redis connection URL (e.g. `redis://localhost:6379`). When set, service state will be persisted during operation and restored upon service restarts. When unset, the service falls back to an in-memory store. | ❌ No | |
-| `LIVEKIT_AS_TOKEN`                            | The token used for authenticating requests to the homeserver as an application service | ❌ No | |
-| `LIVEKIT_HS_TOKEN`                            | The token used by the homeserver for authenticating requests to the service as an application service | ❌ No | |
-| `LIVEKIT_AS_REGISTRATION_FILE`                | Path to an application service registration file containing the application service tokens. Takes precedence over `LIVEKIT_AS_TOKEN` and `LIVEKIT_HS_TOKEN` if specified. | ❌ No | |
+| `LIVEKIT_AS_TOKEN`                            | The token used for authenticating requests to the homeserver as an application service | ❌ No, ⚠️ Required when running as an application service unless `LIVEKIT_AS_REGISTRATION_FILE` is set | |
+| `LIVEKIT_HS_TOKEN`                            | The token used by the homeserver for authenticating requests to the service as an application service | ❌ No, ⚠️ Required when running as an application service unless `LIVEKIT_AS_REGISTRATION_FILE` is set | |
+| `LIVEKIT_AS_REGISTRATION_FILE`                | Path to an application service registration file containing the application service tokens. Takes precedence over `LIVEKIT_AS_TOKEN` and `LIVEKIT_HS_TOKEN` if specified. | ❌ No ⚠️ Required when running as an application service unless `LIVEKIT_AS_TOKEN` and `LIVEKIT_HS_TOKEN` are set | |
+| `LIVEKIT_HS_SERVER_NAME`                      | When running as an application service, the associated homeserver's server name. The C-S API needs to be resolvable from the server name. | ❌ No, ⚠️ Required when running as an application service | |
 
 > [!WARNING]
 > **Restricting room creation** requires two pieces working together:

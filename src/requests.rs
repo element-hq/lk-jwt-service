@@ -94,6 +94,8 @@ pub struct SfuResponse {
 #[serde(deny_unknown_fields)]
 pub struct GetTokenCsRequest {
     #[serde(default)]
+    pub server_name: String,
+    #[serde(default)]
     pub url: String,
     #[serde(default)]
     pub room_id: String,
@@ -106,6 +108,28 @@ pub struct GetTokenCsRequest {
 /// Response body of the `/rtc/livekit/get_token` endpoint.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GetTokenCsResponse {
+    pub jwt: String,
+}
+
+/// Request body of the `/rtc/livekit/get_token` S-S endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetTokenSsRequest {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub room_id: String,
+    #[serde(default)]
+    pub slot_id: String,
+    #[serde(default)]
+    pub member: MatrixRtcMemberType,
+}
+
+/// Response body of the `/rtc/livekit/get_token` S-S endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GetTokenSsResponse {
     pub jwt: String,
 }
 
@@ -479,6 +503,7 @@ mod tests {
             url: "wss://lk.local".into(),
             room_id: "!testRoom:example.com".into(),
             slot_id: "m.call#ROOM".into(),
+            server_name: String::new(),
             member: MatrixRtcMemberType {
                 id: "member-id".into(),
                 claimed_user_id: "@user:example.com".into(),

@@ -18,7 +18,7 @@ use tower::util::ServiceExt;
 use super::*;
 use crate::delayed_event_manager::DelayEventAction;
 use crate::helper::{resolve_cs_api_url_via, ActionError, RoomServiceClient, UserInfo};
-use crate::requests::MatrixRtcMemberType;
+use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, MatrixRtcMemberType};
 use crate::store::test_support::{
     new_in_memory_store, new_notifying_store, FailingStore, GatedStore,
 };
@@ -37,6 +37,9 @@ type ExistsFn = Box<
 type ExecFn =
     Box<dyn Fn(&CsApiUrl, &str, DelayEventAction) -> Result<u16, ActionError> + Send + Sync>;
 type IsJoinedFn = Box<dyn Fn(&CsApiUrl, &str, &str) -> Result<bool, String> + Send + Sync>;
+type FedProxyFn = Box<
+    dyn Fn(&CsApiUrl, &str, &GetTokenSsRequest) -> Result<GetTokenSsResponse, String> + Send + Sync,
+>;
 
 /// A [`Deps`] implementation with per-test swappable behaviours. Un-mocked
 /// methods panic, except CS-API URL resolution, which falls back to the real
@@ -49,6 +52,7 @@ struct HandlerTestDeps {
     exists: Option<ExistsFn>,
     exec: Option<ExecFn>,
     is_joined: Option<IsJoinedFn>,
+    fed_proxy: Option<FedProxyFn>,
 }
 
 #[async_trait::async_trait]
@@ -137,6 +141,20 @@ impl Deps for HandlerTestDeps {
             None => panic!("is_room_member not mocked in HandlerTestDeps"),
         }
     }
+
+    async fn request_get_token_via_federation(
+        &self,
+        own_cs_api_url: &CsApiUrl,
+        _destination_cs_api_url: &CsApiUrl,
+        _as_token: &str,
+        destination: &str,
+        req: &GetTokenSsRequest,
+    ) -> Result<GetTokenSsResponse, String> {
+        match &self.fed_proxy {
+            Some(f) => f(own_cs_api_url, destination, req),
+            None => panic!("request_get_token_via_federation not mocked in HandlerTestDeps"),
+        }
+    }
 }
 
 /// A participant_exists mock that pends until the surrounding job is
@@ -156,6 +174,13 @@ fn exec_ok() -> Option<ExecFn> {
 
 fn is_joined_ok(joined: bool) -> Option<IsJoinedFn> {
     Some(Box::new(move |_, _, _| Ok(joined)))
+}
+
+fn fed_proxy_ok(jwt: &str) -> Option<FedProxyFn> {
+    let jwt = jwt.to_owned();
+    Some(Box::new(move |_, _, _| {
+        Ok(GetTokenSsResponse { jwt: jwt.clone() })
+    }))
 }
 
 // ── construction helpers ──────────────────────────────────────────────────────
@@ -217,6 +242,7 @@ fn new_get_token_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> {
         crate::config::AppServiceConfig {
             as_token: "as_token".into(),
             hs_token: HS_TOKEN.into(),
+            hs_server_name: "example.com".into(),
         },
         Duration::ZERO,
         HashMap::new(),
@@ -306,6 +332,7 @@ fn valid_get_token_cs_request() -> GetTokenCsRequest {
         room_id: "!testRoom:example.com".into(),
         slot_id: "m.call#ROOM".into(),
         url: LIVEKIT_URL.into(),
+        server_name: String::new(),
         member: MatrixRtcMemberType {
             id: "member-id".into(),
             claimed_user_id: GET_TOKEN_CS_MXID.into(),
@@ -2051,39 +2078,6 @@ async fn test_handle_get_token_cs_success() {
     handler.close().await;
 }
 
-/// A restricted (non-full-access) user's request still succeeds but does not trigger LiveKit
-/// room creation.
-#[tokio::test]
-async fn test_handle_get_token_cs_restricted_no_room_creation() {
-    const HEADER_MXID: &str = "@user:other.com";
-    let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let create_called_clone = create_called.clone();
-    let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|_| {
-            Ok(CsApiUrl("https://matrix.other.com".into()))
-        })),
-        is_joined: is_joined_ok(true),
-        create_room: Some(Box::new(move |_, _, _| {
-            create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        })),
-        ..Default::default()
-    };
-    // new_cs_get_token_handler configures full access only for example.com.
-    let handler = new_get_token_cs_handler(deps);
-
-    let body = marshal_get_token_cs_request(|r| {
-        r.member.claimed_user_id = HEADER_MXID.into();
-    });
-    let resp = send_request(&handler, post_get_token_cs_request(body, HEADER_MXID)).await;
-    assert_eq!(resp.status(), StatusCode::OK, "status");
-    assert!(
-        !create_called.load(std::sync::atomic::Ordering::SeqCst),
-        "expected create_livekit_room not to be called for a restricted user"
-    );
-    handler.close().await;
-}
-
 /// A mismatch between the X-Matrix-User-Identifier header and
 /// the claimed_user_id in the body does not affect the outcome.
 #[tokio::test]
@@ -2119,6 +2113,93 @@ async fn test_handle_get_token_cs_ignores_claimed_user_id_mismatch() {
     assert!(
         create_called.load(std::sync::atomic::Ordering::SeqCst),
         "expected create_livekit_room to be called for full-access user"
+    );
+    handler.close().await;
+}
+
+/// A `server_name` naming a different homeserver is relayed via the
+/// MSC4512 federation proxy.
+#[tokio::test]
+async fn test_handle_get_token_cs_relays_foreign_server_name() {
+    let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let create_called_clone = create_called.clone();
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_joined: is_joined_ok(true),
+        fed_proxy: fed_proxy_ok("remote-jwt"),
+        create_room: Some(Box::new(move |_, _, _| {
+            create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "status");
+    assert!(
+        !create_called.load(std::sync::atomic::Ordering::SeqCst),
+        "expected no local room creation when relaying to another homeserver"
+    );
+
+    let body = body_bytes(resp).await;
+    let response: GetTokenCsResponse =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(response.jwt, "remote-jwt", "expected the relayed JWT");
+    handler.close().await;
+}
+
+/// A transport error from the federation proxy surfaces as 502.
+#[tokio::test]
+async fn test_handle_get_token_cs_federation_proxy_error() {
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_joined: is_joined_ok(true),
+        fed_proxy: Some(Box::new(|_, _, _| Err("boom".into()))),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "expected 502 when the federation proxy fails"
+    );
+    handler.close().await;
+}
+
+/// A failure to resolve the destination homeserver's client-server API surfaces as 400.
+#[tokio::test]
+async fn test_handle_get_token_cs_destination_cs_api_url_resolution_error() {
+    let deps = HandlerTestDeps {
+        resolve: Some(Box::new(|server_name| {
+            if server_name == "other.example.org" {
+                Err("M_NOT_FOUND: no".into())
+            } else {
+                Ok(CsApiUrl("https://matrix.example.com".into()))
+            }
+        })),
+        is_joined: is_joined_ok(true),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 when the destination's CS API URL cannot be resolved"
     );
     handler.close().await;
 }
@@ -2256,7 +2337,7 @@ async fn test_handle_get_token_cs_cs_api_url_resolution_error() {
 
 /// Various unit tests for process_get_token_cs_request.
 #[tokio::test]
-async fn test_process_cs_sfu_request() {
+async fn test_process_get_token_cs_request() {
     const LK_URL: &str = "wss://lk.local:8080/foo";
 
     struct Case {
@@ -2264,11 +2345,14 @@ async fn test_process_cs_sfu_request() {
         header_mxid: &'static str,
         claimed_user_id: &'static str,
         url: &'static str,
+        server_name: &'static str,
         fail_resolution: bool,
         fail_membership: bool,
         is_member: bool,
         fail_join_token: bool,
+        fail_fed_proxy: bool,
         expect_create_room: bool,
+        expect_fed_proxy_called: bool,
         expect_error: bool,
     }
     let base = Case {
@@ -2276,23 +2360,20 @@ async fn test_process_cs_sfu_request() {
         header_mxid: "@user:example.com",
         claimed_user_id: "@user:example.com",
         url: LK_URL,
+        server_name: "",
         fail_resolution: false,
         fail_membership: false,
         is_member: true,
         fail_join_token: false,
+        fail_fed_proxy: false,
         expect_create_room: false,
+        expect_fed_proxy_called: false,
         expect_error: false,
     };
     for tc in [
         Case {
-            name: "Full access — all OK",
+            name: "No server_name / local user — all OK",
             expect_create_room: true,
-            ..base
-        },
-        Case {
-            name: "Restricted — all OK",
-            header_mxid: "@user:other.com",
-            claimed_user_id: "@user:other.com",
             ..base
         },
         Case {
@@ -2331,13 +2412,50 @@ async fn test_process_cs_sfu_request() {
             expect_error: true,
             ..base
         },
+        Case {
+            name: "server_name matching own hs_server_name is handled locally",
+            server_name: "example.com",
+            expect_create_room: true,
+            ..base
+        },
+        Case {
+            name: "server_name naming another homeserver is relayed via federation",
+            server_name: "other.example.org",
+            expect_fed_proxy_called: true,
+            ..base
+        },
+        Case {
+            name: "server_name naming another homeserver skips the URL check",
+            server_name: "other.example.org",
+            url: "wss://not-our-configured-sfu.example.com",
+            expect_fed_proxy_called: true,
+            ..base
+        },
+        Case {
+            name: "Federation proxy transport error",
+            server_name: "other.example.org",
+            fail_fed_proxy: true,
+            expect_fed_proxy_called: true,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Non-member is rejected even when server_name is foreign",
+            server_name: "other.example.org",
+            is_member: false,
+            expect_error: true,
+            ..base
+        },
     ] {
         let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let create_called_clone = create_called.clone();
+        let fed_proxy_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fed_proxy_called_clone = fed_proxy_called.clone();
 
         let fail_resolution = tc.fail_resolution;
         let fail_membership = tc.fail_membership;
         let is_member = tc.is_member;
+        let fail_fed_proxy = tc.fail_fed_proxy;
 
         let deps = HandlerTestDeps {
             create_room: Some(Box::new(move |room, _, _| {
@@ -2359,6 +2477,20 @@ async fn test_process_cs_sfu_request() {
                     Ok(is_member)
                 }
             })),
+            fed_proxy: Some(Box::new(move |_, destination, _| {
+                fed_proxy_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(
+                    destination, "other.example.org",
+                    "unexpected fed_proxy destination"
+                );
+                if fail_fed_proxy {
+                    Err("boom".into())
+                } else {
+                    Ok(GetTokenSsResponse {
+                        jwt: "remote-jwt".into(),
+                    })
+                }
+            })),
             ..Default::default()
         };
 
@@ -2377,6 +2509,7 @@ async fn test_process_cs_sfu_request() {
             crate::config::AppServiceConfig {
                 as_token: "as_token".into(),
                 hs_token: "hs_token".into(),
+                hs_server_name: "example.com".into(),
             },
             Duration::ZERO,
             HashMap::new(),
@@ -2387,6 +2520,7 @@ async fn test_process_cs_sfu_request() {
             room_id: "!room:example.com".into(),
             slot_id: "slot".into(),
             url: tc.url.into(),
+            server_name: tc.server_name.into(),
             member: MatrixRtcMemberType {
                 id: "device".into(),
                 claimed_user_id: tc.claimed_user_id.into(),
@@ -2407,6 +2541,20 @@ async fn test_process_cs_sfu_request() {
             "{}: create_livekit_room called mismatch",
             tc.name
         );
+        assert_eq!(
+            fed_proxy_called.load(std::sync::atomic::Ordering::SeqCst),
+            tc.expect_fed_proxy_called,
+            "{}: federation proxy called mismatch",
+            tc.name
+        );
+        if tc.expect_fed_proxy_called && !tc.expect_error {
+            assert_eq!(
+                result.unwrap().jwt,
+                "remote-jwt",
+                "{}: expected the relayed JWT to be returned",
+                tc.name
+            );
+        }
         handler.close().await;
     }
 }
