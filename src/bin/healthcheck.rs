@@ -50,7 +50,10 @@ mod tests {
 
         let url = url_res.unwrap();
         assert_eq!(url.host_str().unwrap_or("0.0.0.0"), expected_host);
-        assert_eq!(url.port_or_known_default().unwrap_or_default(), expected_port);
+        assert_eq!(
+            url.port_or_known_default().unwrap_or_default(),
+            expected_port
+        );
     }
 
     fn test_healthz_url(lk_jwt_bind: &str, expected_host: &str, expected_port: u16) {
@@ -72,7 +75,7 @@ mod tests {
         test_healthz_url("127.0.0.1:8080", "127.0.0.1", 8080);
         test_healthz_url("127.0.0.1:443", "127.0.0.1", 443);
     }
-    
+
     #[test]
     fn bind_all_invalid() {
         let addrs = bind_addresses("8080");
