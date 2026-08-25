@@ -18,8 +18,8 @@ async fn main() -> Result<(), String> {
     let lk_jwt_bind = parse_bind()?;
     let addrs = bind_addresses(&lk_jwt_bind);
 
-    for addr in addrs.to_vec() {
-        if let Ok(resp) = reqwest::get(get_healthz_url(&addr)).await {
+    for addr in &addrs {
+        if let Ok(resp) = reqwest::get(get_healthz_url(addr)).await {
             if resp.status().as_u16() != 200 {
                 return Err(format!(
                     "Healthcheck failed with status code {}",
