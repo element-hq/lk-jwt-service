@@ -953,7 +953,7 @@ pub trait Deps: Send + Sync {
         subject: IsJoinedSubject<'_>,
         as_token: &str,
     ) -> Result<bool, String> {
-        let path_prefix = self.resolve_is_joined_path_prefix(cs_api_url).await?;
+        const IS_JOINED_PATH_PREFIX: &str = "_matrix/client/unstable/io.element.msc4502";
 
         let mut endpoint = url::Url::parse(cs_api_url.as_str())
             .map_err(|e| format!("invalid client-server API URL: {e}"))?;
@@ -962,7 +962,7 @@ pub trait Deps: Send + Sync {
                 .path_segments_mut()
                 .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?;
             segments.pop_if_empty();
-            for segment in path_prefix.trim_matches('/').split('/') {
+            for segment in IS_JOINED_PATH_PREFIX.trim_matches('/').split('/') {
                 segments.push(segment);
             }
             segments.push("rooms");
@@ -1004,73 +1004,6 @@ pub trait Deps: Send + Sync {
             .await
             .map_err(|e| format!("failed to parse is_joined response: {e}"))?;
         Ok(parsed.joined)
-    }
-
-    /// Fetches the `unstable_features` map from `cs_api_url`'s `/versions`,
-    /// caching the result per server.
-    async fn fetch_unstable_features(
-        &self,
-        cs_api_url: &CsApiUrl,
-    ) -> Result<HashMap<String, bool>, String> {
-        static CACHE: std::sync::LazyLock<TtlCache<HashMap<String, bool>>> =
-            std::sync::LazyLock::new(|| TtlCache::with_max_entries(10_000));
-        const TTL: Duration = Duration::from_secs(60 * 60);
-
-        if let Some(unstable_features) = CACHE.get(cs_api_url.as_str()) {
-            return Ok(unstable_features);
-        }
-
-        #[derive(Deserialize, Default)]
-        struct VersionsResponse {
-            #[serde(default)]
-            unstable_features: HashMap<String, bool>,
-        }
-
-        let mut endpoint = url::Url::parse(cs_api_url.as_str())
-            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
-        {
-            let mut segments = endpoint
-                .path_segments_mut()
-                .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?;
-            segments
-                .pop_if_empty()
-                .extend(["_matrix", "client", "versions"]);
-        }
-
-        let resp = http_client(self.skip_verify_tls())
-            .get(endpoint.clone())
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| format!("failed to fetch /versions: {}", error_chain(&e)))?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "failed to fetch /versions: http status code {}",
-                resp.status().as_u16()
-            ));
-        }
-        let versions: VersionsResponse = resp.json().await.map_err(|e| e.to_string())?;
-
-        CACHE.set(cs_api_url.as_str(), versions.unstable_features.clone(), TTL);
-        Ok(versions.unstable_features)
-    }
-
-    /// Feature-detects whether the homeserver behind `cs_api_url` supports
-    /// the stable or unstable `is_joined` endpoint (MSC4502) via `/versions`,
-    /// returning the path prefix to use.
-    async fn resolve_is_joined_path_prefix(
-        &self,
-        cs_api_url: &CsApiUrl,
-    ) -> Result<&'static str, String> {
-        let unstable_features = self.fetch_unstable_features(cs_api_url).await?;
-        let is_supported = |flag: &str| unstable_features.get(flag).copied().unwrap_or(false);
-        if is_supported("io.element.msc4502.stable") {
-            Ok("_matrix/client/v3")
-        } else if is_supported("io.element.msc4502") {
-            Ok("_matrix/client/unstable/io.element.msc4502")
-        } else {
-            Err("homeserver does not support is_joined (MSC4502)".into())
-        }
     }
 
     /// Triggers a ping round-trip to ensure the service and the homeserver
@@ -2461,89 +2394,36 @@ mod tests {
 
     // ── check_is_joined ──────────────────────────────────────────────────────
 
-    /// A homeserver stub serving /versions and /is_joined.
+    /// A homeserver stub serving /is_joined at the unstable MSC4502 path.
     struct IsJoinedServer {
         server: TestHttpServer,
         requests: Arc<Mutex<Vec<(String, http::HeaderMap)>>>,
     }
 
-    async fn spawn_is_joined_server(
-        unstable_features: serde_json::Value,
-        is_joined_path: &'static str,
-        joined: bool,
-    ) -> IsJoinedServer {
+    async fn spawn_is_joined_server(joined: bool) -> IsJoinedServer {
         let requests: Arc<Mutex<Vec<(String, http::HeaderMap)>>> = Arc::new(Mutex::new(Vec::new()));
         let requests_clone = requests.clone();
-        let router = Router::new()
-            .route(
-                "/_matrix/client/versions",
-                any(move || {
-                    let unstable_features = unstable_features.clone();
-                    async move {
-                        axum::Json(serde_json::json!({
-                            "versions": ["v1.1"],
-                            "unstable_features": unstable_features,
-                        }))
-                    }
-                }),
-            )
-            .route(
-                is_joined_path,
-                any(move |req: Request| {
-                    let requests = requests_clone.clone();
-                    async move {
-                        let uri = req.uri().to_string();
-                        let headers = req.headers().clone();
-                        requests.lock().unwrap().push((uri, headers));
-                        axum::Json(serde_json::json!({ "joined": joined }))
-                    }
-                }),
-            );
+        let router = Router::new().route(
+            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+            any(move |req: Request| {
+                let requests = requests_clone.clone();
+                async move {
+                    let uri = req.uri().to_string();
+                    let headers = req.headers().clone();
+                    requests.lock().unwrap().push((uri, headers));
+                    axum::Json(serde_json::json!({ "joined": joined }))
+                }
+            }),
+        );
         let server = spawn_http_server(router).await;
         IsJoinedServer { server, requests }
     }
 
-    /// The stable endpoint (v3) is used when the homeserver
-    /// advertises the post-acceptance stable flag.
+    /// The unstable MSC4502 endpoint is always used, regardless of what the
+    /// homeserver advertises.
     #[tokio::test]
-    async fn test_check_is_joined_uses_stable_endpoint_when_advertised() {
-        let hs = spawn_is_joined_server(
-            serde_json::json!({ "io.element.msc4502.stable": true }),
-            "/_matrix/client/v3/rooms/{room_id}/is_joined",
-            true,
-        )
-        .await;
-
-        let joined = RealDeps::default()
-            .check_is_joined(
-                &CsApiUrl(hs.server.url.clone()),
-                "!room:example.com",
-                IsJoinedSubject::Mxid("@alice:example.com"),
-                "as_token",
-            )
-            .await
-            .expect("unexpected error");
-        assert!(joined);
-
-        let requests = hs.requests.lock().unwrap();
-        assert_eq!(requests.len(), 1, "expected exactly one is_joined request");
-        assert!(
-            requests[0].0.starts_with("/_matrix/client/v3/rooms/"),
-            "expected the stable endpoint to be used, got {:?}",
-            requests[0].0
-        );
-    }
-
-    /// The unstable endpoint is used when only the unstable
-    /// flag is advertised.
-    #[tokio::test]
-    async fn test_check_is_joined_uses_unstable_endpoint_when_advertised() {
-        let hs = spawn_is_joined_server(
-            serde_json::json!({ "io.element.msc4502": true }),
-            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
-            true,
-        )
-        .await;
+    async fn test_check_is_joined_uses_unstable_endpoint() {
+        let hs = spawn_is_joined_server(true).await;
 
         let joined = RealDeps::default()
             .check_is_joined(
@@ -2567,62 +2447,10 @@ mod tests {
         );
     }
 
-    /// The stable flag wins when both are advertised.
-    #[tokio::test]
-    async fn test_check_is_joined_prefers_stable_over_unstable() {
-        let hs = spawn_is_joined_server(
-            serde_json::json!({
-                "io.element.msc4502": true,
-                "io.element.msc4502.stable": true,
-            }),
-            "/_matrix/client/v3/rooms/{room_id}/is_joined",
-            true,
-        )
-        .await;
-
-        let joined = RealDeps::default()
-            .check_is_joined(
-                &CsApiUrl(hs.server.url.clone()),
-                "!room:example.com",
-                IsJoinedSubject::Mxid("@alice:example.com"),
-                "as_token",
-            )
-            .await
-            .expect("unexpected error");
-        assert!(joined);
-    }
-
-    /// A homeserver advertising neither flag is treated as unsupported.
-    #[tokio::test]
-    async fn test_check_is_joined_fails_when_unsupported() {
-        let hs = spawn_is_joined_server(
-            serde_json::json!({}),
-            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
-            true,
-        )
-        .await;
-
-        let err = RealDeps::default()
-            .check_is_joined(
-                &CsApiUrl(hs.server.url.clone()),
-                "!room:example.com",
-                IsJoinedSubject::Mxid("@alice:example.com"),
-                "as_token",
-            )
-            .await
-            .expect_err("expected an error when MSC4502 isn't advertised");
-        assert!(err.contains("MSC4502"), "unexpected error message: {err}");
-    }
-
     /// `joined: false` responses propagate as Ok(false), not an error.
     #[tokio::test]
     async fn test_check_is_joined_not_joined() {
-        let hs = spawn_is_joined_server(
-            serde_json::json!({ "io.element.msc4502": true }),
-            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
-            false,
-        )
-        .await;
+        let hs = spawn_is_joined_server(false).await;
 
         let joined = RealDeps::default()
             .check_is_joined(
@@ -2636,42 +2464,13 @@ mod tests {
         assert!(!joined);
     }
 
-    /// A transport failure while fetching /versions surfaces as an error.
-    #[tokio::test]
-    async fn test_check_is_joined_versions_fetch_error() {
-        let err = RealDeps::default()
-            .check_is_joined(
-                &CsApiUrl("http://127.0.0.1:1".into()),
-                "!room:example.com",
-                IsJoinedSubject::Mxid("@alice:example.com"),
-                "as_token",
-            )
-            .await
-            .expect_err("expected an error for an unreachable homeserver");
-        assert!(err.contains("/versions"), "unexpected error message: {err}");
-    }
-
     /// A non-2xx response from the is_joined endpoint itself surfaces as an error.
     #[tokio::test]
     async fn test_check_is_joined_http_error() {
-        let unstable_features = serde_json::json!({ "io.element.msc4502": true });
-        let router = Router::new()
-            .route(
-                "/_matrix/client/versions",
-                any(move || {
-                    let unstable_features = unstable_features.clone();
-                    async move {
-                        axum::Json(serde_json::json!({
-                            "versions": ["v1.1"],
-                            "unstable_features": unstable_features,
-                        }))
-                    }
-                }),
-            )
-            .route(
-                "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
-                any(|| async { http::StatusCode::FORBIDDEN }),
-            );
+        let router = Router::new().route(
+            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+            any(|| async { http::StatusCode::FORBIDDEN }),
+        );
         let server = spawn_http_server(router).await;
 
         let err = RealDeps::default()
@@ -2691,12 +2490,7 @@ mod tests {
     /// The request is shaped correctly: it uses `mxid`.
     #[tokio::test]
     async fn test_is_user_joined_request_shape() {
-        let hs = spawn_is_joined_server(
-            serde_json::json!({ "io.element.msc4502": true }),
-            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
-            true,
-        )
-        .await;
+        let hs = spawn_is_joined_server(true).await;
 
         let _ = RealDeps::default()
             .is_user_joined(
@@ -2732,12 +2526,7 @@ mod tests {
     /// The request is shaped correctly: it uses `server_name`, not `mxid`.
     #[tokio::test]
     async fn test_is_server_joined_request_shape() {
-        let hs = spawn_is_joined_server(
-            serde_json::json!({ "io.element.msc4502": true }),
-            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
-            true,
-        )
-        .await;
+        let hs = spawn_is_joined_server(true).await;
 
         let _ = RealDeps::default()
             .is_server_joined(

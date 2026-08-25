@@ -11,7 +11,7 @@ mod helpers;
 
 pub use fake_homeserver::{
     DelayedEventLookup, DelayedEventRequest, FakeHomeserver, FakeUser, FedProxyRequest,
-    IsJoinedRequest, Msc4502Support, UserInfoRequest,
+    IsJoinedRequest, UserInfoRequest,
 };
 pub use fake_redis::FakeRedis;
 pub use fake_sfu::{CreateRoomRequest, FakeSfu, GetParticipantRequest};

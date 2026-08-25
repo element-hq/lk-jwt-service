@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use lk_jwt_service_integration_tests::{
-    DEFAULT_LK_URL, FakeHomeserver, FakeSfu, FakeUser, Msc4502Support, Service, ServiceConfig,
-    decode_livekit_jwt, expect_fed_proxy_request, expect_is_joined_request, expect_matrix_error,
+    DEFAULT_LK_URL, FakeHomeserver, FakeSfu, FakeUser, Service, ServiceConfig, decode_livekit_jwt,
+    expect_fed_proxy_request, expect_is_joined_request, expect_matrix_error,
     expect_no_fed_proxy_requests, expect_no_is_joined_requests, expect_no_user_info_lookups,
 };
 use serde_json::{Value, json};
@@ -248,7 +248,6 @@ async fn missing_url() {
 #[tokio::test]
 async fn not_a_room_member() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
     let user = hs.new_user("alice");
     hs.set_not_joined("!room:example.com", &user.user_id);
 
@@ -345,59 +344,6 @@ async fn get_instead_of_post() {
 #[tokio::test]
 async fn full_access_token_unstable_is_joined() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
-    let user = hs.new_user("alice");
-    let sfu = FakeSfu::new().await;
-
-    let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        livekit_url: Some(sfu.url().to_owned()),
-        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
-        ..Default::default()
-    })
-    .await;
-
-    let (status, body) = post_get_token_cs(
-        &svc,
-        get_token_cs_request(&user, sfu.url()).to_string(),
-        Some(&user.user_id),
-    )
-    .await;
-
-    assert_eq!(status, 200, "body: {body}");
-
-    let response: Value = serde_json::from_str(&body).expect("response is not JSON");
-    let jwt = response["jwt"].as_str().unwrap_or_default();
-
-    let claims = decode_livekit_jwt(jwt);
-    assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
-    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
-    assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
-    assert_eq!(
-        claims["video"]["canUpdateOwnMetadata"].as_bool(),
-        Some(true)
-    );
-
-    expect_is_joined_request(&hs, "!room:example.com", &user.user_id, AS_TOKEN);
-
-    let rooms = sfu.create_room_requests();
-    assert_eq!(rooms.len(), 1, "expected exactly one room creation");
-    assert_eq!(
-        claims["video"]["room"].as_str(),
-        Some(rooms[0].name.as_str())
-    );
-}
-
-/// A full-access, joined user gets a token and triggers room creation,
-/// using the stable is_joined endpoint.
-/// Without a `server_name` the target server is assumed to be the local one.
-/// The user gets a token and triggers room creation. This test uses the stable
-/// /is_joined endpoint.
-#[tokio::test]
-async fn full_access_token_stable_is_joined() {
-    let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Stable);
     let user = hs.new_user("alice");
     let sfu = FakeSfu::new().await;
 
@@ -446,7 +392,6 @@ async fn full_access_token_stable_is_joined() {
 #[tokio::test]
 async fn server_name_matching_own_hs_server_name_is_local() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
     let user = hs.new_user("alice");
     let sfu = FakeSfu::new().await;
 
@@ -479,7 +424,6 @@ async fn server_name_matching_own_hs_server_name_is_local() {
 #[tokio::test]
 async fn foreign_server_name_is_relayed_via_federation_proxy() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
     let user = hs.new_user("alice");
     let destination_hs = FakeHomeserver::new().await;
     let sfu = FakeSfu::new().await;
@@ -535,7 +479,6 @@ async fn foreign_server_name_is_relayed_via_federation_proxy() {
 #[tokio::test]
 async fn non_member_is_rejected_even_with_foreign_server_name() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
     let user = hs.new_user("alice");
     hs.set_not_joined("!room:example.com", &user.user_id);
 
@@ -560,7 +503,6 @@ async fn non_member_is_rejected_even_with_foreign_server_name() {
 #[tokio::test]
 async fn federation_proxy_destination_error_surfaces_as_502() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
     let user = hs.new_user("alice");
     hs.set_fed_proxy_response(403, None);
     let destination_hs = FakeHomeserver::new().await;

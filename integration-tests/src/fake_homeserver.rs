@@ -12,16 +12,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
-use serde_json::{Value, json};
-
-/// Which level of MSC4502 (targeted and unrestricted room member queries) support
-/// the fake homeserver advertises via `/versions`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Msc4502Support {
-    Unstable,
-    Stable,
-    None,
-}
+use serde_json::json;
 
 /// A request to the MSC4502 /is_joined endpoint.
 #[derive(Clone, Debug)]
@@ -94,10 +85,6 @@ struct HsState {
     /// The recorded delayed-event look-ups.
     delay_look_ups: Vec<DelayedEventLookup>,
 
-    /// Which level of MSC4502 (targeted and unrestricted room member queries) support
-    /// the fake homeserver advertises via `/versions`.
-    msc4502_support: Msc4502Support,
-
     /// (room_id, mxid) pairs considered NOT joined. Everything else is
     /// treated as joined.
     not_joined: HashSet<(String, String)>,
@@ -123,7 +110,6 @@ impl Default for HsState {
             delays: HashMap::new(),
             delay_look_up_status: None,
             delay_look_ups: Vec::new(),
-            msc4502_support: Msc4502Support::None,
             not_joined: HashSet::new(),
             is_joined_requests: Vec::new(),
             fed_proxy_requests: Vec::new(),
@@ -190,14 +176,9 @@ impl FakeHomeserver {
                 "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}",
                 get(handle_delayed_event_look_up),
             )
-            .route("/_matrix/client/versions", get(handle_versions))
             .route(
                 "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
-                get(handle_is_joined_unstable),
-            )
-            .route(
-                "/_matrix/client/v3/rooms/{room_id}/is_joined",
-                get(handle_is_joined_stable),
+                get(handle_is_joined),
             )
             .route(
                 "/_matrix/client/unstable/io.element.msc4512/appservice/fed_proxy",
@@ -275,12 +256,6 @@ impl FakeHomeserver {
     /// The recorded delayed-event look-ups.
     pub fn delay_lookups(&self) -> Vec<DelayedEventLookup> {
         self.state.lock().unwrap().delay_look_ups.clone()
-    }
-
-    /// Sets which level of MSC4502 (targeted and unrestricted room member queries) support
-    /// the fake homeserver advertises via `/versions`.
-    pub fn set_msc4502_support(&self, support: Msc4502Support) {
-        self.state.lock().unwrap().msc4502_support = support;
     }
 
     /// Marks (room_id, mxid) as NOT a member of the room. Every other pair
@@ -420,54 +395,12 @@ async fn handle_delayed_event_look_up(
     }
 }
 
-/// Handler for /_matrix/client/versions requests.
-async fn handle_versions(State(state): State<Arc<Mutex<HsState>>>) -> impl IntoResponse {
-    let msc4502_support = state.lock().unwrap().msc4502_support;
-
-    let mut unstable_features = serde_json::Map::new();
-    match msc4502_support {
-        Msc4502Support::Unstable => {
-            unstable_features.insert("io.element.msc4502".to_owned(), json!(true));
-        }
-        Msc4502Support::Stable => {
-            unstable_features.insert("io.element.msc4502.stable".to_owned(), json!(true));
-        }
-        Msc4502Support::None => {}
-    }
-
-    Json(json!({
-        "versions": ["v1.1"],
-        "unstable_features": Value::Object(unstable_features),
-    }))
-}
-
-/// Handler for unstable /is_joined requests (MSC4502).
-async fn handle_is_joined_unstable(
-    state: State<Arc<Mutex<HsState>>>,
-    room_id: Path<String>,
-    query: Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    handle_is_joined(state, room_id, query, headers, false).await
-}
-
-/// Handler for stable /is_joined requests (MSC4502).
-async fn handle_is_joined_stable(
-    state: State<Arc<Mutex<HsState>>>,
-    room_id: Path<String>,
-    query: Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    handle_is_joined(state, room_id, query, headers, true).await
-}
-
-/// Handler for unstable and stable /is_joined requests (MSC4502).
+/// Handler for /is_joined requests.
 async fn handle_is_joined(
     State(state): State<Arc<Mutex<HsState>>>,
     Path(room_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
-    stable: bool,
 ) -> impl IntoResponse {
     let authorization = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -483,19 +416,12 @@ async fn handle_is_joined(
     };
 
     let mut state = state.lock().unwrap();
-    let matches_advertised_support = match state.msc4502_support {
-        Msc4502Support::Stable => stable,
-        Msc4502Support::Unstable => !stable,
-        Msc4502Support::None => false,
-    };
-    if matches_advertised_support {
-        state.is_joined_requests.push(IsJoinedRequest {
-            authorization,
-            room_id: room_id.clone(),
-            mxid,
-            server_name,
-        });
-    }
+    state.is_joined_requests.push(IsJoinedRequest {
+        authorization,
+        room_id: room_id.clone(),
+        mxid,
+        server_name,
+    });
 
     let joined = !state.not_joined.contains(&(room_id, subject));
     Json(json!({ "joined": joined }))

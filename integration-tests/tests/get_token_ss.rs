@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use lk_jwt_service_integration_tests::{
-    DEFAULT_LK_URL, FakeHomeserver, Msc4502Support, Service, ServiceConfig, decode_livekit_jwt,
+    DEFAULT_LK_URL, FakeHomeserver, Service, ServiceConfig, decode_livekit_jwt,
     expect_matrix_error, expect_server_is_joined_request,
 };
 use serde_json::{Value, json};
@@ -211,7 +211,6 @@ async fn get_instead_of_post() {
 #[tokio::test]
 async fn success() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec![hs.server_name().to_owned()],
@@ -246,7 +245,6 @@ async fn success() {
 #[tokio::test]
 async fn own_server_not_a_member() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
     hs.set_not_joined("!room:example.com", hs.server_name());
 
     let svc = Service::start(ServiceConfig {
@@ -272,7 +270,6 @@ async fn own_server_not_a_member() {
 #[tokio::test]
 async fn origin_server_not_a_member() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
     hs.set_not_joined("!room:example.com", ORIGIN_SERVER);
 
     let svc = Service::start(ServiceConfig {
@@ -298,7 +295,6 @@ async fn origin_server_not_a_member() {
 #[tokio::test]
 async fn url_mismatch() {
     let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec![hs.server_name().to_owned()],
