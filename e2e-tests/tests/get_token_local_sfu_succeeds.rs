@@ -4,19 +4,18 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_URL, SYNAPSE_CS_API_URL, Stack, create_and_join_room, register_user,
+    LIVEKIT_SFU_ADDR, LIVEKIT_URL, SYNAPSE_CS_API_URL, Stack, create_and_join_room, register_user,
     verify_livekit_token_is_usable,
 };
 
-/// Exercises the app-service `/rtc/livekit/get_token` C-S endpoint to
-/// request a token and confirms that it is usable.
+/// A joined user succeeds in getting a token for the local SFU.
 #[tokio::test]
-async fn get_token_round_trip_succeeds() {
+async fn get_token_local_sfu_succeeds() {
     let _stack = Stack::start().await;
 
     // Register a user and have them create (and thus join) a room.
-    let user = register_user("alice", "e2e-test-password").await;
-    let room_id = create_and_join_room(&user).await;
+    let user = register_user(SYNAPSE_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_CS_API_URL, &user).await;
 
     // Request a LiveKit token for that room through Synapse's C-S API. Synapse
     // proxies the request to its lk-jwt-service running as an application service.
@@ -52,5 +51,5 @@ async fn get_token_round_trip_succeeds() {
 
     // The proof that matters: a real LiveKit SFU actually accepts the
     // issued token and admits the participant into the room.
-    verify_livekit_token_is_usable(jwt).await;
+    verify_livekit_token_is_usable(LIVEKIT_SFU_ADDR, jwt).await;
 }

@@ -32,6 +32,25 @@ pub const LIVEKIT_URL: &str = "ws://livekit:7880";
 /// points to from inside the Docker network.
 pub const LIVEKIT_SFU_ADDR: &str = "127.0.0.1:17880";
 
+/// The second service instance's published base URL
+pub const AUTH_SERVICE2_URL: &str = "http://127.0.0.1:18081";
+
+/// The second Synapse instance's client-server API, published to the host.
+pub const SYNAPSE2_CS_API_URL: &str = "http://127.0.0.1:18009";
+
+/// The server name the second Synapse instance is configured with in
+/// docker/homeserver2.yaml.
+pub const SYNAPSE2_SERVER_NAME: &str = "synapse2.e2e.test";
+
+/// The LIVEKIT_URL the second jwt-service container is configured with. Only
+/// resolvable from inside the Docker network. To actually reach the same LiveKit
+/// instance from the host, use [`LIVEKIT2_SFU_ADDR`] instead.
+pub const LIVEKIT2_URL: &str = "ws://livekit2:7880";
+
+/// The host-published address of the same LiveKit instance [`LIVEKIT2_URL`]
+/// points to from inside the Docker network.
+pub const LIVEKIT2_SFU_ADDR: &str = "127.0.0.1:17881";
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -105,6 +124,9 @@ impl Stack {
             ("synapse", format!("{SYNAPSE_CS_API_URL}/health")),
             ("jwt-service", format!("{AUTH_SERVICE_URL}/healthz")),
             ("livekit", format!("http://{LIVEKIT_SFU_ADDR}/")),
+            ("synapse2", format!("{SYNAPSE2_CS_API_URL}/health")),
+            ("jwt-service2", format!("{AUTH_SERVICE2_URL}/healthz")),
+            ("livekit2", format!("http://{LIVEKIT2_SFU_ADDR}/")),
         ];
         for (name, url) in checks {
             loop {
@@ -147,10 +169,10 @@ pub struct MatrixUser {
     pub access_token: String,
 }
 
-/// Registers a new user against the Synapse instance.
-pub async fn register_user(username: &str, password: &str) -> MatrixUser {
+/// Registers a new user against the homeserver behind `cs_api_url`.
+pub async fn register_user(cs_api_url: &str, username: &str, password: &str) -> MatrixUser {
     let client = reqwest::Client::new();
-    let register_url = format!("{SYNAPSE_CS_API_URL}/_matrix/client/v3/register");
+    let register_url = format!("{cs_api_url}/_matrix/client/v3/register");
 
     // The first call carries no auth and is expected to be rejected with the
     // set of available UIA flows plus a session ID to complete one of them.
@@ -202,12 +224,13 @@ pub async fn register_user(username: &str, password: &str) -> MatrixUser {
     }
 }
 
-/// Creates a room as the given user and returns its room ID.
-pub async fn create_and_join_room(user: &MatrixUser) -> String {
+/// Creates a room as the given user against the homeserver behind
+/// `cs_api_url` and returns its room ID.
+pub async fn create_and_join_room(cs_api_url: &str, user: &MatrixUser) -> String {
     let resp = reqwest::Client::new()
-        .post(format!("{SYNAPSE_CS_API_URL}/_matrix/client/v3/createRoom"))
+        .post(format!("{cs_api_url}/_matrix/client/v3/createRoom"))
         .bearer_auth(&user.access_token)
-        .json(&serde_json::json!({}))
+        .json(&serde_json::json!({"preset": "public_chat"}))
         .send()
         .await
         .expect("createRoom request failed");
@@ -220,16 +243,44 @@ pub async fn create_and_join_room(user: &MatrixUser) -> String {
         .to_owned()
 }
 
+/// Joins an existing room as the given user against the homeserver behind
+/// `cs_api_url`, resolving it via `via_server_name` — the server_name of a
+/// homeserver already participating in the room.
+pub async fn join_room_via(
+    cs_api_url: &str,
+    user: &MatrixUser,
+    room_id: &str,
+    via_server_name: &str,
+) {
+    let mut url = reqwest::Url::parse(cs_api_url).expect("invalid CS API URL");
+    url.path_segments_mut()
+        .expect("cs_api_url cannot be a base")
+        .extend(["_matrix", "client", "v3", "join", room_id]);
+    url.query_pairs_mut()
+        .append_pair("server_name", via_server_name);
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(&user.access_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("join request failed");
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("join response was not valid JSON");
+    assert!(status.is_success(), "join failed: {status}: {body}");
+}
+
 // ── SFU verification ─────────────────────────────────────────────────────────
 
-/// Connects to the LiveKit SFU's RTC signalling endpoint using the
-/// given access token and confirms the SFU accepts it.
-pub async fn verify_livekit_token_is_usable(access_token: &str) {
+/// Connects to the LiveKit SFU at `sfu_addr`'s RTC signalling endpoint using
+/// the given access token and confirms the SFU accepts it.
+pub async fn verify_livekit_token_is_usable(sfu_addr: &str, access_token: &str) {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
 
     let url = format!(
-        "ws://{LIVEKIT_SFU_ADDR}/rtc?access_token={access_token}&protocol=15&sdk=other&version=1.0.0&auto_subscribe=1"
+        "ws://{sfu_addr}/rtc?access_token={access_token}&protocol=15&sdk=other&version=1.0.0&auto_subscribe=1"
     );
     let connect = tokio_tungstenite::connect_async(&url);
     let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), connect)

@@ -1,22 +1,54 @@
 networks:
   e2e:
 
+x-synapse-build: &synapse-build
+  # Built from https://github.com/element-hq/synapse/pull/19977 while it is unmerged.
+  image: lk-jwt-e2e-synapse:latest
+  build:
+    context: https://github.com/Johennes/synapse.git#johannes/outgoing-fed-proxy
+    dockerfile: docker/Dockerfile
+
+x-jwt-service-build: &jwt-service-build
+  image: lk-jwt-e2e-jwt-service:latest
+  build:
+    context: ../..
+
 services:
   synapse:
+    <<: *synapse-build
     hostname: homeserver
-    # Built from https://github.com/element-hq/synapse/pull/19977 while it is unmerged.
-    build:
-      context: https://github.com/Johennes/synapse.git#johannes/outgoing-fed-proxy
-      dockerfile: docker/Dockerfile
     environment:
       - SYNAPSE_CONFIG_PATH=/config/homeserver.yaml
     volumes:
       - ./homeserver.yaml:/config/homeserver.yaml:ro
       - ./app-service.yaml:/config/app-service.yaml:ro
+      - ./certs/synapse.e2e.test.crt:/config/tls.crt:ro
+      - ./certs/synapse.e2e.test.key:/config/tls.key:ro
     ports:
       - "18008:8008"
     networks:
-      - e2e
+      e2e:
+        # Lets synapse2 resolve and federate with this homeserver by its
+        # configured server_name, without needing .well-known or SRV setup.
+        aliases:
+          - synapse.e2e.test
+
+  synapse2:
+    <<: *synapse-build
+    hostname: homeserver2
+    environment:
+      - SYNAPSE_CONFIG_PATH=/config/homeserver.yaml
+    volumes:
+      - ./homeserver2.yaml:/config/homeserver.yaml:ro
+      - ./app-service2.yaml:/config/app-service2.yaml:ro
+      - ./certs/synapse2.e2e.test.crt:/config/tls.crt:ro
+      - ./certs/synapse2.e2e.test.key:/config/tls.key:ro
+    ports:
+      - "18009:8008"
+    networks:
+      e2e:
+        aliases:
+          - synapse2.e2e.test
 
   livekit:
     image: livekit/livekit-server:latest
@@ -29,9 +61,19 @@ services:
     networks:
       - e2e
 
+  livekit2:
+    image: livekit/livekit-server:latest
+    hostname: livekit2
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit2.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "17881:7880"
+    networks:
+      - e2e
+
   jwt-service:
-    build:
-      context: ../..
+    <<: *jwt-service-build
     hostname: jwt-service
     environment:
       - LIVEKIT_URL=ws://livekit:7880
@@ -39,7 +81,8 @@ services:
       - LIVEKIT_SECRET=e2e_livekit_secret_0123456789ab
       - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse.e2e.test
       - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service.yaml
-      - LIVEKIT_CS_API_URL_OVERRIDES=synapse.e2e.test=http://synapse:8008
+      - LIVEKIT_HS_SERVER_NAME=synapse.e2e.test
+      - LIVEKIT_CS_API_URL_OVERRIDES=synapse.e2e.test=http://synapse:8008,synapse2.e2e.test=http://synapse2:8008
     volumes:
       - ./app-service.yaml:/etc/lk-jwt-service/app-service.yaml:ro
     ports:
@@ -47,5 +90,26 @@ services:
     depends_on:
       - synapse
       - livekit
+    networks:
+      - e2e
+
+  jwt-service2:
+    <<: *jwt-service-build
+    hostname: jwt-service2
+    environment:
+      - LIVEKIT_URL=ws://livekit2:7880
+      - LIVEKIT_KEY=e2e_livekit_key_2
+      - LIVEKIT_SECRET=e2e_livekit_secret_2_0123456789ab
+      - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse2.e2e.test
+      - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service2.yaml
+      - LIVEKIT_HS_SERVER_NAME=synapse2.e2e.test
+      - LIVEKIT_CS_API_URL_OVERRIDES=synapse2.e2e.test=http://synapse2:8008,synapse.e2e.test=http://synapse:8008
+    volumes:
+      - ./app-service2.yaml:/etc/lk-jwt-service/app-service2.yaml:ro
+    ports:
+      - "18081:8080"
+    depends_on:
+      - synapse2
+      - livekit2
     networks:
       - e2e

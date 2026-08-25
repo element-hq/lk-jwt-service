@@ -1,5 +1,5 @@
-server_name: "synapse.e2e.test"
-public_baseurl: http://synapse.e2e.test/
+server_name: "synapse2.e2e.test"
+public_baseurl: http://synapse2.e2e.test/
 
 pid_file: /tmp/homeserver.pid
 
@@ -15,12 +15,11 @@ listeners:
     resources:
       - names: [client]
         compress: false
+  # Federation, so this homeserver can be a relay destination/origin for the
+  # cross-homeserver S-S get_token e2e test.
   - port: 8448
     tls: true
     type: http
-    # Some Docker setups disable IPv6 on the container's network interface,
-    # which otherwise leaves the default dual-stack bind reachable only via
-    # loopback.
     bind_addresses: ["0.0.0.0"]
     resources:
       - names: [federation]
@@ -49,7 +48,7 @@ signing_key_path: "/tmp/homeserver.signing.key"
 report_stats: false
 
 app_service_config_files:
-  - /config/app-service.yaml
+  - /config/app-service2.yaml
 
 # Enable registration so that the test suite can provision its own users.
 enable_registration: true

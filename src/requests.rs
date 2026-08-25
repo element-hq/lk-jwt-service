@@ -156,6 +156,33 @@ impl GetTokenCsRequest {
     }
 }
 
+impl GetTokenSsRequest {
+    pub fn validate(&self) -> Result<(), MatrixErrorResponse> {
+        if self.url.is_empty()
+            || self.user_id.is_empty()
+            || self.room_id.is_empty()
+            || self.slot_id.is_empty()
+        {
+            error!(url = %self.url, user_id = %self.user_id, room_id = %self.room_id, slot_id = %self.slot_id,
+                "Missing url, user_id, room_id or slot_id");
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body is missing `url`, `user_id`, `room_id` or `slot_id`".into(),
+            });
+        }
+        if self.member.id.is_empty() || self.member.claimed_device_id.is_empty() {
+            error!(member = ?self.member, "Handler -> GetTokenSsRequest: Missing member parameters");
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body `member` is missing `id` or `claimed_device_id`".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// DelegateDelayedLeaveRequest is the body of POST /delegate_delayed_leave.
 /// It is used when the client is already connected to the SFU and wants to
 /// hand over the delayed disconnect event after the fact — i.e. no JWT is

@@ -47,7 +47,7 @@ pub struct AppServiceConfig {
 }
 
 impl AppServiceConfig {
-   /// Whether the config is fully empty.
+    /// Whether the config is fully empty.
     pub fn is_empty(&self) -> bool {
         self.as_token.is_empty() && self.hs_token.is_empty() && self.hs_server_name.is_empty()
     }

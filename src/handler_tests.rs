@@ -25,19 +25,20 @@ use crate::store::test_support::{
 
 // ── test deps ─────────────────────────────────────────────────────────────────
 
-type ExchangeFn = Box<dyn Fn(&OpenIdTokenType) -> Result<UserInfo, String> + Send + Sync>;
-type ResolveFn = Box<dyn Fn(&str) -> Result<CsApiUrl, String> + Send + Sync>;
-type CreateRoomMockFn =
+type ExchangeOpenIdUserInfoFn =
+    Box<dyn Fn(&OpenIdTokenType) -> Result<UserInfo, String> + Send + Sync>;
+type ResolveCsApiUrl = Box<dyn Fn(&str) -> Result<CsApiUrl, String> + Send + Sync>;
+type CreateLiveKitRoomFn =
     Box<dyn Fn(&LiveKitRoomAlias, &str, &LiveKitIdentity) -> Result<(), String> + Send + Sync>;
-type ExistsFn = Box<
+type ParticipantExistsFn = Box<
     dyn Fn(&LiveKitRoomAlias, &LiveKitIdentity) -> BoxFuture<'static, Result<bool, String>>
         + Send
         + Sync,
 >;
-type ExecFn =
+type ExecuteDelayedEventActionFn =
     Box<dyn Fn(&CsApiUrl, &str, DelayEventAction) -> Result<u16, ActionError> + Send + Sync>;
 type IsJoinedFn = Box<dyn Fn(&CsApiUrl, &str, &str) -> Result<bool, String> + Send + Sync>;
-type FedProxyFn = Box<
+type RequestGetTokenViaFederationFn = Box<
     dyn Fn(&CsApiUrl, &str, &GetTokenSsRequest) -> Result<GetTokenSsResponse, String> + Send + Sync,
 >;
 
@@ -46,13 +47,14 @@ type FedProxyFn = Box<
 /// override/cache/discovery logic.
 #[derive(Default)]
 struct HandlerTestDeps {
-    exchange: Option<ExchangeFn>,
-    resolve: Option<ResolveFn>,
-    create_room: Option<CreateRoomMockFn>,
-    exists: Option<ExistsFn>,
-    exec: Option<ExecFn>,
-    is_joined: Option<IsJoinedFn>,
-    fed_proxy: Option<FedProxyFn>,
+    exchange_openid_userinfo_fn: Option<ExchangeOpenIdUserInfoFn>,
+    resolve_cs_api_url_fn: Option<ResolveCsApiUrl>,
+    create_livekit_room_fn: Option<CreateLiveKitRoomFn>,
+    participant_exists_fn: Option<ParticipantExistsFn>,
+    execute_delayed_event_action_fn: Option<ExecuteDelayedEventActionFn>,
+    is_user_joined_fn: Option<IsJoinedFn>,
+    is_server_joined_fn: Option<IsJoinedFn>,
+    request_get_token_via_federation_fn: Option<RequestGetTokenViaFederationFn>,
 }
 
 #[async_trait::async_trait]
@@ -79,14 +81,14 @@ impl Deps for HandlerTestDeps {
         overrides: &HashMap<String, CsApiUrl>,
         cache: Option<&CsApiUrlCache>,
     ) -> Result<CsApiUrl, String> {
-        match &self.resolve {
+        match &self.resolve_cs_api_url_fn {
             Some(f) => f(server_name),
             None => resolve_cs_api_url_via(self, server_name, overrides, cache).await,
         }
     }
 
     async fn exchange_openid_userinfo(&self, token: &OpenIdTokenType) -> Result<UserInfo, String> {
-        match &self.exchange {
+        match &self.exchange_openid_userinfo_fn {
             Some(f) => f(token),
             None => panic!("exchange_openid_userinfo not mocked in HandlerTestDeps"),
         }
@@ -99,7 +101,7 @@ impl Deps for HandlerTestDeps {
         matrix_user: &str,
         lk_identity: &LiveKitIdentity,
     ) -> Result<(), String> {
-        match &self.create_room {
+        match &self.create_livekit_room_fn {
             Some(f) => f(room, matrix_user, lk_identity),
             None => panic!("create_livekit_room not mocked in HandlerTestDeps"),
         }
@@ -111,7 +113,7 @@ impl Deps for HandlerTestDeps {
         room: &LiveKitRoomAlias,
         identity: &LiveKitIdentity,
     ) -> Result<bool, String> {
-        match &self.exists {
+        match &self.participant_exists_fn {
             Some(f) => f(room, identity).await,
             None => panic!("participant_exists not mocked in HandlerTestDeps"),
         }
@@ -123,34 +125,46 @@ impl Deps for HandlerTestDeps {
         delay_id: &str,
         action: DelayEventAction,
     ) -> Result<u16, ActionError> {
-        match &self.exec {
+        match &self.execute_delayed_event_action_fn {
             Some(f) => f(cs_api_url, delay_id, action),
             None => panic!("execute_delayed_event_action not mocked in HandlerTestDeps"),
         }
     }
 
-    async fn is_room_member(
+    async fn is_user_joined(
         &self,
         cs_api_url: &CsApiUrl,
         room_id: &str,
         mxid: &str,
         _as_token: &str,
     ) -> Result<bool, String> {
-        match &self.is_joined {
+        match &self.is_user_joined_fn {
             Some(f) => f(cs_api_url, room_id, mxid),
-            None => panic!("is_room_member not mocked in HandlerTestDeps"),
+            None => panic!("is_user_joined not mocked in HandlerTestDeps"),
+        }
+    }
+
+    async fn is_server_joined(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        server_name: &str,
+        _as_token: &str,
+    ) -> Result<bool, String> {
+        match &self.is_server_joined_fn {
+            Some(f) => f(cs_api_url, room_id, server_name),
+            None => panic!("is_server_joined not mocked in HandlerTestDeps"),
         }
     }
 
     async fn request_get_token_via_federation(
         &self,
         own_cs_api_url: &CsApiUrl,
-        _destination_cs_api_url: &CsApiUrl,
         _as_token: &str,
         destination: &str,
         req: &GetTokenSsRequest,
     ) -> Result<GetTokenSsResponse, String> {
-        match &self.fed_proxy {
+        match &self.request_get_token_via_federation_fn {
             Some(f) => f(own_cs_api_url, destination, req),
             None => panic!("request_get_token_via_federation not mocked in HandlerTestDeps"),
         }
@@ -159,16 +173,16 @@ impl Deps for HandlerTestDeps {
 
 /// A participant_exists mock that pends until the surrounding job is
 /// cancelled.
-fn exists_block_until_cancelled() -> Option<ExistsFn> {
+fn participant_exists_block_until_cancelled() -> Option<ParticipantExistsFn> {
     Some(Box::new(|_, _| Box::pin(std::future::pending())))
 }
 
-fn exchange_ok(sub: &str) -> Option<ExchangeFn> {
+fn exchange_openid_userinfo_ok(sub: &str) -> Option<ExchangeOpenIdUserInfoFn> {
     let sub = sub.to_owned();
     Some(Box::new(move |_| Ok(UserInfo { sub: sub.clone() })))
 }
 
-fn exec_ok() -> Option<ExecFn> {
+fn execute_delayed_event_action_ok() -> Option<ExecuteDelayedEventActionFn> {
     Some(Box::new(|_, _, _| Ok(200)))
 }
 
@@ -176,7 +190,7 @@ fn is_joined_ok(joined: bool) -> Option<IsJoinedFn> {
     Some(Box::new(move |_, _, _| Ok(joined)))
 }
 
-fn fed_proxy_ok(jwt: &str) -> Option<FedProxyFn> {
+fn request_get_token_via_federation_ok(jwt: &str) -> Option<RequestGetTokenViaFederationFn> {
     let jwt = jwt.to_owned();
     Some(Box::new(move |_, _, _| {
         Ok(GetTokenSsResponse { jwt: jwt.clone() })
@@ -360,6 +374,63 @@ fn post_get_token_cs_request(body: String, header_mxid: &str) -> http::Request<B
         .unwrap()
 }
 
+const GET_TOKEN_SS_ORIGIN: &str = "origin.example.org";
+
+/// A fully populated, valid /get_token S-S request.
+fn valid_get_token_ss_request() -> GetTokenSsRequest {
+    GetTokenSsRequest {
+        url: LIVEKIT_URL.into(),
+        user_id: "@user:origin.example.org".into(),
+        room_id: "!testRoom:example.com".into(),
+        slot_id: "m.call#ROOM".into(),
+        member: MatrixRtcMemberType {
+            id: "member-id".into(),
+            claimed_user_id: String::new(),
+            claimed_device_id: "device-id".into(),
+        },
+    }
+}
+
+/// A valid /get_token S-S request body with an optional mutation applied before
+/// marshalling.
+fn marshal_get_token_ss_request(mutate: impl FnOnce(&mut GetTokenSsRequest)) -> String {
+    let mut req = valid_get_token_ss_request();
+    mutate(&mut req);
+    serde_json::to_string(&req).expect("failed to marshal request")
+}
+
+/// POSTs to /_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token.
+fn post_get_token_ss_request(body: String, origin: &str) -> http::Request<Body> {
+    http::Request::builder()
+        .method("POST")
+        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .header("Authorization", format!("Bearer {HS_TOKEN}"))
+        .header("X-Matrix-Origin", origin)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Creates a Handler configured for testing the /get_token S-S requests.
+fn new_get_token_ss_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+    Handler::new(
+        LiveKitAuth {
+            key: "key".into(),
+            secret: "secret".into(),
+            lk_url: LIVEKIT_URL.into(),
+        },
+        vec!["example.com".into()],
+        crate::config::AppServiceConfig {
+            as_token: "as_token".into(),
+            hs_token: HS_TOKEN.into(),
+            hs_server_name: "example.com".into(),
+        },
+        Duration::ZERO,
+        HashMap::new(),
+        None,
+        Arc::new(deps),
+    )
+}
+
 fn valid_delegate_delayed_leave_request() -> DelegateDelayedLeaveRequest {
     DelegateDelayedLeaveRequest {
         room_id: "!testRoom:example.com".into(),
@@ -492,7 +563,7 @@ async fn test_handler_close() {
 #[tokio::test]
 async fn test_handler_add_delayed_event_job() {
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
+        participant_exists_fn: participant_exists_block_until_cancelled(),
         ..Default::default()
     };
     let handler = new_handler_with(deps, &["example.com"], None);
@@ -521,12 +592,12 @@ async fn test_handler_loop_no_jobs_left() {
     let exec_called_clone = exec_called.clone();
 
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
-        resolve: Some(Box::new(move |_| {
+        participant_exists_fn: participant_exists_block_until_cancelled(),
+        resolve_cs_api_url_fn: Some(Box::new(move |_| {
             resolve_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
-        exec: Some(Box::new(move |_, _, _| {
+        execute_delayed_event_action_fn: Some(Box::new(move |_, _, _| {
             exec_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(200)
         })),
@@ -962,7 +1033,7 @@ async fn test_handler_loop_all_jobs_closed_on_shutdown() {
 
     let exited_clone = exited.clone();
     let deps = HandlerTestDeps {
-        exists: Some(Box::new(move |room, _| {
+        participant_exists_fn: Some(Box::new(move |room, _| {
             let guard = RecordExit {
                 room: room.0.clone(),
                 exited: exited_clone.clone(),
@@ -1017,12 +1088,12 @@ async fn test_handler_loop_done_ch_cleanup_before_handler_close() {
     let exec_called_clone = exec_called.clone();
 
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
-        resolve: Some(Box::new(move |_| {
+        participant_exists_fn: participant_exists_block_until_cancelled(),
+        resolve_cs_api_url_fn: Some(Box::new(move |_| {
             resolve_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
-        exec: Some(Box::new(move |_, _, _| {
+        execute_delayed_event_action_fn: Some(Box::new(move |_, _, _| {
             exec_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(200)
         })),
@@ -1096,7 +1167,7 @@ async fn test_handler_loop_done_ch_cleanup_before_handler_close() {
 #[tokio::test]
 async fn test_handler_loop_job_replacement_no_deadlock() {
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
+        participant_exists_fn: participant_exists_block_until_cancelled(),
         ..Default::default()
     };
     let handler = new_handler_with(deps, &["example.com"], Some(new_in_memory_store()));
@@ -1149,11 +1220,11 @@ async fn test_handler_slow_store_does_not_block_event_routing() {
 
     let (exec_tx, mut exec_rx) = tokio::sync::mpsc::channel::<()>(1);
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
-        resolve: Some(Box::new(|_| {
+        participant_exists_fn: participant_exists_block_until_cancelled(),
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
-        exec: Some(Box::new(move |_, _, _| {
+        execute_delayed_event_action_fn: Some(Box::new(move |_, _, _| {
             let _ = exec_tx.try_send(());
             Ok(200)
         })),
@@ -1260,11 +1331,11 @@ async fn test_handler_many_jobs_complete_under_event_load() {
     drop(saved_rx); // saves are not observed here
 
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
-        resolve: Some(Box::new(|_| {
+        participant_exists_fn: participant_exists_block_until_cancelled(),
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
-        exec: exec_ok(),
+        execute_delayed_event_action_fn: execute_delayed_event_action_ok(),
         ..Default::default()
     };
     let handler = new_handler_with(deps, &["example.com"], Some(store));
@@ -1352,9 +1423,9 @@ async fn test_handler_restore_resumes_saved_job() {
     // Block the restored job on phase one so that we can emit our own events
     // for the test. Mock all delayed event requests to succeed.
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
-        exec: exec_ok(),
-        resolve: Some(Box::new(|_| {
+        participant_exists_fn: participant_exists_block_until_cancelled(),
+        execute_delayed_event_action_fn: execute_delayed_event_action_ok(),
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
         ..Default::default()
@@ -1455,7 +1526,7 @@ async fn test_handler_restore_gracefully_ignores_store_errors() {
     // Block the job to be added on phase one so that it doesn't go off and do
     // anything for the sake of the test.
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
+        participant_exists_fn: participant_exists_block_until_cancelled(),
         ..Default::default()
     };
 
@@ -1481,7 +1552,7 @@ async fn test_handler_restore_gracefully_ignores_missing_store() {
     // Block the job to be added on phase one so that it doesn't go off and do
     // anything for the sake of the test.
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
+        participant_exists_fn: participant_exists_block_until_cancelled(),
         ..Default::default()
     };
 
@@ -1510,9 +1581,9 @@ async fn test_handler_restore_saves_new_jobs() {
     // Block the job to be added on phase one so that we can emit our own
     // events for the test. Mock all delayed event requests to succeed.
     let deps = HandlerTestDeps {
-        exists: exists_block_until_cancelled(),
-        exec: exec_ok(),
-        resolve: Some(Box::new(|_| {
+        participant_exists_fn: participant_exists_block_until_cancelled(),
+        execute_delayed_event_action_fn: execute_delayed_event_action_ok(),
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
         ..Default::default()
@@ -1646,8 +1717,8 @@ async fn test_handle_get_token_success() {
     let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_called_clone = create_called.clone();
     let deps = HandlerTestDeps {
-        exchange: exchange_ok(CLAIMED_USER_ID),
-        create_room: Some(Box::new(move |_, _, _| {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok(CLAIMED_USER_ID),
+        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })),
@@ -1706,7 +1777,7 @@ async fn test_handle_get_token_success() {
 #[tokio::test]
 async fn test_handle_get_token_unauthorized_user() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@real:example.com"),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@real:example.com"),
         ..Default::default()
     };
     let handler = new_get_token_handler(deps);
@@ -1729,7 +1800,7 @@ async fn test_handle_get_token_unauthorized_user() {
 #[tokio::test]
 async fn test_handle_get_token_restricted_user() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:restricted.com"),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:restricted.com"),
         ..Default::default()
     };
     // new_get_token_handler configures full access only for example.com.
@@ -1756,7 +1827,7 @@ async fn test_handle_get_token_restricted_user() {
 #[tokio::test]
 async fn test_handle_get_token_exchange_error() {
     let deps = HandlerTestDeps {
-        exchange: Some(Box::new(|_| Err("M_UNAUTHORIZED: no".into()))),
+        exchange_openid_userinfo_fn: Some(Box::new(|_| Err("M_UNAUTHORIZED: no".into()))),
         ..Default::default()
     };
     let handler = new_get_token_handler(deps);
@@ -1776,8 +1847,8 @@ async fn test_handle_get_token_exchange_error() {
 #[tokio::test]
 async fn test_handle_get_token_cs_api_url_resolution_error() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:example.com"),
-        resolve: Some(Box::new(|_| Err("M_NOT_FOUND: no".into()))),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
+        resolve_cs_api_url_fn: Some(Box::new(|_| Err("M_NOT_FOUND: no".into()))),
         ..Default::default()
     };
     let handler = new_get_token_handler(deps);
@@ -1875,12 +1946,12 @@ async fn test_process_sfu_request() {
         let fail_resolution = tc.expect_resolution_error;
 
         let deps = HandlerTestDeps {
-            create_room: Some(Box::new(move |room, _, _| {
+            create_livekit_room_fn: Some(Box::new(move |room, _, _| {
                 create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                 assert!(!room.is_empty(), "expected non-empty room name");
                 Ok(())
             })),
-            exchange: Some(Box::new(move |_| {
+            exchange_openid_userinfo_fn: Some(Box::new(move |_| {
                 if fail_exchange {
                     Err("M_UNAUTHORIZED: unauthorised".into())
                 } else {
@@ -1889,14 +1960,14 @@ async fn test_process_sfu_request() {
                     })
                 }
             })),
-            resolve: Some(Box::new(move |_| {
+            resolve_cs_api_url_fn: Some(Box::new(move |_| {
                 if fail_resolution {
                     Err("M_NOT_FOUND: no".into())
                 } else {
                     Ok(CsApiUrl("https://matrix.example.com".into()))
                 }
             })),
-            exists: exists_block_until_cancelled(),
+            participant_exists_fn: participant_exists_block_until_cancelled(),
             ..Default::default()
         };
 
@@ -2051,11 +2122,11 @@ async fn test_handle_get_token_cs_success() {
     let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_called_clone = create_called.clone();
     let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|_| {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_joined: is_joined_ok(true),
-        create_room: Some(Box::new(move |_, _, _| {
+        is_user_joined_fn: is_joined_ok(true),
+        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })),
@@ -2086,11 +2157,11 @@ async fn test_handle_get_token_cs_ignores_claimed_user_id_mismatch() {
     let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_called_clone = create_called.clone();
     let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|_| {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_joined: is_joined_ok(true),
-        create_room: Some(Box::new(move |_, matrix_user, _| {
+        is_user_joined_fn: is_joined_ok(true),
+        create_livekit_room_fn: Some(Box::new(move |_, matrix_user, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
                 matrix_user, HEADER_MXID,
@@ -2124,12 +2195,12 @@ async fn test_handle_get_token_cs_relays_foreign_server_name() {
     let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_called_clone = create_called.clone();
     let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|_| {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_joined: is_joined_ok(true),
-        fed_proxy: fed_proxy_ok("remote-jwt"),
-        create_room: Some(Box::new(move |_, _, _| {
+        is_user_joined_fn: is_joined_ok(true),
+        request_get_token_via_federation_fn: request_get_token_via_federation_ok("remote-jwt"),
+        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })),
@@ -2157,11 +2228,11 @@ async fn test_handle_get_token_cs_relays_foreign_server_name() {
 #[tokio::test]
 async fn test_handle_get_token_cs_federation_proxy_error() {
     let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|_| {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_joined: is_joined_ok(true),
-        fed_proxy: Some(Box::new(|_, _, _| Err("boom".into()))),
+        is_user_joined_fn: is_joined_ok(true),
+        request_get_token_via_federation_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
@@ -2173,33 +2244,6 @@ async fn test_handle_get_token_cs_federation_proxy_error() {
         resp.status(),
         StatusCode::BAD_GATEWAY,
         "expected 502 when the federation proxy fails"
-    );
-    handler.close().await;
-}
-
-/// A failure to resolve the destination homeserver's client-server API surfaces as 400.
-#[tokio::test]
-async fn test_handle_get_token_cs_destination_cs_api_url_resolution_error() {
-    let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|server_name| {
-            if server_name == "other.example.org" {
-                Err("M_NOT_FOUND: no".into())
-            } else {
-                Ok(CsApiUrl("https://matrix.example.com".into()))
-            }
-        })),
-        is_joined: is_joined_ok(true),
-        ..Default::default()
-    };
-    let handler = new_get_token_cs_handler(deps);
-    let body = marshal_get_token_cs_request(|r| {
-        r.server_name = "other.example.org".into();
-    });
-    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "expected 400 when the destination's CS API URL cannot be resolved"
     );
     handler.close().await;
 }
@@ -2279,10 +2323,10 @@ async fn test_handle_get_token_cs_missing_url() {
 #[tokio::test]
 async fn test_handle_get_token_cs_not_a_member() {
     let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|_| {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_joined: is_joined_ok(false),
+        is_user_joined_fn: is_joined_ok(false),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
@@ -2300,10 +2344,10 @@ async fn test_handle_get_token_cs_not_a_member() {
 #[tokio::test]
 async fn test_handle_get_token_cs_membership_check_error() {
     let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|_| {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_joined: Some(Box::new(|_, _, _| Err("boom".into()))),
+        is_user_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
@@ -2321,7 +2365,7 @@ async fn test_handle_get_token_cs_membership_check_error() {
 #[tokio::test]
 async fn test_handle_get_token_cs_cs_api_url_resolution_error() {
     let deps = HandlerTestDeps {
-        resolve: Some(Box::new(|_| Err("M_NOT_FOUND: no".into()))),
+        resolve_cs_api_url_fn: Some(Box::new(|_| Err("M_NOT_FOUND: no".into()))),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
@@ -2458,26 +2502,26 @@ async fn test_process_get_token_cs_request() {
         let fail_fed_proxy = tc.fail_fed_proxy;
 
         let deps = HandlerTestDeps {
-            create_room: Some(Box::new(move |room, _, _| {
+            create_livekit_room_fn: Some(Box::new(move |room, _, _| {
                 create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                 assert!(!room.is_empty(), "expected non-empty room name");
                 Ok(())
             })),
-            resolve: Some(Box::new(move |_| {
+            resolve_cs_api_url_fn: Some(Box::new(move |_| {
                 if fail_resolution {
                     Err("M_NOT_FOUND: no".into())
                 } else {
                     Ok(CsApiUrl("https://matrix.example.com".into()))
                 }
             })),
-            is_joined: Some(Box::new(move |_, _, _| {
+            is_user_joined_fn: Some(Box::new(move |_, _, _| {
                 if fail_membership {
                     Err("boom".into())
                 } else {
                     Ok(is_member)
                 }
             })),
-            fed_proxy: Some(Box::new(move |_, destination, _| {
+            request_get_token_via_federation_fn: Some(Box::new(move |_, destination, _| {
                 fed_proxy_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                 assert_eq!(
                     destination, "other.example.org",
@@ -2559,6 +2603,455 @@ async fn test_process_get_token_cs_request() {
     }
 }
 
+// ── /rtc/livekit/get_token S-S endpoint ─────────────────────────────
+
+/// Non-POST/OPTIONS requests return 405.
+#[tokio::test]
+async fn test_handle_ss_get_token_method_not_allowed() {
+    let handler = new_get_token_ss_handler(HandlerTestDeps::default());
+    for method in ["GET", "PUT", "DELETE", "PATCH"] {
+        let req = http::Request::builder()
+            .method(method)
+            .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send_request(&handler, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method}: expected 405"
+        );
+    }
+    handler.close().await;
+}
+
+/// OPTIONS returns 200.
+#[tokio::test]
+async fn test_handle_ss_get_token_options() {
+    let handler = new_get_token_ss_handler(HandlerTestDeps::default());
+    let req = http::Request::builder()
+        .method("OPTIONS")
+        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .body(Body::empty())
+        .unwrap();
+    let resp = send_request(&handler, req).await;
+    assert_eq!(resp.status(), StatusCode::OK, "expected 200 for OPTIONS");
+    handler.close().await;
+}
+
+/// Malformed JSON returns 400.
+#[tokio::test]
+async fn test_handle_ss_get_token_invalid_json() {
+    let handler = new_get_token_ss_handler(HandlerTestDeps::default());
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request("{invalid json}".into(), GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for invalid JSON"
+    );
+    handler.close().await;
+}
+
+/// A request without a homeserver access token is rejected.
+#[tokio::test]
+async fn test_handle_ss_get_token_missing_hs_token() {
+    let handler = new_get_token_ss_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_ss_request(|_| {});
+    let req = http::Request::builder()
+        .method("POST")
+        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .header("X-Matrix-Origin", GET_TOKEN_SS_ORIGIN)
+        .body(Body::from(body))
+        .unwrap();
+    let resp = send_request(&handler, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 for a missing homeserver access token"
+    );
+    handler.close().await;
+}
+
+/// A request with an incorrect homeserver access token is rejected.
+#[tokio::test]
+async fn test_handle_ss_get_token_wrong_hs_token() {
+    let handler = new_get_token_ss_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_ss_request(|_| {});
+    let req = http::Request::builder()
+        .method("POST")
+        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .header("Authorization", "Bearer wrong_token")
+        .header("X-Matrix-Origin", GET_TOKEN_SS_ORIGIN)
+        .body(Body::from(body))
+        .unwrap();
+    let resp = send_request(&handler, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 for an incorrect homeserver access token"
+    );
+    handler.close().await;
+}
+
+/// A missing X-Matrix-Origin header returns 401.
+#[tokio::test]
+async fn test_handle_ss_get_token_missing_origin_header() {
+    let handler = new_get_token_ss_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_ss_request(|_| {});
+    let req = http::Request::builder()
+        .method("POST")
+        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .header("Authorization", format!("Bearer {HS_TOKEN}"))
+        .body(Body::from(body))
+        .unwrap();
+    let resp = send_request(&handler, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 for a missing X-Matrix-Origin header"
+    );
+    handler.close().await;
+}
+
+/// A missing required field is rejected by GetTokenSsRequest::validate()
+/// with 400 M_BAD_JSON, before the handler is even invoked.
+#[tokio::test]
+async fn test_handle_ss_get_token_missing_fields() {
+    let handler = new_get_token_ss_handler(HandlerTestDeps::default());
+    let body = marshal_get_token_ss_request(|r| {
+        r.url = String::new();
+    });
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for a missing `url`"
+    );
+    handler.close().await;
+}
+
+/// A `url` not matching the configured LIVEKIT_URL is rejected with 400
+/// M_INVALID_PARAM.
+#[tokio::test]
+async fn test_handle_ss_get_token_url_mismatch() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_server_joined_fn: Some(Box::new(|_, _, _| Ok(true))),
+        ..Default::default()
+    };
+    let handler = new_get_token_ss_handler(deps);
+    let body = marshal_get_token_ss_request(|r| {
+        r.url = "wss://not-the-configured-sfu.example.com".into();
+    });
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for a `url` mismatch"
+    );
+    handler.close().await;
+}
+
+/// A valid request produces a 200 response.
+#[tokio::test]
+async fn test_handle_ss_get_token_success() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_server_joined_fn: Some(Box::new(|_, _, _| Ok(true))),
+        ..Default::default()
+    };
+    let handler = new_get_token_ss_handler(deps);
+    let body = marshal_get_token_ss_request(|_| {});
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "status");
+
+    let body = body_bytes(resp).await;
+    let response: GetTokenSsResponse =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert!(!response.jwt.is_empty(), "expected JWT to be non-empty");
+    handler.close().await;
+}
+
+/// If our own server isn't a member of the room, the request is rejected.
+#[tokio::test]
+async fn test_handle_ss_get_token_own_server_not_a_member() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_server_joined_fn: Some(Box::new(|_, _, server_name| {
+            Ok(server_name != "example.com")
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_ss_handler(deps);
+    let body = marshal_get_token_ss_request(|_| {});
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "expected 403 when our own server isn't a member"
+    );
+    handler.close().await;
+}
+
+/// If the origin server isn't a member of the room, the request is
+/// rejected.
+#[tokio::test]
+async fn test_handle_ss_get_token_origin_server_not_a_member() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_server_joined_fn: Some(Box::new(|_, _, server_name| {
+            Ok(server_name == "example.com")
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_ss_handler(deps);
+    let body = marshal_get_token_ss_request(|_| {});
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "expected 403 when the origin server isn't a member"
+    );
+    handler.close().await;
+}
+
+/// A transport failure while checking room membership surfaces as 502.
+#[tokio::test]
+async fn test_handle_ss_get_token_membership_check_error() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_server_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
+        ..Default::default()
+    };
+    let handler = new_get_token_ss_handler(deps);
+    let body = marshal_get_token_ss_request(|_| {});
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "expected 502 when the membership check fails"
+    );
+    handler.close().await;
+}
+
+/// A C-S API resolution error returns 400.
+#[tokio::test]
+async fn test_handle_ss_get_token_cs_api_url_resolution_error() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| Err("M_NOT_FOUND: no".into()))),
+        ..Default::default()
+    };
+    let handler = new_get_token_ss_handler(deps);
+    let body = marshal_get_token_ss_request(|_| {});
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 when CS API URL resolution fails"
+    );
+    handler.close().await;
+}
+
+/// Various unit tests for process_get_token_ss_request.
+#[tokio::test]
+async fn test_process_get_token_ss_request() {
+    const LK_URL: &str = "wss://lk.local:8080/foo";
+    const OWN_SERVER: &str = "example.com";
+    const ORIGIN_SERVER: &str = "origin.example.org";
+
+    struct Case {
+        name: &'static str,
+        origin: &'static str,
+        url: &'static str,
+        fail_resolution: bool,
+        fail_own_membership: bool,
+        fail_origin_membership: bool,
+        own_is_member: bool,
+        origin_is_member: bool,
+        fail_join_token: bool,
+        expect_error: bool,
+    }
+    let base = Case {
+        name: "",
+        origin: ORIGIN_SERVER,
+        url: LK_URL,
+        fail_resolution: false,
+        fail_own_membership: false,
+        fail_origin_membership: false,
+        own_is_member: true,
+        origin_is_member: true,
+        fail_join_token: false,
+        expect_error: false,
+    };
+    for tc in [
+        Case {
+            name: "All OK",
+            ..base
+        },
+        Case {
+            name: "URL mismatch",
+            url: "wss://wrong.local",
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Own server not a member",
+            own_is_member: false,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Origin server not a member",
+            origin_is_member: false,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Own membership check transport error",
+            fail_own_membership: true,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Origin membership check transport error",
+            fail_origin_membership: true,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "CS API resolution error",
+            fail_resolution: true,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Token key empty",
+            fail_join_token: true,
+            expect_error: true,
+            ..base
+        },
+    ] {
+        let fail_resolution = tc.fail_resolution;
+        let fail_own_membership = tc.fail_own_membership;
+        let fail_origin_membership = tc.fail_origin_membership;
+        let own_is_member = tc.own_is_member;
+        let origin_is_member = tc.origin_is_member;
+
+        let deps = HandlerTestDeps {
+            resolve_cs_api_url_fn: Some(Box::new(move |_| {
+                if fail_resolution {
+                    Err("M_NOT_FOUND: no".into())
+                } else {
+                    Ok(CsApiUrl("https://matrix.example.com".into()))
+                }
+            })),
+            is_server_joined_fn: Some(Box::new(move |_, _, server_name| {
+                if server_name == OWN_SERVER {
+                    if fail_own_membership {
+                        Err("boom".into())
+                    } else {
+                        Ok(own_is_member)
+                    }
+                } else if fail_origin_membership {
+                    Err("boom".into())
+                } else {
+                    Ok(origin_is_member)
+                }
+            })),
+            ..Default::default()
+        };
+
+        let api_key = if tc.fail_join_token {
+            ""
+        } else {
+            "the_api_key"
+        };
+        let handler = Handler::new(
+            LiveKitAuth {
+                key: api_key.into(),
+                secret: "secret".into(),
+                lk_url: LK_URL.into(),
+            },
+            vec!["example.com".into()],
+            crate::config::AppServiceConfig {
+                as_token: "as_token".into(),
+                hs_token: "hs_token".into(),
+                hs_server_name: OWN_SERVER.into(),
+            },
+            Duration::ZERO,
+            HashMap::new(),
+            None,
+            Arc::new(deps),
+        );
+
+        let req = GetTokenSsRequest {
+            url: tc.url.into(),
+            user_id: "@user:origin.example.org".into(),
+            room_id: "!room:example.com".into(),
+            slot_id: "slot".into(),
+            member: MatrixRtcMemberType {
+                id: "device".into(),
+                claimed_user_id: String::new(),
+                claimed_device_id: "dev".into(),
+            },
+        };
+        let result = handler.process_get_token_ss_request(&req, tc.origin).await;
+        if tc.expect_error {
+            assert!(result.is_err(), "{}: expected error but got Ok", tc.name);
+        } else {
+            let result = result.unwrap_or_else(|e| panic!("{}: unexpected error: {e:?}", tc.name));
+            assert!(
+                !result.jwt.is_empty(),
+                "{}: expected non-empty JWT",
+                tc.name
+            );
+        }
+        handler.close().await;
+    }
+}
+
 // ── /sfu/get endpoint ─────────────────────────────────────────────────────────
 // Deprecated: this endpoint is pre-Matrix-2.0. When /sfu/get is removed,
 // delete these tests too.
@@ -2625,8 +3118,8 @@ async fn test_handle_sfu_get_success() {
     let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_called_clone = create_called.clone();
     let deps = HandlerTestDeps {
-        exchange: exchange_ok(CLAIMED_USER_SUB),
-        create_room: Some(Box::new(move |_, _, _| {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok(CLAIMED_USER_SUB),
+        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })),
@@ -2752,12 +3245,12 @@ async fn test_process_legacy_sfu_request() {
         let fail_resolution = tc.expect_resolution_error;
 
         let deps = HandlerTestDeps {
-            create_room: Some(Box::new(move |room, _, _| {
+            create_livekit_room_fn: Some(Box::new(move |room, _, _| {
                 create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                 assert!(!room.is_empty(), "expected non-empty room name");
                 Ok(())
             })),
-            exchange: Some(Box::new(move |_| {
+            exchange_openid_userinfo_fn: Some(Box::new(move |_| {
                 if fail_exchange {
                     Err("M_UNAUTHORIZED: unauthorised".into())
                 } else {
@@ -2766,14 +3259,14 @@ async fn test_process_legacy_sfu_request() {
                     })
                 }
             })),
-            resolve: Some(Box::new(move |_| {
+            resolve_cs_api_url_fn: Some(Box::new(move |_| {
                 if fail_resolution {
                     Err("M_NOT_FOUND: no".into())
                 } else {
                     Ok(CsApiUrl("https://matrix.example.com".into()))
                 }
             })),
-            exists: exists_block_until_cancelled(),
+            participant_exists_fn: participant_exists_block_until_cancelled(),
             ..Default::default()
         };
 
@@ -2888,7 +3381,7 @@ async fn test_handle_delegate_delayed_leave_missing_fields() {
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_unauthorized_user() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@real:example.com"),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@real:example.com"),
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_handler(deps);
@@ -2907,7 +3400,7 @@ async fn test_handle_delegate_delayed_leave_unauthorized_user() {
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_restricted_user() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:restricted.com"),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:restricted.com"),
         ..Default::default()
     };
     // Handler configured with only "example.com" as full-access.
@@ -2928,7 +3421,7 @@ async fn test_handle_delegate_delayed_leave_restricted_user() {
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_exchange_error() {
     let deps = HandlerTestDeps {
-        exchange: Some(Box::new(|_| Err("M_UNAUTHORIZED: no".into()))),
+        exchange_openid_userinfo_fn: Some(Box::new(|_| Err("M_UNAUTHORIZED: no".into()))),
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_handler(deps);
@@ -2945,8 +3438,8 @@ async fn test_handle_delegate_delayed_leave_exchange_error() {
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_cs_api_url_resolution_error() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:example.com"),
-        resolve: Some(Box::new(|_| Err("M_NOT_FOUND: no".into()))),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
+        resolve_cs_api_url_fn: Some(Box::new(|_| Err("M_NOT_FOUND: no".into()))),
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_handler(deps);
@@ -2963,8 +3456,8 @@ async fn test_handle_delegate_delayed_leave_cs_api_url_resolution_error() {
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_success() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:example.com"),
-        exists: exists_block_until_cancelled(),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
+        participant_exists_fn: participant_exists_block_until_cancelled(),
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_handler(deps);
@@ -2991,8 +3484,8 @@ async fn test_handle_delegate_delayed_leave_success() {
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_no_jwt() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:example.com"),
-        exists: exists_block_until_cancelled(),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
+        participant_exists_fn: participant_exists_block_until_cancelled(),
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_handler(deps);
@@ -3024,9 +3517,9 @@ async fn test_process_delegate_delayed_leave_creates_job() {
     let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_called_clone = create_called.clone();
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:example.com"),
-        exists: exists_block_until_cancelled(),
-        create_room: Some(Box::new(move |_, _, _| {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
+        participant_exists_fn: participant_exists_block_until_cancelled(),
+        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })),
@@ -3056,7 +3549,7 @@ async fn test_process_delegate_delayed_leave_creates_job() {
 #[tokio::test]
 async fn test_process_delegate_delayed_leave_invalid_delay_timeout() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:example.com"),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_handler(deps);
@@ -3081,7 +3574,7 @@ async fn test_process_delegate_delayed_leave_invalid_delay_timeout() {
 #[tokio::test]
 async fn test_process_delegate_delayed_leave_after_shutdown() {
     let deps = HandlerTestDeps {
-        exchange: exchange_ok("@user:example.com"),
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_handler(deps);

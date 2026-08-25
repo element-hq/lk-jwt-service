@@ -1,0 +1,12 @@
+port: 7880
+rtc:
+  tcp_port: 7801
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: false
+keys:
+  e2e_livekit_key_2: e2e_livekit_secret_2_0123456789ab
+room:
+  auto_create: false
+logging:
+  level: info

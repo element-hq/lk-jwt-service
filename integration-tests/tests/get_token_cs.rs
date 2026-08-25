@@ -6,10 +6,9 @@
 use std::collections::HashMap;
 
 use lk_jwt_service_integration_tests::{
-    DEFAULT_LK_URL, FakeHomeserver, FakeSfu, FakeUser, Msc4195Support, Msc4502Support,
-    Msc4512Support, Service, ServiceConfig, decode_livekit_jwt, expect_fed_proxy_request,
-    expect_is_joined_request, expect_matrix_error, expect_no_fed_proxy_requests,
-    expect_no_is_joined_requests, expect_no_user_info_lookups,
+    DEFAULT_LK_URL, FakeHomeserver, FakeSfu, FakeUser, Msc4502Support, Service, ServiceConfig,
+    decode_livekit_jwt, expect_fed_proxy_request, expect_is_joined_request, expect_matrix_error,
+    expect_no_fed_proxy_requests, expect_no_is_joined_requests, expect_no_user_info_lookups,
 };
 use serde_json::{Value, json};
 
@@ -481,10 +480,8 @@ async fn server_name_matching_own_hs_server_name_is_local() {
 async fn foreign_server_name_is_relayed_via_federation_proxy() {
     let hs = FakeHomeserver::new().await;
     hs.set_msc4502_support(Msc4502Support::Unstable);
-    hs.set_msc4512_support(Msc4512Support::Unstable);
     let user = hs.new_user("alice");
     let destination_hs = FakeHomeserver::new().await;
-    destination_hs.set_msc4195_support(Msc4195Support::Unstable);
     let sfu = FakeSfu::new().await;
 
     let mut cs_api_url_overrides = hs.cs_api_url_override();
@@ -525,7 +522,6 @@ async fn foreign_server_name_is_relayed_via_federation_proxy() {
         &hs,
         destination_hs.server_name(),
         AS_TOKEN,
-        "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token",
         &expected_relayed_body(&user, "wss://not-our-configured-sfu.example.com"),
     );
 
@@ -565,11 +561,9 @@ async fn non_member_is_rejected_even_with_foreign_server_name() {
 async fn federation_proxy_destination_error_surfaces_as_502() {
     let hs = FakeHomeserver::new().await;
     hs.set_msc4502_support(Msc4502Support::Unstable);
-    hs.set_msc4512_support(Msc4512Support::Unstable);
     let user = hs.new_user("alice");
     hs.set_fed_proxy_response(403, None);
     let destination_hs = FakeHomeserver::new().await;
-    destination_hs.set_msc4195_support(Msc4195Support::Unstable);
 
     let mut cs_api_url_overrides = hs.cs_api_url_override();
     cs_api_url_overrides.extend(destination_hs.cs_api_url_override());
@@ -591,87 +585,6 @@ async fn federation_proxy_destination_error_surfaces_as_502() {
         &hs,
         destination_hs.server_name(),
         AS_TOKEN,
-        "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token",
-        &expected_relayed_body(&user, DEFAULT_LK_URL),
-    );
-}
-
-/// When the destination advertises the stable MSC4195 flag via /versions,
-/// the relay uses the stable federation path instead of the unstable one.
-#[tokio::test]
-async fn foreign_server_name_uses_stable_ss_path_when_advertised() {
-    let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
-    hs.set_msc4512_support(Msc4512Support::Unstable);
-    let user = hs.new_user("alice");
-    let destination_hs = FakeHomeserver::new().await;
-    destination_hs.set_msc4195_support(Msc4195Support::Stable);
-    let sfu = FakeSfu::new().await;
-
-    let mut cs_api_url_overrides = hs.cs_api_url_override();
-    cs_api_url_overrides.extend(destination_hs.cs_api_url_override());
-
-    let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides,
-        livekit_url: Some(sfu.url().to_owned()),
-        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
-        ..Default::default()
-    })
-    .await;
-
-    let mut request = get_token_cs_request(&user, DEFAULT_LK_URL);
-    request["server_name"] = json!(destination_hs.server_name());
-    let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
-
-    assert_eq!(status, 200, "body: {body}");
-    expect_fed_proxy_request(
-        &hs,
-        destination_hs.server_name(),
-        AS_TOKEN,
-        "/_matrix/federation/v1/rtc/livekit/get_token",
-        &expected_relayed_body(&user, DEFAULT_LK_URL),
-    );
-}
-
-/// When our own homeserver advertises the stable MSC4512 flag via
-/// `/versions`, the app service calls the stable federation proxy route
-/// instead of the unstable one.
-#[tokio::test]
-async fn foreign_server_name_uses_stable_fed_proxy_path_when_advertised() {
-    let hs = FakeHomeserver::new().await;
-    hs.set_msc4502_support(Msc4502Support::Unstable);
-    hs.set_msc4512_support(Msc4512Support::Stable);
-    let user = hs.new_user("alice");
-    let destination_hs = FakeHomeserver::new().await;
-    destination_hs.set_msc4195_support(Msc4195Support::Unstable);
-    let sfu = FakeSfu::new().await;
-
-    let mut cs_api_url_overrides = hs.cs_api_url_override();
-    cs_api_url_overrides.extend(destination_hs.cs_api_url_override());
-
-    let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides,
-        livekit_url: Some(sfu.url().to_owned()),
-        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
-        ..Default::default()
-    })
-    .await;
-
-    let mut request = get_token_cs_request(&user, DEFAULT_LK_URL);
-    request["server_name"] = json!(destination_hs.server_name());
-    let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
-
-    assert_eq!(status, 200, "body: {body}");
-    // Only recorded by the fake if the request hit the route matching
-    // Msc4512Support::Stable, so this implicitly confirms the stable
-    // /fed_proxy route was used.
-    expect_fed_proxy_request(
-        &hs,
-        destination_hs.server_name(),
-        AS_TOKEN,
-        "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token",
         &expected_relayed_body(&user, DEFAULT_LK_URL),
     );
 }
