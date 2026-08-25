@@ -98,6 +98,24 @@ pub fn read_cs_api_url_overrides(raw: &str) -> Result<HashMap<String, CsApiUrl>,
     Ok(m)
 }
 
+pub fn parse_bind() -> Result<String, String> {
+    let mut lk_jwt_bind = env_var("LIVEKIT_JWT_BIND");
+    let mut lk_jwt_port = env_var("LIVEKIT_JWT_PORT");
+
+    if lk_jwt_bind.is_empty() {
+        if lk_jwt_port.is_empty() {
+            lk_jwt_port = "8080".into();
+        } else {
+            warn!("!!! LIVEKIT_JWT_PORT is deprecated, use LIVEKIT_JWT_BIND !!!");
+        }
+        lk_jwt_bind = format!(":{lk_jwt_port}");
+    } else if !lk_jwt_port.is_empty() {
+        return Err("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together".into());
+    }
+
+    Ok(lk_jwt_bind)
+}
+
 pub fn parse_config() -> Result<Config, String> {
     let skip_verify_tls =
         env_var("LIVEKIT_INSECURE_SKIP_VERIFY_TLS") == "YES_I_KNOW_WHAT_I_AM_DOING";
@@ -121,18 +139,7 @@ pub fn parse_config() -> Result<Config, String> {
         return Err("LIVEKIT_FULL_ACCESS_HOMESERVERS environment variable must be set to the homeserver(s) you intend to serve — see README for guidance".into());
     }
 
-    let mut lk_jwt_bind = env_var("LIVEKIT_JWT_BIND");
-    let mut lk_jwt_port = env_var("LIVEKIT_JWT_PORT");
-    if lk_jwt_bind.is_empty() {
-        if lk_jwt_port.is_empty() {
-            lk_jwt_port = "8080".into();
-        } else {
-            warn!("!!! LIVEKIT_JWT_PORT is deprecated, use LIVEKIT_JWT_BIND !!!");
-        }
-        lk_jwt_bind = format!(":{lk_jwt_port}");
-    } else if !lk_jwt_port.is_empty() {
-        return Err("LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together".into());
-    }
+    let lk_jwt_bind = parse_bind()?;
 
     let mut sanity_check_interval = Duration::ZERO;
     let sanity_check_raw = env_var("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS");
