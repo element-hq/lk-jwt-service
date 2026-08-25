@@ -18,25 +18,24 @@ async fn main() -> Result<(), String> {
     let lk_jwt_bind = parse_bind()?;
     let addrs = bind_addresses(&lk_jwt_bind);
 
-    for addr in addrs {
-        let resp = match reqwest::get(get_healthz_url(&addr)).await {
-            Ok(resp) => resp,
-            Err(err) => {
-                println!("Connection error: {err}");
+    for addr in addrs.to_vec() {
+        if let Ok(resp) = reqwest::get(get_healthz_url(&addr)).await {
+            if resp.status().as_u16() != 200 {
+                println!(
+                    "Healthcheck failed with status code {}",
+                    resp.status().as_u16()
+                );
                 std::process::exit(1);
             }
-        };
 
-        if resp.status().as_u16() != 200 {
-            println!(
-                "Healthcheck failed with status code {}",
-                resp.status().as_u16()
-            );
-            std::process::exit(1);
+            return Ok(());
         }
     }
 
-    Ok(())
+    let addrs_fmt = addrs.join(", ");
+    Err(format!(
+        "No configured address ({addrs_fmt}) could be accessed"
+    ))
 }
 
 #[cfg(test)]
