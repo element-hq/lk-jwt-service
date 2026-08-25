@@ -341,6 +341,13 @@ mod duration_ns {
     }
 }
 
+/// An application-service identity assertion for an outbound C-S request.
+#[derive(Debug, Clone, Copy)]
+pub struct AppServiceIdentity<'a> {
+    pub as_token: &'a str,
+    pub user_id: &'a str,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DelayedEventJobParams {
     #[serde(rename = "DelayId")]
@@ -512,6 +519,16 @@ impl DelayedEventJob {
 
     pub fn state(&self) -> DelayEventState {
         *self.state.lock().unwrap()
+    }
+
+    /// The application-service identity to assert on outbound C-S requests, if any.
+    fn identity_assertion(&self) -> Option<AppServiceIdentity<'_>> {
+        (!self.as_token.is_empty() && !self.params.owner_user_id.is_empty()).then(|| {
+            AppServiceIdentity {
+                as_token: &self.as_token,
+                user_id: &self.params.owner_user_id,
+            }
+        })
     }
 
     fn set_state(&self, state: DelayEventState) {
@@ -960,8 +977,7 @@ impl DelayedEventJob {
                                         &cs_api_url,
                                         &job.params.delay_id,
                                         DelayEventAction::Send,
-                                        &job.as_token,
-                                        &job.params.owner_user_id,
+                                        job.identity_assertion(),
                                     )
                                     .await
                             }
@@ -1096,8 +1112,7 @@ impl DelayedEventJob {
                                 &cs_api_url,
                                 &job.params.delay_id,
                                 DelayEventAction::Restart,
-                                &job.as_token,
-                                &job.params.owner_user_id,
+                                job.identity_assertion(),
                             )
                             .await
                     }
@@ -1255,8 +1270,7 @@ pub(crate) mod test_support {
             cs_api_url: &CsApiUrl,
             delay_id: &str,
             action: DelayEventAction,
-            _as_token: &str,
-            _user_id: &str,
+            _identity: Option<AppServiceIdentity<'_>>,
         ) -> Result<u16, ActionError> {
             (self.exec)(cs_api_url, delay_id, action)
         }
@@ -1985,13 +1999,12 @@ mod tests {
             _cs_api_url: &CsApiUrl,
             _delay_id: &str,
             action: DelayEventAction,
-            as_token: &str,
-            user_id: &str,
+            identity: Option<AppServiceIdentity<'_>>,
         ) -> Result<u16, ActionError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((action, as_token.to_owned(), user_id.to_owned()));
+            let (as_token, user_id) = identity
+                .map(|i| (i.as_token.to_owned(), i.user_id.to_owned()))
+                .unwrap_or_default();
+            self.calls.lock().unwrap().push((action, as_token, user_id));
             Ok(200)
         }
     }

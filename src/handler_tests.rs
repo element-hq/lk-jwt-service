@@ -16,7 +16,7 @@ use sha2::Digest;
 use tower::util::ServiceExt;
 
 use super::*;
-use crate::delayed_event_manager::DelayEventAction;
+use crate::delayed_event_manager::{AppServiceIdentity, DelayEventAction};
 use crate::helper::{resolve_cs_api_url_via, ActionError, RoomServiceClient, UserInfo};
 use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, MatrixRtcMemberType};
 use crate::store::test_support::{
@@ -125,9 +125,9 @@ impl Deps for HandlerTestDeps {
         cs_api_url: &CsApiUrl,
         delay_id: &str,
         action: DelayEventAction,
-        as_token: &str,
-        user_id: &str,
+        identity: Option<AppServiceIdentity<'_>>,
     ) -> Result<u16, ActionError> {
+        let (as_token, user_id) = identity.map_or(("", ""), |i| (i.as_token, i.user_id));
         match &self.execute_delayed_event_action_fn {
             Some(f) => f(cs_api_url, delay_id, action, as_token, user_id),
             None => panic!("execute_delayed_event_action not mocked in HandlerTestDeps"),
@@ -2648,7 +2648,7 @@ async fn test_process_get_token_cs_request() {
             },
         };
         let result = handler
-            .process_get_token_cs_request(&req, tc.header_mxid)
+            .process_get_token_cs_request(req, tc.header_mxid)
             .await;
         if tc.expect_error {
             assert!(result.is_err(), "{}: expected error but got Ok", tc.name);

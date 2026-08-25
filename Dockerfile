@@ -2,6 +2,9 @@ FROM docker.io/rust:1-alpine AS builder
 
 WORKDIR /proj
 
+# Space-separated Cargo features to build with.
+ARG CARGO_FEATURES=""
+
 # musl-dev for the static libc, cmake/make/gcc/g++/perl/linux-headers for the
 # vendored aws-lc-sys / ring C code pulled in by rustls.
 RUN apk add --no-cache musl-dev cmake make gcc g++ perl linux-headers ca-certificates
@@ -14,7 +17,7 @@ RUN mkdir -p src/bin \
     && echo "fn main() {}" > src/main.rs \
     && echo "fn main() {}" > src/bin/healthcheck.rs \
     && touch src/lib.rs \
-    && cargo build --release --locked \
+    && cargo build --release --locked --features "$CARGO_FEATURES" \
     && rm -rf src
 
 COPY src ./src
@@ -23,7 +26,7 @@ COPY src ./src
 # stub build above, so cargo would otherwise consider them unchanged and
 # skip recompilation entirely.
 RUN find src -name '*.rs' -exec touch {} + \
-    && cargo build --release --locked
+    && cargo build --release --locked --features "$CARGO_FEATURES"
 RUN cp target/release/lk-jwt-service /lk-jwt-service \
     && cp target/release/healthcheck /lk-jwt-service-healthcheck
 

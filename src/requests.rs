@@ -19,6 +19,22 @@ pub struct MatrixRtcMemberType {
     pub claimed_device_id: String,
 }
 
+impl MatrixRtcMemberType {
+    /// Validates that `id` and `claimed_device_id` are present. `caller`
+    /// identifies the enclosing request type in the error log.
+    fn validate_id_and_device(&self, caller: &str) -> Result<(), MatrixErrorResponse> {
+        if self.id.is_empty() || self.claimed_device_id.is_empty() {
+            error!(member = ?self, "Handler -> {caller}: Missing member parameters");
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body `member` is missing `id` or `claimed_device_id`".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenIdTokenType {
@@ -144,14 +160,7 @@ impl GetTokenCsRequest {
                 err: "The request body is missing `url`, `room_id` or `slot_id`".into(),
             });
         }
-        if self.member.id.is_empty() || self.member.claimed_device_id.is_empty() {
-            error!(member = ?self.member, "Handler -> GetTokenCsRequest: Missing member parameters");
-            return Err(MatrixErrorResponse {
-                status: 400,
-                errcode: "M_BAD_JSON".into(),
-                err: "The request body `member` is missing `id` or `claimed_device_id`".into(),
-            });
-        }
+        self.member.validate_id_and_device("GetTokenCsRequest")?;
         Ok(())
     }
 }
@@ -171,14 +180,7 @@ impl GetTokenSsRequest {
                 err: "The request body is missing `url`, `user_id`, `room_id` or `slot_id`".into(),
             });
         }
-        if self.member.id.is_empty() || self.member.claimed_device_id.is_empty() {
-            error!(member = ?self.member, "Handler -> GetTokenSsRequest: Missing member parameters");
-            return Err(MatrixErrorResponse {
-                status: 400,
-                errcode: "M_BAD_JSON".into(),
-                err: "The request body `member` is missing `id` or `claimed_device_id`".into(),
-            });
-        }
+        self.member.validate_id_and_device("GetTokenSsRequest")?;
         Ok(())
     }
 }
@@ -280,13 +282,7 @@ impl DelegateDelayedLeaveCsRequest {
                 err: "The request body is missing `room_id` or `slot_id`".into(),
             });
         }
-        if self.member.id.is_empty() || self.member.claimed_device_id.is_empty() {
-            return Err(MatrixErrorResponse {
-                status: 400,
-                errcode: "M_BAD_JSON".into(),
-                err: "The request body `member` is missing `id` or `claimed_device_id`".into(),
-            });
-        }
+        self.member.validate_id_and_device("DelegateDelayedLeaveCsRequest")?;
         if self.delay_id.is_empty() || self.delay_timeout <= 0 {
             return Err(MatrixErrorResponse {
                 status: 400,

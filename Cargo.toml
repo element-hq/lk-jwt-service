@@ -13,6 +13,11 @@ path = "src/main.rs"
 name = "healthcheck"
 path = "src/bin/healthcheck.rs"
 
+[features]
+# Enables `POST /appservice-ping`, which triggers an application-service ping
+# against a caller-supplied `server_name`/`appservice_id`.
+appservice-ping-trigger = []
+
 [dependencies]
 livekit-api = { version = "0.6", features = ["rustls-tls-native-roots"] }
 livekit-protocol = "0.7"
@@ -37,6 +42,7 @@ redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.10"
 sha2 = "0.11"
+subtle = "2"
 base64 = "0.23"
 data-encoding = "2"
 url = "2"

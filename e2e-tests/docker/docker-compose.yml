@@ -12,6 +12,10 @@ x-jwt-service-build: &jwt-service-build
   image: lk-jwt-e2e-jwt-service:latest
   build:
     context: ../..
+    args:
+      # The e2e suite exercises POST /appservice-ping to verify the
+      # application service setup.
+      CARGO_FEATURES: appservice-ping-trigger
 
 services:
   synapse:

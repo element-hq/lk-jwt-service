@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use rust_yaml::Yaml;
+use rust_yaml::{Value, Yaml};
 use tracing::{info, warn};
 
 use crate::helper::CsApiUrl;
@@ -120,18 +120,8 @@ pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
                 "Could not parse app service registration file: invalid root element".into(),
             );
         }
-        let as_token = parsed.get_str("as_token")
-            .ok_or("Could not parse app service registration file: no as_token property")?
-            .as_str()
-            .ok_or("Could not parse app service registration file: invalid value for as_token property")?
-            .trim()
-            .to_owned();
-        let hs_token = parsed.get_str("hs_token")
-            .ok_or("Could not parse app service registration file: no hs_token property")?
-            .as_str()
-            .ok_or("Could not parse app service registration file: invalid value for hs_token property")?
-            .trim()
-            .to_owned();
+        let as_token = read_app_service_registration_field(&parsed, "as_token")?;
+        let hs_token = read_app_service_registration_field(&parsed, "hs_token")?;
         info!(
             path,
             "Using application service configuration from LIVEKIT_AS_REGISTRATION_FILE"
@@ -162,6 +152,20 @@ pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
     }
 
     Ok(config)
+}
+
+/// Reads a required, trimmed string field from a parsed app service
+/// registration file.
+fn read_app_service_registration_field(parsed: &Value, field: &str) -> Result<String, String> {
+    Ok(parsed
+        .get_str(field)
+        .ok_or_else(|| format!("Could not parse app service registration file: no {field} property"))?
+        .as_str()
+        .ok_or_else(|| {
+            format!("Could not parse app service registration file: invalid value for {field} property")
+        })?
+        .trim()
+        .to_owned())
 }
 
 pub fn read_cs_api_url_overrides(raw: &str) -> Result<HashMap<String, CsApiUrl>, String> {

@@ -19,9 +19,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 
-use crate::delayed_event_manager::{DelayEventAction, DELAYED_EVENTS_ENDPOINT};
+use crate::delayed_event_manager::{AppServiceIdentity, DelayEventAction, DELAYED_EVENTS_ENDPOINT};
 use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, OpenIdTokenType};
 use crate::retry::{Classify, ErrorClass};
+
+/// The path of the `/rtc/livekit/get_token` S-S endpoint,.
+pub const GET_TOKEN_SS_PATH: &str =
+    "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token";
 
 /// The authentication bundle for talking to LiveKit.
 #[derive(Debug, Clone, Default)]
@@ -672,11 +676,10 @@ pub trait Deps: Send + Sync {
     /// POSTs the given action (restart or send) to the Matrix CS-API for
     /// `delay_id`.
     ///
-    /// When `as_token` and `user_id` are non-empty, the request authenticates as
-    /// `user_id` via an application-service identity assertion (see
+    /// When `identity` is `Some`, the request authenticates via an
+    /// application-service identity assertion (see
     /// https://spec.matrix.org/v1.18/application-service-api/#identity-assertion).
-    ///
-    /// When `as_token` or `user_id` are empty, the request is sent unauthenticated.
+    /// When `identity` is `None`, the request is sent unauthenticated.
     ///
     /// Return contract:
     ///   - 2xx, and 404 on send (MSC4140 already-sent)  → `Ok(status)`
@@ -689,8 +692,7 @@ pub trait Deps: Send + Sync {
         cs_api_url: &CsApiUrl,
         delay_id: &str,
         action: DelayEventAction,
-        as_token: &str,
-        user_id: &str,
+        identity: Option<AppServiceIdentity<'_>>,
     ) -> Result<u16, ActionError> {
         // The URL is built by pushing path segments, which percent-escapes
         // delay_id — preventing path-traversal attacks since delay_id is
@@ -715,8 +717,10 @@ pub trait Deps: Send + Sync {
             segments.push(delay_id);
             segments.push(action.as_str());
         }
-        if !as_token.is_empty() && !user_id.is_empty() {
-            endpoint.query_pairs_mut().append_pair("user_id", user_id);
+        if let Some(identity) = &identity {
+            endpoint
+                .query_pairs_mut()
+                .append_pair("user_id", identity.user_id);
         }
 
         let mut req = http_client(self.skip_verify_tls())
@@ -724,8 +728,8 @@ pub trait Deps: Send + Sync {
             .header(http::header::CONTENT_TYPE, "application/json")
             .body("{}")
             .timeout(Duration::from_secs(5));
-        if !as_token.is_empty() && !user_id.is_empty() {
-            req = req.bearer_auth(as_token);
+        if let Some(identity) = &identity {
+            req = req.bearer_auth(identity.as_token);
         }
         let resp = req.send().await.map_err(|e| {
             let msg = error_chain(&e);
@@ -908,7 +912,7 @@ pub trait Deps: Send + Sync {
         cs_api_url: &CsApiUrl,
     ) -> Result<HashMap<String, bool>, String> {
         static CACHE: std::sync::LazyLock<TtlCache<HashMap<String, bool>>> =
-            std::sync::LazyLock::new(TtlCache::new);
+            std::sync::LazyLock::new(|| TtlCache::with_max_entries(10_000));
         const TTL: Duration = Duration::from_secs(60 * 60);
 
         if let Some(unstable_features) = CACHE.get(cs_api_url.as_str()) {
@@ -1041,7 +1045,7 @@ pub trait Deps: Send + Sync {
             .json(&serde_json::json!({
                 "destination": destination,
                 "method": "POST",
-                "path": "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token",
+                "path": GET_TOKEN_SS_PATH,
                 "body": req,
             }))
             .timeout(Duration::from_secs(30))
@@ -1647,14 +1651,10 @@ mod tests {
         as_token: &str,
         user_id: &str,
     ) -> Result<u16, ActionError> {
+        let identity = (!as_token.is_empty() && !user_id.is_empty())
+            .then_some(AppServiceIdentity { as_token, user_id });
         RealDeps::default()
-            .execute_delayed_event_action(
-                &CsApiUrl(url.to_owned()),
-                delay_id,
-                action,
-                as_token,
-                user_id,
-            )
+            .execute_delayed_event_action(&CsApiUrl(url.to_owned()), delay_id, action, identity)
             .await
     }
 
