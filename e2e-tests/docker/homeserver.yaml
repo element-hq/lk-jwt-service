@@ -48,6 +48,8 @@ signing_key_path: "/tmp/homeserver.signing.key"
 
 report_stats: false
 
+max_event_delay_duration: 1h
+
 app_service_config_files:
   - /config/app-service.yaml
 

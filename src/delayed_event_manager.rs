@@ -355,6 +355,9 @@ pub struct DelayedEventJobParams {
     pub livekit_room: LiveKitRoomAlias,
     #[serde(rename = "LiveKitIdentity")]
     pub livekit_identity: LiveKitIdentity,
+    /// The user identifier of the user who created the delayed event.
+    #[serde(rename = "OwnerUserId", default)]
+    pub owner_user_id: String,
 }
 
 /// Sent to the handler loop when a job successfully restarted its delayed
@@ -389,6 +392,10 @@ pub struct DelayedEventJob {
     pub params: DelayedEventJobParams,
     lookup_cs_api_url: LookupCsApiUrlFn,
     deps: Arc<dyn Deps>,
+
+    /// The application service token used to authenticate requests against
+    /// the homeserver.
+    as_token: String,
 
     /// The only way to send input to the job from the outside. Buffered so
     /// that senders are unlikely to block.
@@ -471,6 +478,7 @@ impl DelayedEventJob {
         lookup_cs_api_url: LookupCsApiUrlFn,
         done_tx: mpsc::Sender<Arc<DelayedEventJob>>,
         restarted_tx: mpsc::Sender<JobRestartedRequest>,
+        as_token: String,
     ) -> Result<Arc<Self>, String> {
         if params.delay_timeout.is_zero() {
             return Err(format!(
@@ -487,6 +495,7 @@ impl DelayedEventJob {
             params,
             lookup_cs_api_url,
             deps,
+            as_token,
             event_tx,
             event_rx: Mutex::new(Some(event_rx)),
             cancel: parent_cancel.child_token(),
@@ -951,6 +960,8 @@ impl DelayedEventJob {
                                         &cs_api_url,
                                         &job.params.delay_id,
                                         DelayEventAction::Send,
+                                        &job.as_token,
+                                        &job.params.owner_user_id,
                                     )
                                     .await
                             }
@@ -1085,6 +1096,8 @@ impl DelayedEventJob {
                                 &cs_api_url,
                                 &job.params.delay_id,
                                 DelayEventAction::Restart,
+                                &job.as_token,
+                                &job.params.owner_user_id,
                             )
                             .await
                     }
@@ -1242,6 +1255,8 @@ pub(crate) mod test_support {
             cs_api_url: &CsApiUrl,
             delay_id: &str,
             action: DelayEventAction,
+            _as_token: &str,
+            _user_id: &str,
         ) -> Result<u16, ActionError> {
             (self.exec)(cs_api_url, delay_id, action)
         }
@@ -1314,6 +1329,7 @@ mod tests {
                 delay_timeout: timeout,
                 livekit_room: LiveKitRoomAlias("test-room".into()),
                 livekit_identity: LiveKitIdentity("@test:example.com".into()),
+                owner_user_id: String::new(),
             },
             deps,
             lookup_cs_api_url_from_override_only(
@@ -1322,6 +1338,7 @@ mod tests {
             ),
             done_tx,
             restarted_tx,
+            String::new(),
         )
         .expect("DelayedEventJob::new")
     }
@@ -1373,11 +1390,13 @@ mod tests {
                 delay_timeout: timeout,
                 livekit_room: LiveKitRoomAlias("room".into()),
                 livekit_identity: LiveKitIdentity("identity".into()),
+                owner_user_id: String::new(),
             },
             deps,
             lookup,
             done_tx,
             restarted_tx,
+            String::new(),
         )
         .expect("DelayedEventJob::new");
         (job, done_rx)
@@ -1413,11 +1432,13 @@ mod tests {
                 delay_timeout: Duration::ZERO,
                 livekit_room: LiveKitRoomAlias("room".into()),
                 livekit_identity: LiveKitIdentity("identity".into()),
+                owner_user_id: String::new(),
             },
             mock_exec_ok(),
             lookup_cs_api_url_from_override_only("x", "y"),
             done_tx,
             restarted_tx,
+            String::new(),
         );
         assert!(result.is_err(), "expected error for zero timeout, got Ok");
     }
@@ -1948,6 +1969,97 @@ mod tests {
         job.close().await.expect("close");
     }
 
+    // ── identity assertion ────────────────────────────────────────────────────
+
+    /// A [`Deps`] that records every `execute_delayed_event_action` call's
+    /// action, as_token and user_id, for asserting identity assertion is
+    /// threaded through from the job to the deps call.
+    struct AuthCapturingDeps {
+        calls: Mutex<Vec<(DelayEventAction, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Deps for AuthCapturingDeps {
+        async fn execute_delayed_event_action(
+            &self,
+            _cs_api_url: &CsApiUrl,
+            _delay_id: &str,
+            action: DelayEventAction,
+            as_token: &str,
+            user_id: &str,
+        ) -> Result<u16, ActionError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((action, as_token.to_owned(), user_id.to_owned()));
+            Ok(200)
+        }
+    }
+
+    /// A job constructed with a non-empty `owner_user_id` passes its as_token and
+    /// owner_user_id through to both ActionRestart and ActionSend calls.
+    #[tokio::test]
+    async fn test_delayed_event_job_restart_and_send_use_identity_assertion() {
+        let deps = Arc::new(AuthCapturingDeps {
+            calls: Mutex::new(Vec::new()),
+        });
+        let (done_tx, mut done_rx) = mpsc::channel(5);
+        let (restarted_tx, restarted_rx) = mpsc::channel(20);
+        std::mem::forget(restarted_rx);
+        let job = DelayedEventJob::new(
+            &CancellationToken::new(),
+            DelayedEventJobParams {
+                server_name: "example.com".into(),
+                delay_id: "id".into(),
+                delay_timeout: Duration::from_secs(10),
+                livekit_room: LiveKitRoomAlias("room".into()),
+                livekit_identity: LiveKitIdentity("identity".into()),
+                owner_user_id: "@alice:example.com".into(),
+            },
+            deps.clone(),
+            lookup_cs_api_url_from_override_only(
+                "example.com",
+                "https://matrix-client.example.com",
+            ),
+            done_tx,
+            restarted_tx,
+            "the-as-token".into(),
+        )
+        .expect("DelayedEventJob::new");
+        job.spawn_loop();
+
+        // Connected triggers ActionRestart immediately.
+        job.event_tx
+            .send(DelayedEventSignal::ParticipantConnected)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Disconnecting triggers ActionSend.
+        job.event_tx
+            .send(DelayedEventSignal::ParticipantDisconnectedIntentionally)
+            .await
+            .unwrap();
+
+        expect_done_state(
+            &mut done_rx,
+            DelayEventState::Disconnected,
+            Duration::from_secs(3),
+            "done channel",
+        )
+        .await;
+        job.close().await.expect("close");
+
+        let calls = deps.calls.lock().unwrap();
+        for action in [DelayEventAction::Restart, DelayEventAction::Send] {
+            assert!(
+                calls.iter().any(|(a, as_token, user_id)| {
+                    *a == action && as_token == "the-as-token" && user_id == "@alice:example.com"
+                }),
+                "{action}: expected a call authenticated as @alice:example.com, got {calls:?}"
+            );
+        }
+    }
+
     /// A completely full event channel at the moment of the Connected
     /// transition must not wedge the job: the restart still executes and the
     /// job still closes cleanly.
@@ -2182,6 +2294,7 @@ mod tests {
                 delay_timeout: Duration::from_secs(10),
                 livekit_room: LiveKitRoomAlias("phase1-room".into()),
                 livekit_identity: LiveKitIdentity("@alice:example.com".into()),
+                owner_user_id: String::new(),
             },
             deps.clone(),
             lookup_cs_api_url_from_override_only(
@@ -2190,6 +2303,7 @@ mod tests {
             ),
             done_tx,
             restarted_tx,
+            String::new(),
         )
         .unwrap();
         job.spawn_loop();
@@ -2246,6 +2360,7 @@ mod tests {
                 delay_timeout: Duration::from_secs(10),
                 livekit_room: LiveKitRoomAlias("phase2-room".into()),
                 livekit_identity: LiveKitIdentity("@bob:example.com".into()),
+                owner_user_id: String::new(),
             },
             deps.clone(),
             lookup_cs_api_url_from_override_only(
@@ -2254,6 +2369,7 @@ mod tests {
             ),
             done_tx,
             restarted_tx,
+            String::new(),
         )
         .unwrap();
         job.spawn_loop();
@@ -2310,6 +2426,7 @@ mod tests {
                 delay_timeout: Duration::from_secs(10),
                 livekit_room: LiveKitRoomAlias("phase2-disabled-room".into()),
                 livekit_identity: LiveKitIdentity("@carol:example.com".into()),
+                owner_user_id: String::new(),
             },
             deps.clone(),
             lookup_cs_api_url_from_override_only(
@@ -2318,6 +2435,7 @@ mod tests {
             ),
             done_tx,
             restarted_tx,
+            String::new(),
         )
         .unwrap();
         job.spawn_loop();

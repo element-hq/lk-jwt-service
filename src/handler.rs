@@ -33,9 +33,10 @@ use crate::helper::{
     CsApiUrlCache, Deps, LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId,
 };
 use crate::requests::{
-    AppservicePingTriggerRequest, DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse,
-    GetTokenCsRequest, GetTokenCsResponse, GetTokenSsRequest, GetTokenSsResponse, LegacySfuRequest,
-    MatrixErrorBody, MatrixErrorResponse, OpenIdTokenType, SfuRequest, SfuResponse,
+    AppservicePingTriggerRequest, DelegateDelayedLeaveCsRequest, DelegateDelayedLeaveRequest,
+    DelegateDelayedLeaveResponse, GetTokenCsRequest, GetTokenCsResponse, GetTokenSsRequest,
+    GetTokenSsResponse, LegacySfuRequest, MatrixErrorBody, MatrixErrorResponse, OpenIdTokenType,
+    SfuRequest, SfuResponse,
 };
 use crate::store::{Store, StoredJob};
 
@@ -264,6 +265,7 @@ impl Handler {
             self.make_lookup(),
             self.job_done_tx.clone(),
             self.job_restarted_tx.clone(),
+            self.app_service_config.as_token.clone(),
         )
     }
 
@@ -766,6 +768,7 @@ impl Handler {
                     delay_timeout: Duration::from_millis(req.delay_timeout.max(0) as u64),
                     livekit_room: lk_room_alias.clone(),
                     livekit_identity: lk_identity.clone(),
+                    owner_user_id: String::new(), // Unset because the user ID is only used for identity assertion when running as an application service.
                 })
                 .await
                 .map_err(matrix_error_for_add_job)?;
@@ -877,6 +880,7 @@ impl Handler {
                     delay_timeout: Duration::from_millis(req.delay_timeout.max(0) as u64),
                     livekit_room: lk_room_alias.clone(),
                     livekit_identity: lk_identity.clone(),
+                    owner_user_id: String::new(), // Unset because the user ID is only used for identity assertion when running as an application service.
                 })
                 .await
                 .map_err(matrix_error_for_add_job)?;
@@ -1219,6 +1223,62 @@ impl Handler {
             delay_timeout: Duration::from_millis(req.delay_timeout.max(0) as u64),
             livekit_room: lk_room_alias.clone(),
             livekit_identity: lk_identity.clone(),
+            owner_user_id: String::new(),
+        })
+        .await
+        .map_err(matrix_error_for_add_job)?;
+
+        Ok(DelegateDelayedLeaveResponse {})
+    }
+
+    /// Processes `/rtc/livekit/delegate_delayed_leave` C-S requests.
+    pub(crate) async fn process_delegate_delayed_leave_cs(
+        &self,
+        req: &DelegateDelayedLeaveCsRequest,
+        mxid_header: &str,
+    ) -> Result<DelegateDelayedLeaveResponse, MatrixErrorResponse> {
+        if mxid_header.is_empty() {
+            return Err(MatrixErrorResponse {
+                status: 401,
+                errcode: "M_UNAUTHORIZED".into(),
+                err: "Missing request authorization".into(),
+            });
+        }
+
+        let lk_identity =
+            livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
+        let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+
+        // Verify that the Client-Server API can be resolved and prime the
+        // cache.
+        if self
+            .deps
+            .resolve_cs_api_url(
+                &self.app_service_config.hs_server_name,
+                &self.cs_api_url_overrides,
+                Some(&self.cs_api_url_cache),
+            )
+            .await
+            .is_err()
+        {
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "Unable to resolve client-server API".into(),
+            });
+        }
+
+        info!(room = %lk_room_alias, lk_id = %lk_identity, delay_id = %req.delay_id,
+            matrix_id = %mxid_header,
+            "Handler: scheduling delayed event job (delegate_delayed_leave, app-service)");
+
+        self.add_delayed_event_job(DelayedEventJobParams {
+            server_name: self.app_service_config.hs_server_name.clone(),
+            delay_id: req.delay_id.clone(),
+            delay_timeout: Duration::from_millis(req.delay_timeout.max(0) as u64),
+            livekit_room: lk_room_alias.clone(),
+            livekit_identity: lk_identity.clone(),
+            owner_user_id: mxid_header.to_owned(),
         })
         .await
         .map_err(matrix_error_for_add_job)?;
@@ -1247,10 +1307,10 @@ impl Handler {
                     "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token",
                     any(handle_get_token_cs),
                 )
-                .route("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token", any(handle_ss_get_token))
+                .route("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token", any(handle_get_token_ss))
                 .route(
                     "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave",
-                    any(handle_cs_delegate_delayed_leave),
+                    any(handle_delegate_delayed_leave_cs),
                 );
         }
 
@@ -1603,7 +1663,7 @@ async fn handle_get_token_cs(State(handler): State<Arc<Handler>>, req: Request) 
 }
 
 /// Handles `/rtc/livekit/get_token` S-S requests.
-async fn handle_ss_get_token(State(handler): State<Arc<Handler>>, req: Request) -> Response {
+async fn handle_get_token_ss(State(handler): State<Arc<Handler>>, req: Request) -> Response {
     let req = match gate_post(req) {
         PostGate::Handle(req) => req,
         PostGate::Reply(resp) => return resp,
@@ -1642,9 +1702,52 @@ async fn handle_ss_get_token(State(handler): State<Arc<Handler>>, req: Request) 
     }
 }
 
-/// Handles /delegate_delayed_leave requests.
-async fn handle_cs_delegate_delayed_leave() -> Response {
-    apply_cors_json(matrix_error_response(501, "M_UNRECOGNIZED", "TODO"))
+/// Handles `/rtc/livekit/delegate_delayed_leave` C-S requests.
+async fn handle_delegate_delayed_leave_cs(
+    State(handler): State<Arc<Handler>>,
+    req: Request,
+) -> Response {
+    let req = match gate_post(req) {
+        PostGate::Handle(req) => req,
+        PostGate::Reply(resp) => return apply_cors_json(resp),
+    };
+    debug!("Handler: new delegate_delayed_leave C-S request");
+
+    if let Some(resp) = verify_hs_token(&req, &handler.app_service_config.hs_token) {
+        return apply_cors_json(resp);
+    }
+
+    let header_mxid = req
+        .headers()
+        .get(USER_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+
+    let request: DelegateDelayedLeaveCsRequest = match decode_json_body(req).await {
+        Ok(r) => r,
+        Err(err) => {
+            error!(err = %err, "Handler: delegate_delayed_leave C-S: error reading body");
+            return apply_cors_json(matrix_error_response(
+                400,
+                "M_NOT_JSON",
+                "Error reading request",
+            ));
+        }
+    };
+
+    if let Err(err) = request.validate() {
+        return apply_cors_json(matrix_error_into_response(&err));
+    }
+
+    let resp = match handler
+        .process_delegate_delayed_leave_cs(&request, &header_mxid)
+        .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(err) => matrix_error_into_response(&err),
+    };
+    apply_cors_json(resp)
 }
 
 /// Translates a validated LiveKit webhook event into a

@@ -417,6 +417,7 @@ mod tests {
             delay_timeout: Duration::from_secs(30),
             livekit_room: room.clone(),
             livekit_identity: identity.clone(),
+            owner_user_id: String::new(),
         };
         let job = StoredJob {
             params: params.clone(),
@@ -571,6 +572,7 @@ mod tests {
                 server_name: String::new(),
                 livekit_room: room,
                 livekit_identity: identity,
+                owner_user_id: String::new(),
             },
             restarted_at: Utc::now().trunc_subsecs(3),
         };

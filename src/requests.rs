@@ -255,6 +255,49 @@ impl DelegateDelayedLeaveRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DelegateDelayedLeaveResponse {}
 
+/// The request body of /delegate_delayed_leave.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateDelayedLeaveCsRequest {
+    #[serde(default)]
+    pub room_id: String,
+    #[serde(default)]
+    pub slot_id: String,
+    #[serde(default)]
+    pub member: MatrixRtcMemberType,
+    #[serde(default)]
+    pub delay_id: String,
+    #[serde(default)]
+    pub delay_timeout: i64,
+}
+
+impl DelegateDelayedLeaveCsRequest {
+    pub fn validate(&self) -> Result<(), MatrixErrorResponse> {
+        if self.room_id.is_empty() || self.slot_id.is_empty() {
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body is missing `room_id` or `slot_id`".into(),
+            });
+        }
+        if self.member.id.is_empty() || self.member.claimed_device_id.is_empty() {
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body `member` is missing `id` or `claimed_device_id`".into(),
+            });
+        }
+        if self.delay_id.is_empty() || self.delay_timeout <= 0 {
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "The request body is missing `delay_id` or `delay_timeout`".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// The request body of POST /appservice-ping.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -694,5 +737,83 @@ mod tests {
             req.validate().is_ok(),
             "expected no error for valid request without CS API URL"
         );
+    }
+
+    // ── DelegateDelayedLeaveCsRequest::validate() ─────────────────────────────
+
+    pub(crate) fn valid_delegate_delayed_leave_cs_request() -> DelegateDelayedLeaveCsRequest {
+        DelegateDelayedLeaveCsRequest {
+            room_id: "!testRoom:example.com".into(),
+            slot_id: "m.call#ROOM".into(),
+            member: MatrixRtcMemberType {
+                id: "member-id".into(),
+                claimed_user_id: "@user:example.com".into(),
+                claimed_device_id: "device-id".into(),
+            },
+            delay_id: "syd_delay123".into(),
+            delay_timeout: 30000, // 30 s in ms
+        }
+    }
+
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_validate_valid() {
+        let req = valid_delegate_delayed_leave_cs_request();
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_validate_missing_room_id() {
+        let mut req = valid_delegate_delayed_leave_cs_request();
+        req.room_id = String::new();
+        assert_validation_error(req.validate(), "M_BAD_JSON");
+    }
+
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_validate_missing_slot_id() {
+        let mut req = valid_delegate_delayed_leave_cs_request();
+        req.slot_id = String::new();
+        assert_validation_error(req.validate(), "M_BAD_JSON");
+    }
+
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_validate_missing_member_fields() {
+        type Mutator = fn(&mut DelegateDelayedLeaveCsRequest);
+        let cases: Vec<(&str, Mutator)> = vec![
+            ("missing ID", |r| r.member.id = String::new()),
+            ("missing ClaimedDeviceID", |r| {
+                r.member.claimed_device_id = String::new()
+            }),
+        ];
+        for (name, mutate) in cases {
+            let mut req = valid_delegate_delayed_leave_cs_request();
+            mutate(&mut req);
+            let result = req.validate();
+            assert!(result.is_err(), "{name}: expected validation error");
+            assert_validation_error(result, "M_BAD_JSON");
+        }
+    }
+
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_validate_ignores_claimed_user_id() {
+        let mut req = valid_delegate_delayed_leave_cs_request();
+        req.member.claimed_user_id = String::new();
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_validate_missing_delayed_event_params() {
+        type Mutator = fn(&mut DelegateDelayedLeaveCsRequest);
+        let cases: Vec<(&str, Mutator)> = vec![
+            ("missing DelayId", |r| r.delay_id = String::new()),
+            ("zero DelayTimeout", |r| r.delay_timeout = 0),
+            ("negative DelayTimeout", |r| r.delay_timeout = -1),
+        ];
+        for (name, mutate) in cases {
+            let mut req = valid_delegate_delayed_leave_cs_request();
+            mutate(&mut req);
+            let result = req.validate();
+            assert!(result.is_err(), "{name}: expected validation error");
+            assert_validation_error(result, "M_BAD_JSON");
+        }
     }
 }

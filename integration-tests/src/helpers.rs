@@ -153,6 +153,30 @@ pub fn expect_delayed_event_request_count(
     );
 }
 
+/// Assert that a /delayed_events request with the given delay ID and action
+/// has been recorded, authenticated via application-service identity
+/// assertion as `as_token` / `user_id`.
+#[track_caller]
+pub fn expect_delayed_event_request_identity(
+    hs: &FakeHomeserver,
+    delay_id: &str,
+    action: &str,
+    as_token: &str,
+    user_id: &str,
+) {
+    let requests = hs.delayed_event_requests();
+    assert!(
+        requests.iter().any(|r| {
+            r.delay_id == delay_id
+                && r.action == action
+                && r.authorization == format!("Bearer {as_token}")
+                && r.user_id == user_id
+        }),
+        "expected a {action:?} request with delay_id {delay_id:?} authenticated as \
+         {user_id:?} via as_token {as_token:?}, got {requests:?}"
+    );
+}
+
 /// Poll until at least `count` /delayed_events requests with the given
 /// delay ID and action have been recorded, or panic once the timeout
 /// elapses.

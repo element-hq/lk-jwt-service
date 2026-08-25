@@ -55,6 +55,8 @@ pub struct UserInfoRequest {
 
 #[derive(Clone, Debug)]
 pub struct DelayedEventRequest {
+    pub authorization: String,
+    pub user_id: String,
     pub delay_id: String,
     pub action: String,
 }
@@ -293,13 +295,25 @@ async fn handle_user_info(
 async fn handle_delayed_event(
     State(state): State<Arc<Mutex<HsState>>>,
     Path((delay_id, action)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let authorization = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let user_id = query.get("user_id").cloned().unwrap_or_default();
+
     let mut state = state.lock().unwrap();
 
     // Record the request.
-    state
-        .delayed_event_requests
-        .push(DelayedEventRequest { delay_id, action });
+    state.delayed_event_requests.push(DelayedEventRequest {
+        authorization,
+        user_id,
+        delay_id,
+        action,
+    });
 
     // Respond with the configured HTTP status.
     let status = state.delayed_event_status.unwrap_or(200);

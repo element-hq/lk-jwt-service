@@ -672,6 +672,12 @@ pub trait Deps: Send + Sync {
     /// POSTs the given action (restart or send) to the Matrix CS-API for
     /// `delay_id`.
     ///
+    /// When `as_token` and `user_id` are non-empty, the request authenticates as
+    /// `user_id` via an application-service identity assertion (see
+    /// https://spec.matrix.org/v1.18/application-service-api/#identity-assertion).
+    ///
+    /// When `as_token` or `user_id` are empty, the request is sent unauthenticated.
+    ///
     /// Return contract:
     ///   - 2xx, and 404 on send (MSC4140 already-sent)  → `Ok(status)`
     ///   - 404 on restart                               → permanent [`ActionError::DelayedEventNotFound`]
@@ -683,6 +689,8 @@ pub trait Deps: Send + Sync {
         cs_api_url: &CsApiUrl,
         delay_id: &str,
         action: DelayEventAction,
+        as_token: &str,
+        user_id: &str,
     ) -> Result<u16, ActionError> {
         // The URL is built by pushing path segments, which percent-escapes
         // delay_id — preventing path-traversal attacks since delay_id is
@@ -707,19 +715,23 @@ pub trait Deps: Send + Sync {
             segments.push(delay_id);
             segments.push(action.as_str());
         }
+        if !as_token.is_empty() && !user_id.is_empty() {
+            endpoint.query_pairs_mut().append_pair("user_id", user_id);
+        }
 
-        let resp = http_client(self.skip_verify_tls())
+        let mut req = http_client(self.skip_verify_tls())
             .post(endpoint.clone())
             .header(http::header::CONTENT_TYPE, "application/json")
             .body("{}")
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|e| {
-                let msg = error_chain(&e);
-                debug!(url = %endpoint, err = %msg, "execute_delayed_event_action");
-                ActionError::Transient { status: 0, msg }
-            })?;
+            .timeout(Duration::from_secs(5));
+        if !as_token.is_empty() && !user_id.is_empty() {
+            req = req.bearer_auth(as_token);
+        }
+        let resp = req.send().await.map_err(|e| {
+            let msg = error_chain(&e);
+            debug!(url = %endpoint, err = %msg, "execute_delayed_event_action");
+            ActionError::Transient { status: 0, msg }
+        })?;
 
         let status = resp.status().as_u16();
         debug!(url = %endpoint, status, "execute_delayed_event_action");
@@ -1625,8 +1637,24 @@ mod tests {
     // ── execute_delayed_event_action ──────────────────────────────────────────
 
     async fn exec(url: &str, delay_id: &str, action: DelayEventAction) -> Result<u16, ActionError> {
+        exec_with_auth(url, delay_id, action, "", "").await
+    }
+
+    async fn exec_with_auth(
+        url: &str,
+        delay_id: &str,
+        action: DelayEventAction,
+        as_token: &str,
+        user_id: &str,
+    ) -> Result<u16, ActionError> {
         RealDeps::default()
-            .execute_delayed_event_action(&CsApiUrl(url.to_owned()), delay_id, action)
+            .execute_delayed_event_action(
+                &CsApiUrl(url.to_owned()),
+                delay_id,
+                action,
+                as_token,
+                user_id,
+            )
             .await
     }
 
@@ -2054,13 +2082,84 @@ mod tests {
         assert_eq!(*captured.lock().unwrap(), "application/json");
     }
 
+    /// Captures the Authorization header and the `user_id` query parameter
+    /// of a request, for asserting on identity assertion.
+    struct CapturedAuth {
+        authorization: Option<String>,
+        user_id: Option<String>,
+    }
+
+    async fn spawn_capturing_server() -> (TestHttpServer, Arc<Mutex<Option<CapturedAuth>>>) {
+        let captured: Arc<Mutex<Option<CapturedAuth>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+        let router = Router::new().route(
+            "/{*path}",
+            any(move |req: Request| {
+                let captured = captured_clone.clone();
+                async move {
+                    let authorization = req
+                        .headers()
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    let user_id = req.uri().query().and_then(|q| {
+                        url::Url::parse(&format!("http://x/?{q}"))
+                            .ok()?
+                            .query_pairs()
+                            .find(|(k, _)| k == "user_id")
+                            .map(|(_, v)| v.into_owned())
+                    });
+                    *captured.lock().unwrap() = Some(CapturedAuth {
+                        authorization,
+                        user_id,
+                    });
+                    http::StatusCode::OK
+                }
+            }),
+        );
+        (spawn_http_server(router).await, captured)
+    }
+
+    /// `as_token` and `user_id` are passed through on the request when they are set.
+    #[tokio::test]
+    async fn test_execute_delayed_event_action_identity_assertion() {
+        let (server, captured) = spawn_capturing_server().await;
+
+        let status = exec_with_auth(
+            &server.url,
+            "id",
+            DelayEventAction::Restart,
+            "the-as-token",
+            "@alice:example.com",
+        )
+        .await
+        .expect("unexpected error");
+        assert_eq!(status, 200);
+
+        let captured = captured.lock().unwrap().take().expect("no request seen");
+        assert_eq!(
+            captured.authorization,
+            Some("Bearer the-as-token".to_owned())
+        );
+        assert_eq!(captured.user_id, Some("@alice:example.com".to_owned()));
+    }
+
+    /// When `as_token` is empty, no Authorization header or `user_id` query parameter is sent.
+    #[tokio::test]
+    async fn test_execute_delayed_event_action_no_auth_when_as_token_empty() {
+        let (server, captured) = spawn_capturing_server().await;
+
+        let status = exec(&server.url, "id", DelayEventAction::Restart)
+            .await
+            .expect("unexpected error");
+        assert_eq!(status, 200);
+
+        let captured = captured.lock().unwrap().take().expect("no request seen");
+        assert_eq!(captured.authorization, None);
+        assert_eq!(captured.user_id, None);
+    }
+
     // ── check_is_joined ──────────────────────────────────────────────────────
-    //
-    // is_user_joined and is_server_joined are thin wrappers passing a
-    // different IsJoinedSubject variant to check_is_joined. All shared
-    // behaviour (path resolution, error handling, response parsing) is
-    // exercised here directly, against an arbitrary subject; each wrapper
-    // then gets exactly one test of its own confirming the request shape.
 
     /// A homeserver stub serving /versions and /is_joined.
     struct IsJoinedServer {
