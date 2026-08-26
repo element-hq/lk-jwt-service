@@ -70,12 +70,9 @@ async fn post_get_token_ss(
 /// A missing homeserver token is rejected.
 #[tokio::test]
 async fn missing_hs_token() {
-    let hs = FakeHomeserver::new().await;
-
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        extra_env: app_service_env(hs.server_name()),
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env("example.com"),
         ..Default::default()
     })
     .await;
@@ -94,12 +91,9 @@ async fn missing_hs_token() {
 /// A wrong homeserver token is rejected.
 #[tokio::test]
 async fn wrong_hs_token() {
-    let hs = FakeHomeserver::new().await;
-
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        extra_env: app_service_env(hs.server_name()),
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env("example.com"),
         ..Default::default()
     })
     .await;
@@ -118,12 +112,9 @@ async fn wrong_hs_token() {
 /// A missing X-Matrix-Origin header is rejected.
 #[tokio::test]
 async fn missing_origin_header() {
-    let hs = FakeHomeserver::new().await;
-
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        extra_env: app_service_env(hs.server_name()),
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env("example.com"),
         ..Default::default()
     })
     .await;
@@ -142,12 +133,9 @@ async fn missing_origin_header() {
 /// A missing url is rejected.
 #[tokio::test]
 async fn missing_url() {
-    let hs = FakeHomeserver::new().await;
-
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        extra_env: app_service_env(hs.server_name()),
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env("example.com"),
         ..Default::default()
     })
     .await;
@@ -168,12 +156,9 @@ async fn missing_url() {
 /// Malformed JSON is rejected.
 #[tokio::test]
 async fn malformed_json() {
-    let hs = FakeHomeserver::new().await;
-
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        extra_env: app_service_env(hs.server_name()),
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env("example.com"),
         ..Default::default()
     })
     .await;
@@ -187,11 +172,9 @@ async fn malformed_json() {
 /// GET requests are rejected.
 #[tokio::test]
 async fn get_instead_of_post() {
-    let hs = FakeHomeserver::new().await;
-
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        extra_env: app_service_env(hs.server_name()),
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env("example.com"),
         ..Default::default()
     })
     .await;
@@ -213,7 +196,7 @@ async fn success() {
     let hs = FakeHomeserver::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env(hs.server_name()),
         ..Default::default()
@@ -248,7 +231,7 @@ async fn own_server_not_a_member() {
     hs.set_not_joined("!room:example.com", hs.server_name());
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env(hs.server_name()),
         ..Default::default()
@@ -273,7 +256,7 @@ async fn origin_server_not_a_member() {
     hs.set_not_joined("!room:example.com", ORIGIN_SERVER);
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env(hs.server_name()),
         ..Default::default()
@@ -297,7 +280,7 @@ async fn url_mismatch() {
     let hs = FakeHomeserver::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env(hs.server_name()),
         ..Default::default()
@@ -327,7 +310,7 @@ async fn unresolvable_cs_api() {
     // No CS API override, so it should fall back to .well-known discovery
     // against the fake homeserver, which doesn't serve it.
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env(hs.server_name()),
         ..Default::default()
     })

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use lk_jwt_service_integration_tests::{
-    DEFAULT_LK_URL, FakeHomeserver, FakeSfu, FakeUser, Service, ServiceConfig, decode_livekit_jwt,
+    DEFAULT_LK_URL, FakeHomeserver, FakeSfu, Service, ServiceConfig, decode_livekit_jwt,
     expect_fed_proxy_request, expect_is_joined_request, expect_matrix_error,
     expect_no_fed_proxy_requests, expect_no_is_joined_requests, expect_no_user_info_lookups,
 };
@@ -30,30 +30,30 @@ fn app_service_env_with_hs_server_name(hs_server_name: &str) -> HashMap<String, 
 }
 
 /// Return a valid /rtc/livekit/get_token C-S request body.
-fn get_token_cs_request(user: &FakeUser, lk_url: &str) -> Value {
+fn get_token_cs_request(user_id: &str, lk_url: &str) -> Value {
     json!({
         "url": lk_url,
         "room_id": "!room:example.com",
         "slot_id": "m.call#",
         "member": {
             "id": "member-1",
-            "claimed_user_id": user.user_id,
+            "claimed_user_id": user_id,
             "claimed_device_id": "DEVICE",
         },
     })
 }
 
 /// The GetTokenSsRequest body expected to be relayed via the federation
-/// proxy for a get_token_cs_request from `user` targeting `lk_url`.
-fn expected_relayed_body(user: &FakeUser, lk_url: &str) -> Value {
+/// proxy for a get_token_cs_request from `user_id` targeting `lk_url`.
+fn expected_relayed_body(user_id: &str, lk_url: &str) -> Value {
     json!({
-        "user_id": user.user_id,
+        "user_id": user_id,
         "url": lk_url,
         "room_id": "!room:example.com",
         "slot_id": "m.call#",
         "member": {
             "id": "member-1",
-            "claimed_user_id": user.user_id,
+            "claimed_user_id": user_id,
             "claimed_device_id": "DEVICE",
         },
     })
@@ -96,11 +96,9 @@ async fn post_get_token_cs_as(
 #[tokio::test]
 async fn missing_hs_token() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -108,8 +106,8 @@ async fn missing_hs_token() {
 
     let (status, body) = post_get_token_cs_as(
         &svc,
-        get_token_cs_request(&user, DEFAULT_LK_URL).to_string(),
-        Some(&user.user_id),
+        get_token_cs_request("@alice:example.com", DEFAULT_LK_URL).to_string(),
+        Some("@alice:example.com"),
         None,
     )
     .await;
@@ -122,11 +120,9 @@ async fn missing_hs_token() {
 #[tokio::test]
 async fn wrong_hs_token() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -134,8 +130,8 @@ async fn wrong_hs_token() {
 
     let (status, body) = post_get_token_cs_as(
         &svc,
-        get_token_cs_request(&user, DEFAULT_LK_URL).to_string(),
-        Some(&user.user_id),
+        get_token_cs_request("@alice:example.com", DEFAULT_LK_URL).to_string(),
+        Some("@alice:example.com"),
         Some("not_the_hs_token"),
     )
     .await;
@@ -148,11 +144,9 @@ async fn wrong_hs_token() {
 #[tokio::test]
 async fn missing_header() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -160,7 +154,7 @@ async fn missing_header() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request(&user, DEFAULT_LK_URL).to_string(),
+        get_token_cs_request("@alice:example.com", DEFAULT_LK_URL).to_string(),
         None,
     )
     .await;
@@ -173,12 +167,9 @@ async fn missing_header() {
 /// A malformed MXID header is rejected.
 #[tokio::test]
 async fn malformed_header() {
-    let hs = FakeHomeserver::new().await;
-
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env_with_hs_server_name("example.com"),
         ..Default::default()
     })
     .await;
@@ -201,11 +192,9 @@ async fn malformed_header() {
 #[tokio::test]
 async fn url_mismatch() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -213,8 +202,12 @@ async fn url_mismatch() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request(&user, "wss://not-the-configured-sfu.example.com").to_string(),
-        Some(&user.user_id),
+        get_token_cs_request(
+            "@alice:example.com",
+            "wss://not-the-configured-sfu.example.com",
+        )
+        .to_string(),
+        Some("@alice:example.com"),
     )
     .await;
 
@@ -226,19 +219,18 @@ async fn url_mismatch() {
 #[tokio::test]
 async fn missing_url() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
     .await;
 
-    let mut request = get_token_cs_request(&user, DEFAULT_LK_URL);
+    let mut request = get_token_cs_request("@alice:example.com", DEFAULT_LK_URL);
     request["url"] = json!("");
-    let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+    let (status, body) =
+        post_get_token_cs(&svc, request.to_string(), Some("@alice:example.com")).await;
 
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
     expect_no_is_joined_requests(&hs);
@@ -252,7 +244,7 @@ async fn not_a_room_member() {
     hs.set_not_joined("!room:example.com", &user.user_id);
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
@@ -261,7 +253,7 @@ async fn not_a_room_member() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request(&user, DEFAULT_LK_URL).to_string(),
+        get_token_cs_request(&user.user_id, DEFAULT_LK_URL).to_string(),
         Some(&user.user_id),
     )
     .await;
@@ -274,12 +266,11 @@ async fn not_a_room_member() {
 #[tokio::test]
 async fn unresolvable_cs_api() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     // No CS API override, so it should fall back to .well-known discovery
     // against the fake homeserver, which doesn't serve it.
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -287,8 +278,8 @@ async fn unresolvable_cs_api() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request(&user, DEFAULT_LK_URL).to_string(),
-        Some(&user.user_id),
+        get_token_cs_request("@alice:example.com", DEFAULT_LK_URL).to_string(),
+        Some("@alice:example.com"),
     )
     .await;
 
@@ -302,8 +293,7 @@ async fn malformed_json() {
     let hs = FakeHomeserver::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -321,7 +311,7 @@ async fn get_instead_of_post() {
     let hs = FakeHomeserver::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -348,7 +338,7 @@ async fn no_server_name_success() {
     let sfu = FakeSfu::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         livekit_url: Some(sfu.url().to_owned()),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
@@ -358,7 +348,7 @@ async fn no_server_name_success() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request(&user, sfu.url()).to_string(),
+        get_token_cs_request(&user.user_id, sfu.url()).to_string(),
         Some(&user.user_id),
     )
     .await;
@@ -396,7 +386,7 @@ async fn server_name_matching_own_hs_server_name_success() {
     let sfu = FakeSfu::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         livekit_url: Some(sfu.url().to_owned()),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
@@ -404,7 +394,7 @@ async fn server_name_matching_own_hs_server_name_success() {
     })
     .await;
 
-    let mut request = get_token_cs_request(&user, sfu.url());
+    let mut request = get_token_cs_request(&user.user_id, sfu.url());
     request["server_name"] = json!(hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -432,7 +422,7 @@ async fn foreign_server_name_is_relayed_via_federation_proxy() {
     cs_api_url_overrides.extend(destination_hs.cs_api_url_override());
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides,
         livekit_url: Some(sfu.url().to_owned()),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
@@ -442,7 +432,8 @@ async fn foreign_server_name_is_relayed_via_federation_proxy() {
 
     // The `url` deliberately does not match this deployment's own SFU: the
     // URL check only applies to locally-minted tokens.
-    let mut request = get_token_cs_request(&user, "wss://not-our-configured-sfu.example.com");
+    let mut request =
+        get_token_cs_request(&user.user_id, "wss://not-our-configured-sfu.example.com");
     request["server_name"] = json!(destination_hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -466,7 +457,7 @@ async fn foreign_server_name_is_relayed_via_federation_proxy() {
         &hs,
         destination_hs.server_name(),
         AS_TOKEN,
-        &expected_relayed_body(&user, "wss://not-our-configured-sfu.example.com"),
+        &expected_relayed_body(&user.user_id, "wss://not-our-configured-sfu.example.com"),
     );
 
     assert!(
@@ -483,14 +474,14 @@ async fn non_member_is_rejected_even_with_foreign_server_name() {
     hs.set_not_joined("!room:example.com", &user.user_id);
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
     .await;
 
-    let mut request = get_token_cs_request(&user, DEFAULT_LK_URL);
+    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
     request["server_name"] = json!("other.example.org");
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -511,14 +502,14 @@ async fn federation_proxy_destination_error_surfaces_as_502() {
     cs_api_url_overrides.extend(destination_hs.cs_api_url_override());
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides,
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
     .await;
 
-    let mut request = get_token_cs_request(&user, DEFAULT_LK_URL);
+    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
     request["server_name"] = json!(destination_hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -527,6 +518,6 @@ async fn federation_proxy_destination_error_surfaces_as_502() {
         &hs,
         destination_hs.server_name(),
         AS_TOKEN,
-        &expected_relayed_body(&user, DEFAULT_LK_URL),
+        &expected_relayed_body(&user.user_id, DEFAULT_LK_URL),
     );
 }

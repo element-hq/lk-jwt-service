@@ -83,11 +83,9 @@ async fn post_delegate_cs_as(
 #[tokio::test]
 async fn missing_hs_token() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -96,7 +94,7 @@ async fn missing_hs_token() {
     let (status, body) = post_delegate_cs_as(
         &svc,
         delegate_request().to_string(),
-        Some(&user.user_id),
+        Some("@alice:example.com"),
         None,
     )
     .await;
@@ -109,11 +107,9 @@ async fn missing_hs_token() {
 #[tokio::test]
 async fn wrong_hs_token() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -122,7 +118,7 @@ async fn wrong_hs_token() {
     let (status, body) = post_delegate_cs_as(
         &svc,
         delegate_request().to_string(),
-        Some(&user.user_id),
+        Some("@alice:example.com"),
         Some("not_the_hs_token"),
     )
     .await;
@@ -137,8 +133,7 @@ async fn missing_header() {
     let hs = FakeHomeserver::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -154,11 +149,9 @@ async fn missing_header() {
 #[tokio::test]
 async fn missing_fields() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -166,7 +159,8 @@ async fn missing_fields() {
 
     let mut request = delegate_request();
     request.as_object_mut().unwrap().remove("delay_id");
-    let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+    let (status, body) =
+        post_delegate_cs(&svc, request.to_string(), Some("@alice:example.com")).await;
 
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
     expect_no_delayed_event_requests(&hs);
@@ -176,17 +170,15 @@ async fn missing_fields() {
 #[tokio::test]
 async fn malformed_json() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
     .await;
 
-    let (status, body) = post_delegate_cs(&svc, "{not json", Some(&user.user_id)).await;
+    let (status, body) = post_delegate_cs(&svc, "{not json", Some("@alice:example.com")).await;
 
     expect_matrix_error(status, &body, 400, "M_NOT_JSON");
     expect_no_delayed_event_requests(&hs);
@@ -198,7 +190,7 @@ async fn get_instead_of_post() {
     let hs = FakeHomeserver::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
@@ -219,19 +211,22 @@ async fn get_instead_of_post() {
 #[tokio::test]
 async fn unresolvable_cs_api() {
     let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
 
     // No CS API override, so it should fall back to .well-known discovery
     // against the fake homeserver, which doesn't serve it.
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
     })
     .await;
 
-    let (status, body) =
-        post_delegate_cs(&svc, delegate_request().to_string(), Some(&user.user_id)).await;
+    let (status, body) = post_delegate_cs(
+        &svc,
+        delegate_request().to_string(),
+        Some("@alice:example.com"),
+    )
+    .await;
 
     expect_matrix_error(status, &body, 400, "M_BAD_JSON");
     expect_no_delayed_event_requests(&hs);
@@ -244,7 +239,7 @@ async fn success() {
     let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
@@ -275,7 +270,7 @@ async fn restart_and_send_use_identity_assertion() {
     let redis = FakeRedis::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         redis_url: Some(redis.url().to_owned()),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
@@ -340,7 +335,7 @@ async fn delay_timeout_looked_up_when_absent() {
     let redis = FakeRedis::new().await;
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         redis_url: Some(redis.url().to_owned()),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
@@ -384,7 +379,7 @@ async fn delay_timeout_not_looked_up_when_given() {
     let user = hs.new_user("alice");
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
@@ -409,7 +404,7 @@ async fn looked_up_delay_drives_the_job() {
     hs.set_delay("syd_cs_integration_1", 300);
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
@@ -434,7 +429,7 @@ async fn unknown_delay_id_rejected() {
     // No delay scripted for the request's delay ID.
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
@@ -459,7 +454,7 @@ async fn delay_lookup_failure_rejected() {
     hs.set_delay_lookup_status(500);
 
     let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec![hs.server_name().to_owned()],
+        full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
         extra_env: app_service_env_with_hs_server_name(hs.server_name()),
         ..Default::default()
