@@ -144,7 +144,7 @@ async fn wrong_hs_token() {
     expect_no_is_joined_requests(&hs);
 }
 
-/// A missing X-Matrix-User-Identifierheader is rejected.
+/// A missing X-Matrix-User-Identifier header is rejected.
 #[tokio::test]
 async fn missing_header() {
     let hs = FakeHomeserver::new().await;
@@ -342,7 +342,7 @@ async fn get_instead_of_post() {
 /// The user gets a token and triggers room creation. This test uses the unstable
 /// /is_joined endpoint.
 #[tokio::test]
-async fn full_access_token_unstable_is_joined() {
+async fn no_server_name_success() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
     let sfu = FakeSfu::new().await;
@@ -390,7 +390,7 @@ async fn full_access_token_unstable_is_joined() {
 /// A `server_name` equal to this deployment's own LIVEKIT_HS_SERVER_NAME is
 /// handled locally, just like an absent `server_name`.
 #[tokio::test]
-async fn server_name_matching_own_hs_server_name_is_local() {
+async fn server_name_matching_own_hs_server_name_success() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
     let sfu = FakeSfu::new().await;
