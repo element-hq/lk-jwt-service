@@ -6,6 +6,7 @@ license = "AGPL-3.0-only"
 publish = false
 
 [dependencies]
+dtor = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 livekit-protocol = "0.7"
 # Must match livekit-protocol's prost version.
@@ -14,3 +15,4 @@ reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = "0.29"
+uuid = { version = "1", features = ["v4"] }

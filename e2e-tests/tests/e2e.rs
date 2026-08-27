@@ -6,9 +6,279 @@
 use std::time::{Duration, Instant};
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_SFU_ADDR, LIVEKIT_URL, LiveKitParticipant, SYNAPSE_CS_API_URL, Stack,
-    create_and_join_room, get_livekit_token, register_user,
+    APPSERVICE_ID, AUTH_SERVICE_URL, AUTH_SERVICE2_URL, LIVEKIT_SFU_ADDR, LIVEKIT_URL,
+    LiveKitParticipant, SYNAPSE_CS_API_URL, SYNAPSE_SERVER_NAME, SYNAPSE2_CS_API_URL,
+    SYNAPSE2_SERVER_NAME, create_and_join_room, ensure_stack, get_livekit_token, join_room_via,
+    register_user, unique_localpart, verify_livekit_token_is_usable,
 };
+
+/// Triggers the app-service ping roundtrip against `auth_service_url` and
+/// asserts it succeeds.
+async fn assert_appservice_ping_succeeds(auth_service_url: &str, server_name: &str) {
+    let resp = reqwest::Client::new()
+        .post(format!("{auth_service_url}/appservice-ping"))
+        .json(&serde_json::json!({
+            "server_name": server_name,
+            "appservice_id": APPSERVICE_ID,
+        }))
+        .send()
+        .await
+        .expect("request to /appservice-ping failed");
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
+    assert!(
+        status.is_success(),
+        "expected a successful response, got {status}: {body}"
+    );
+    assert!(
+        body.get("duration_ms").and_then(|v| v.as_u64()).is_some(),
+        "expected a `duration_ms` field in the homeserver's response, got {body}"
+    );
+}
+
+/// Triggers the app-service ping roundtrip to ensure each service and its
+/// homeserver can reach each other, on both stacks, back to back.
+#[tokio::test]
+async fn appservice_ping_round_trip_succeeds() {
+    ensure_stack().await;
+
+    assert_appservice_ping_succeeds(AUTH_SERVICE_URL, SYNAPSE_SERVER_NAME).await;
+    assert_appservice_ping_succeeds(AUTH_SERVICE2_URL, SYNAPSE2_SERVER_NAME).await;
+}
+
+/// A joined user succeeds in getting a token for the local SFU.
+#[tokio::test]
+async fn get_token_local_sfu_succeeds() {
+    ensure_stack().await;
+
+    // Register a user and have them create (and thus join) a room.
+    let user = register_user(
+        SYNAPSE_CS_API_URL,
+        &unique_localpart("alice"),
+        "e2e-test-password",
+    )
+    .await;
+    let room_id = create_and_join_room(SYNAPSE_CS_API_URL, &user).await;
+
+    // Request a LiveKit token for that room through Synapse's C-S API. Synapse
+    // proxies the request to its lk-jwt-service running as an application service.
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{SYNAPSE_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+        ))
+        .bearer_auth(&user.access_token)
+        .json(&serde_json::json!({
+            "room_id": room_id,
+            "slot_id": "m.call#ROOM",
+            "url": LIVEKIT_URL,
+            "member": {
+                "id": "e2e-member",
+                "claimed_device_id": "E2EDEVICE",
+            },
+        }))
+        .send()
+        .await
+        .expect("request to /rtc/livekit/get_token failed");
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
+    assert!(
+        status.is_success(),
+        "expected a successful response, got {status}: {body}"
+    );
+
+    let jwt = body["jwt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected a `jwt` field in the response, got {body}"));
+    assert!(!jwt.is_empty(), "expected a non-empty JWT");
+
+    // The proof that matters: a real LiveKit SFU actually accepts the
+    // issued token and admits the participant into the room.
+    verify_livekit_token_is_usable(LIVEKIT_SFU_ADDR, jwt).await;
+}
+
+/// A joined user succeeds in getting a token for a remote SFU.
+#[tokio::test]
+async fn get_token_remote_sfu_succeeds() {
+    ensure_stack().await;
+
+    // Alice creates (and thus joins) a room on her own homeserver (hs1).
+    let alice = register_user(
+        SYNAPSE_CS_API_URL,
+        &unique_localpart("alice"),
+        "e2e-test-password",
+    )
+    .await;
+    let room_id = create_and_join_room(SYNAPSE_CS_API_URL, &alice).await;
+
+    // Alice requests a token locally first, as the real MSC4195 flow expects:
+    // this is what actually creates the LiveKit room (room.auto_create is
+    // disabled), which the relayed request below never does on its own.
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{SYNAPSE_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+        ))
+        .bearer_auth(&alice.access_token)
+        .json(&serde_json::json!({
+            "room_id": room_id,
+            "slot_id": "m.call#ROOM",
+            "url": LIVEKIT_URL,
+            "member": {
+                "id": "e2e-member-alice",
+                "claimed_device_id": "E2EDEVICEALICE",
+            },
+        }))
+        .send()
+        .await
+        .expect("alice's request to /rtc/livekit/get_token failed");
+    assert!(
+        resp.status().is_success(),
+        "expected alice's local get_token request to succeed, got {}",
+        resp.status()
+    );
+
+    // Bob, on a different, federated homeserver (hs2), joins the same room.
+    let bob = register_user(
+        SYNAPSE2_CS_API_URL,
+        &unique_localpart("bob"),
+        "e2e-test-password",
+    )
+    .await;
+    join_room_via(SYNAPSE2_CS_API_URL, &bob, &room_id, SYNAPSE_SERVER_NAME).await;
+
+    // Bob requests a token through his own homeserver's C-S API, naming hs1
+    // as the MatrixRTC session's SFU-hosting homeserver. hs2 relays this to
+    // hs1 via the MSC4512 federation proxy, which in turn calls the S-S
+    // endpoint on hs1's app service.
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{SYNAPSE2_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+        ))
+        .bearer_auth(&bob.access_token)
+        .json(&serde_json::json!({
+            "server_name": SYNAPSE_SERVER_NAME,
+            "room_id": room_id,
+            "slot_id": "m.call#ROOM",
+            "url": LIVEKIT_URL,
+            "member": {
+                "id": "e2e-member",
+                "claimed_device_id": "E2EDEVICE",
+            },
+        }))
+        .send()
+        .await
+        .expect("request to /rtc/livekit/get_token failed");
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
+    assert!(
+        status.is_success(),
+        "expected a successful response, got {status}: {body}"
+    );
+
+    let jwt = body["jwt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected a `jwt` field in the response, got {body}"));
+    assert!(!jwt.is_empty(), "expected a non-empty JWT");
+
+    // The proof that matters: hs1's real LiveKit SFU actually accepts the
+    // issued token, even though it was requested through hs2.
+    verify_livekit_token_is_usable(LIVEKIT_SFU_ADDR, jwt).await;
+}
+
+/// A non-joined user is rejected.
+#[tokio::test]
+async fn get_token_rejects_non_member() {
+    ensure_stack().await;
+
+    // Alice creates (and thus joins) a room; Bob never joins it.
+    let alice = register_user(
+        SYNAPSE_CS_API_URL,
+        &unique_localpart("alice"),
+        "e2e-test-password",
+    )
+    .await;
+    let room_id = create_and_join_room(SYNAPSE_CS_API_URL, &alice).await;
+    let bob = register_user(
+        SYNAPSE_CS_API_URL,
+        &unique_localpart("bob"),
+        "e2e-test-password",
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{SYNAPSE_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+        ))
+        .bearer_auth(&bob.access_token)
+        .json(&serde_json::json!({
+            "room_id": room_id,
+            "slot_id": "m.call#ROOM",
+            "url": LIVEKIT_URL,
+            "member": {
+                "id": "e2e-member",
+                "claimed_device_id": "E2EDEVICE",
+            },
+        }))
+        .send()
+        .await
+        .expect("request to /rtc/livekit/get_token failed");
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
+    assert_eq!(
+        status.as_u16(),
+        403,
+        "expected 403 for a non-member, got {status}: {body}"
+    );
+    assert_eq!(body["errcode"].as_str(), Some("M_FORBIDDEN"));
+}
+
+/// A joined user is rejected if the remote server isn't joined.
+#[tokio::test]
+async fn get_token_rejects_when_remote_server_is_not_joined() {
+    ensure_stack().await;
+
+    // Bob creates (and thus joins) a room on hs2. hs1 never joins it.
+    let bob = register_user(
+        SYNAPSE2_CS_API_URL,
+        &unique_localpart("bob"),
+        "e2e-test-password",
+    )
+    .await;
+    let room_id = create_and_join_room(SYNAPSE2_CS_API_URL, &bob).await;
+
+    // Bob requests a token naming hs1 as the SFU-hosting homeserver, even
+    // though hs1 has never seen this room.
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{SYNAPSE2_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+        ))
+        .bearer_auth(&bob.access_token)
+        .json(&serde_json::json!({
+            "server_name": SYNAPSE_SERVER_NAME,
+            "room_id": room_id,
+            "slot_id": "m.call#ROOM",
+            "url": LIVEKIT_URL,
+            "member": {
+                "id": "e2e-member",
+                "claimed_device_id": "E2EDEVICE",
+            },
+        }))
+        .send()
+        .await
+        .expect("request to /rtc/livekit/get_token failed");
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
+    assert_eq!(
+        status.as_u16(),
+        502,
+        "expected 502 when the remote homeserver isn't in the room, got {status}: {body}"
+    );
+    assert_eq!(body["errcode"].as_str(), Some("M_CONNECTION_FAILED"));
+}
 
 /// Schedules a delayed `m.room.message` in `room_id` (MSC4140) and returns
 /// its delay_id.
@@ -127,10 +397,15 @@ async fn wait_for_message(
 /// once that endpoint is available here.
 #[tokio::test]
 async fn delegate_delayed_leave_cs_succeeds() {
-    let _stack = Stack::start().await;
+    ensure_stack().await;
 
     // Register a user and have them create (and thus join) a room.
-    let user = register_user(SYNAPSE_CS_API_URL, "alice", "e2e-test-password").await;
+    let user = register_user(
+        SYNAPSE_CS_API_URL,
+        &unique_localpart("alice"),
+        "e2e-test-password",
+    )
+    .await;
     let room_id = create_and_join_room(SYNAPSE_CS_API_URL, &user).await;
 
     // Short enough to keep the test fast, but long enough that the service's

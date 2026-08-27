@@ -56,6 +56,10 @@ app_service_config_files:
 # Enable registration so that the test suite can provision its own users.
 enable_registration: true
 enable_registration_without_verification: true
+# Disable the default which is tuned to slow down abusive registration on a public-facing.
+rc_registration:
+  per_second: 1000
+  burst_count: 1000
 
 experimental_features:
   # Enable membership look-up via /is_joined.
