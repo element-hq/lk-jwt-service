@@ -2,13 +2,30 @@
 
 Black-box integration tests for lk-jwt-service. The suite builds the real
 service binary, runs it as a separate process and talks to it exclusively
-over its external interfaces:
+over its external HTTP interface. The services outgoing interfaces are
+connected to fake services that are used to configure the environment
+and verify test results.
 
-* HTTP endpoints (`/delegate_delayed_leave`, ...)
-* the Matrix federation API the service calls to verify OpenID tokens
-  (served by a fake homeserver under test control)
-* the Matrix client-server API the service calls for delayed
-  event actions (served by the same fake homeserver)
+```
+     ┌───────────────────────────────────────────────┐
+     │               #[tokio::test]                  │───────────┐
+     └──────────────────────┬────────────────────────┘           │
+                            │ HTTP                               │
+                            ▼                                    │
+              ┌────────────────────────────┐                     │
+              │       lk-jwt-service       │                     │
+              │       (child process)      │                     │
+              └───┬──────────┬─────────┬───┘                     │
+                  │          │         │                         │
+               C-S API     Twirp     RESP2                       │
+                  │          │         │                         │
+                  ▼          ▼         ▼                         │
+     ┌────────────────┐ ┌─────────┐ ┌───────────┐                │
+     │ FakeHomeserver │ │ FakeSfu │ │ FakeRedis │                │
+     └────────────────┘ └─────────┘ └───────────┘                │
+                  ▲          ▲         ▲                         │
+                  └──────────┴─────────┴──── configure / verify ─┘
+```
 
 ## Running
 
