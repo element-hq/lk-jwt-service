@@ -3,10 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-//! Harness for the end-to-end test suite: brings up a real Synapse
-//! homeserver and this service via Docker Compose, wired together as a
-//! Matrix application service, shared by every test in the binary and torn
-//! down once all of them have finished.
+//! Harness for the appservice-ping end-to-end test: brings up a real
+//! Synapse homeserver and this service via Docker Compose, wired together
+//! as a Matrix application service, and tears them down afterward.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -88,95 +87,78 @@ fn compose(args: &[&str]) -> Output {
         .expect("failed to run docker compose")
 }
 
-/// Tracks whether the e2e Docker Compose stack has been started, shared by
-/// every test in the binary.
-static STACK: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-/// Ensures the e2e Docker Compose stack (Synapse and the service under
-/// test, registered as an application service) is up and both services
-/// respond as healthy, starting it on the first call. Safe to call from
-/// many concurrently-running tests: only the first caller actually starts
-/// the stack, the rest just wait on that same result. Panics (dumping
-/// container logs) if the stack doesn't become healthy in time.
+/// A running instance of the e2e Docker Compose stack.
 ///
-/// The stack is torn down once, after every test in the binary has
-/// finished — see [`teardown_stack`].
-pub async fn ensure_stack() {
-    STACK.get_or_init(start_stack).await;
-}
+/// This includes Synapse and the service under test, registered
+/// as an application service. The stack is torn down on drop.
+pub struct Stack;
 
-async fn start_stack() {
-    let up = compose(&["up", "-d", "--build"]);
-    if !up.status.success() {
-        panic!(
-            "docker compose up failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&up.stdout),
-            String::from_utf8_lossy(&up.stderr),
-        );
+impl Stack {
+    /// Builds and starts the stack, waiting until both services respond as
+    /// healthy. Panics (dumping container logs) if that doesn't happen in
+    /// time.
+    pub async fn start() -> Stack {
+        let up = compose(&["up", "-d", "--build"]);
+        if !up.status.success() {
+            panic!(
+                "docker compose up failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&up.stdout),
+                String::from_utf8_lossy(&up.stderr),
+            );
+        }
+
+        let stack = Stack;
+        stack.wait_ready().await;
+        stack
     }
 
-    wait_ready().await;
-}
+    /// Waits for the stack's components to boot up and declare themselves as ready.
+    async fn wait_ready(&self) {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("failed to build reqwest client");
+        let deadline = Instant::now() + Duration::from_secs(180);
 
-/// Waits for the stack's components to boot up and declare themselves as ready.
-async fn wait_ready() {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("failed to build reqwest client");
-    let deadline = Instant::now() + Duration::from_secs(180);
-
-    let checks = [
-        ("synapse", format!("{SYNAPSE_CS_API_URL}/health")),
-        ("jwt-service", format!("{AUTH_SERVICE_URL}/healthz")),
-        ("livekit", format!("http://{LIVEKIT_SFU_ADDR}/")),
-        ("synapse2", format!("{SYNAPSE2_CS_API_URL}/health")),
-        ("jwt-service2", format!("{AUTH_SERVICE2_URL}/healthz")),
-        ("livekit2", format!("http://{LIVEKIT2_SFU_ADDR}/")),
-    ];
-    for (name, url) in checks {
-        loop {
-            if let Ok(resp) = client.get(&url).send().await
-                && resp.status().is_success()
-            {
-                break;
+        let checks = [
+            ("synapse", format!("{SYNAPSE_CS_API_URL}/health")),
+            ("jwt-service", format!("{AUTH_SERVICE_URL}/healthz")),
+            ("livekit", format!("http://{LIVEKIT_SFU_ADDR}/")),
+            ("synapse2", format!("{SYNAPSE2_CS_API_URL}/health")),
+            ("jwt-service2", format!("{AUTH_SERVICE2_URL}/healthz")),
+            ("livekit2", format!("http://{LIVEKIT2_SFU_ADDR}/")),
+        ];
+        for (name, url) in checks {
+            loop {
+                if let Ok(resp) = client.get(&url).send().await
+                    && resp.status().is_success()
+                {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    self.dump_logs();
+                    panic!("{name} did not become healthy in time (polled {url})");
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            if Instant::now() > deadline {
-                dump_logs();
-                panic!("{name} did not become healthy in time (polled {url})");
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
-}
 
-/// Prints the output of `docker compose logs`.
-fn dump_logs() {
-    let logs = compose(&["logs"]);
-    eprintln!(
-        "docker compose logs:\n{}\n{}",
-        String::from_utf8_lossy(&logs.stdout),
-        String::from_utf8_lossy(&logs.stderr),
-    );
-}
-
-/// Tears the stack down once, after every test in the binary has finished.
-///
-/// Rust's built-in test harness ends by calling `std::process::exit`, which
-/// skips normal `Drop`/thread-local destructors, so a plain `static`
-/// guard's `Drop` wouldn't reliably fire here. `dtor` instead hooks the
-/// OS-level process-exit path, which still runs in that case.
-#[dtor::dtor(unsafe)]
-fn teardown_stack() {
-    if STACK.initialized() {
-        let _ = compose(&["down", "-v"]); // Best-effort teardown.
+    /// Prints the output of `docker compose logs`.
+    fn dump_logs(&self) {
+        let logs = compose(&["logs"]);
+        eprintln!(
+            "docker compose logs:\n{}\n{}",
+            String::from_utf8_lossy(&logs.stdout),
+            String::from_utf8_lossy(&logs.stderr),
+        );
     }
 }
 
-/// Builds a Matrix ID localpart that's unique per call, so tests sharing
-/// one long-lived homeserver never collide when registering users.
-pub fn unique_localpart(prefix: &str) -> String {
-    format!("{prefix}-{}", uuid::Uuid::new_v4())
+impl Drop for Stack {
+    fn drop(&mut self) {
+        let _ = compose(&["down", "-v"]); // Tear down the stack.
+    }
 }
 
 // ── Matrix client helpers ────────────────────────────────────────────────────

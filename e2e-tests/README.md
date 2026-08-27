@@ -32,17 +32,15 @@ exercised, too.
  └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-All tests live in a single binary (`tests/e2e.rs`) and share one stack:
-whichever test runs first calls `ensure_stack()`, which runs
-`docker compose up -d --build` and waits for everything to become healthy;
-every other test just waits on that same result. The stack is brought down
-(`docker compose down -v`) once, after every test in the binary has
-finished, regardless of whether Cargo ran them in parallel or serially.
+Each test file is its own binary and calls `Stack::start()` itself, which
+runs `docker compose up -d --build` and brings the whole stack down again
+(`docker compose down -v`) once that test finishes -- there's no sharing or
+caching across tests, so expect each one to take a while.
 
-Because the stack (and its Synapse instances) are shared across tests,
-Matrix ID localparts are generated per-call with `unique_localpart()`
-rather than hardcoded, so tests can register users concurrently without
-colliding.
+Each test file defines exactly one test. Cargo runs tests within a single
+file concurrently, but `Stack::start()` always targets the same fixed ports
+and the same docker-compose project name. So two tests running in parallel
+would collide with each other.
 
 ## Running
 
