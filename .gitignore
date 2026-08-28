@@ -4,3 +4,4 @@ coverage.out
 lk-jwt-service
 lk-jwt-service-healthcheck
 target/
+.DS_Store

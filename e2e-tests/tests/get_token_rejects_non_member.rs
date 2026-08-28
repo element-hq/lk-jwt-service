@@ -4,28 +4,28 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_URL, SYNAPSE_CS_API_URL, Stack, create_and_join_room, register_user,
+    LIVEKIT_A_URL, SYNAPSE_A_CS_API_URL, create_and_join_room, register_user, require_stack,
 };
 
 /// A non-joined user is rejected.
 #[tokio::test]
 async fn get_token_rejects_non_member() {
-    let _stack = Stack::start().await;
+    require_stack();
 
     // Alice creates (and thus joins) a room; Bob never joins it.
-    let alice = register_user(SYNAPSE_CS_API_URL, "alice", "e2e-test-password").await;
-    let room_id = create_and_join_room(SYNAPSE_CS_API_URL, &alice).await;
-    let bob = register_user(SYNAPSE_CS_API_URL, "bob", "e2e-test-password").await;
+    let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &alice).await;
+    let bob = register_user(SYNAPSE_A_CS_API_URL, "bob", "e2e-test-password").await;
 
     let resp = reqwest::Client::new()
         .post(format!(
-            "{SYNAPSE_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+            "{SYNAPSE_A_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
         ))
         .bearer_auth(&bob.access_token)
         .json(&serde_json::json!({
             "room_id": room_id,
             "slot_id": "m.call#ROOM",
-            "url": LIVEKIT_URL,
+            "url": LIVEKIT_A_URL,
             "member": {
                 "id": "e2e-member",
                 "claimed_device_id": "E2EDEVICE",

@@ -18,102 +18,102 @@ x-jwt-service-build: &jwt-service-build
       CARGO_FEATURES: appservice-ping-trigger
 
 services:
-  synapse:
+  synapse-a:
     <<: *synapse-build
-    hostname: homeserver
+    hostname: homeserver-a
     environment:
       - SYNAPSE_CONFIG_PATH=/config/homeserver.yaml
     volumes:
-      - ./homeserver.yaml:/config/homeserver.yaml:ro
-      - ./app-service.yaml:/config/app-service.yaml:ro
-      - ./certs/synapse.e2e.test.crt:/config/tls.crt:ro
-      - ./certs/synapse.e2e.test.key:/config/tls.key:ro
+      - ./homeserver-a.yaml:/config/homeserver.yaml:ro
+      - ./app-service-a.yaml:/config/app-service-a.yaml:ro
+      - ./certs/synapse-a.e2e.test.crt:/config/tls.crt:ro
+      - ./certs/synapse-a.e2e.test.key:/config/tls.key:ro
     ports:
       - "18008:8008"
     networks:
       e2e:
-        # Lets synapse2 resolve and federate with this homeserver by its
+        # Lets synapse-b resolve and federate with this homeserver by its
         # configured server_name, without needing .well-known or SRV setup.
         aliases:
-          - synapse.e2e.test
+          - synapse-a.e2e.test
 
-  synapse2:
+  synapse-b:
     <<: *synapse-build
-    hostname: homeserver2
+    hostname: homeserver-b
     environment:
       - SYNAPSE_CONFIG_PATH=/config/homeserver.yaml
     volumes:
-      - ./homeserver2.yaml:/config/homeserver.yaml:ro
-      - ./app-service2.yaml:/config/app-service2.yaml:ro
-      - ./certs/synapse2.e2e.test.crt:/config/tls.crt:ro
-      - ./certs/synapse2.e2e.test.key:/config/tls.key:ro
+      - ./homeserver-b.yaml:/config/homeserver.yaml:ro
+      - ./app-service-b.yaml:/config/app-service-b.yaml:ro
+      - ./certs/synapse-b.e2e.test.crt:/config/tls.crt:ro
+      - ./certs/synapse-b.e2e.test.key:/config/tls.key:ro
     ports:
       - "18009:8008"
     networks:
       e2e:
         aliases:
-          - synapse2.e2e.test
+          - synapse-b.e2e.test
 
-  livekit:
+  livekit-a:
     image: livekit/livekit-server:latest
-    hostname: livekit
+    hostname: livekit-a
     command: --config /etc/livekit.yaml
     volumes:
-      - ./livekit.yaml:/etc/livekit.yaml:ro
+      - ./livekit-a.yaml:/etc/livekit.yaml:ro
     ports:
-      - "17880:7880"
+      - "17890:7880"
     networks:
       - e2e
 
-  livekit2:
+  livekit-b:
     image: livekit/livekit-server:latest
-    hostname: livekit2
+    hostname: livekit-b
     command: --config /etc/livekit.yaml
     volumes:
-      - ./livekit2.yaml:/etc/livekit.yaml:ro
+      - ./livekit-b.yaml:/etc/livekit.yaml:ro
     ports:
-      - "17881:7880"
+      - "17891:7880"
     networks:
       - e2e
 
-  jwt-service:
+  jwt-service-a:
     <<: *jwt-service-build
-    hostname: jwt-service
+    hostname: jwt-service-a
     environment:
-      - LIVEKIT_URL=ws://livekit:7880
-      - LIVEKIT_KEY=e2e_livekit_key
-      - LIVEKIT_SECRET=e2e_livekit_secret_0123456789ab
-      - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse.e2e.test
-      - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service.yaml
-      - LIVEKIT_HS_SERVER_NAME=synapse.e2e.test
-      - LIVEKIT_CS_API_URL_OVERRIDES=synapse.e2e.test=http://synapse:8008,synapse2.e2e.test=http://synapse2:8008
+      - LIVEKIT_URL=ws://livekit-a:7880
+      - LIVEKIT_KEY=e2e_livekit_key_a
+      - LIVEKIT_SECRET=e2e_livekit_secret_a_0123456789ab
+      - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse-a.e2e.test
+      - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service-a.yaml
+      - LIVEKIT_HS_SERVER_NAME=synapse-a.e2e.test
+      - LIVEKIT_CS_API_URL_OVERRIDES=synapse-a.e2e.test=http://synapse-a:8008,synapse-b.e2e.test=http://synapse-b:8008
     volumes:
-      - ./app-service.yaml:/etc/lk-jwt-service/app-service.yaml:ro
+      - ./app-service-a.yaml:/etc/lk-jwt-service/app-service-a.yaml:ro
     ports:
       - "18080:8080"
     depends_on:
-      - synapse
-      - livekit
+      - synapse-a
+      - livekit-a
     networks:
       - e2e
 
-  jwt-service2:
+  jwt-service-b:
     <<: *jwt-service-build
-    hostname: jwt-service2
+    hostname: jwt-service-b
     environment:
-      - LIVEKIT_URL=ws://livekit2:7880
-      - LIVEKIT_KEY=e2e_livekit_key_2
-      - LIVEKIT_SECRET=e2e_livekit_secret_2_0123456789ab
-      - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse2.e2e.test
-      - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service2.yaml
-      - LIVEKIT_HS_SERVER_NAME=synapse2.e2e.test
-      - LIVEKIT_CS_API_URL_OVERRIDES=synapse2.e2e.test=http://synapse2:8008,synapse.e2e.test=http://synapse:8008
+      - LIVEKIT_URL=ws://livekit-b:7880
+      - LIVEKIT_KEY=e2e_livekit_key_b
+      - LIVEKIT_SECRET=e2e_livekit_secret_b_0123456789ab
+      - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse-b.e2e.test
+      - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service-b.yaml
+      - LIVEKIT_HS_SERVER_NAME=synapse-b.e2e.test
+      - LIVEKIT_CS_API_URL_OVERRIDES=synapse-b.e2e.test=http://synapse-b:8008,synapse-a.e2e.test=http://synapse-a:8008
     volumes:
-      - ./app-service2.yaml:/etc/lk-jwt-service/app-service2.yaml:ro
+      - ./app-service-b.yaml:/etc/lk-jwt-service/app-service-b.yaml:ro
     ports:
       - "18081:8080"
     depends_on:
-      - synapse2
-      - livekit2
+      - synapse-b
+      - livekit-b
     networks:
       - e2e

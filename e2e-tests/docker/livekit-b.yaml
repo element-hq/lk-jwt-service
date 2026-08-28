@@ -5,12 +5,12 @@ rtc:
   port_range_end: 50100
   use_external_ip: false
 keys:
-  e2e_livekit_key: e2e_livekit_secret_0123456789ab
+  e2e_livekit_key_b: e2e_livekit_secret_b_0123456789ab
 room:
   auto_create: false
 logging:
   level: info
 webhook:
-  api_key: e2e_livekit_key
+  api_key: e2e_livekit_key_b
   urls:
-    - http://jwt-service:8080/sfu_webhook
+    - http://jwt-service-b:8080/sfu_webhook

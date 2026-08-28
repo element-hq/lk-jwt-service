@@ -6,8 +6,8 @@
 use std::time::{Duration, Instant};
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_SFU_ADDR, LIVEKIT_URL, LiveKitParticipant, SYNAPSE_CS_API_URL, Stack,
-    create_and_join_room, get_livekit_token, register_user,
+    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LiveKitParticipant, SYNAPSE_A_CS_API_URL,
+    create_and_join_room, get_livekit_token, register_user, require_stack,
 };
 
 /// Schedules a delayed `m.room.message` in `room_id` (MSC4140) and returns
@@ -127,11 +127,11 @@ async fn wait_for_message(
 /// once that endpoint is available here.
 #[tokio::test]
 async fn delegate_delayed_leave_cs_succeeds() {
-    let _stack = Stack::start().await;
+    require_stack();
 
     // Register a user and have them create (and thus join) a room.
-    let user = register_user(SYNAPSE_CS_API_URL, "alice", "e2e-test-password").await;
-    let room_id = create_and_join_room(SYNAPSE_CS_API_URL, &user).await;
+    let user = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &user).await;
 
     // Short enough to keep the test fast, but long enough that the service's
     // restarts (every ~80% of the delay) have clearly landed at least twice
@@ -147,7 +147,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // Schedule the delayed event the client will hand over, plus an identical
     // one it keeps to itself as a control.
     let delay_id = schedule_delayed_message(
-        SYNAPSE_CS_API_URL,
+        SYNAPSE_A_CS_API_URL,
         &user.access_token,
         &room_id,
         "e2e-delayed-leave-txn",
@@ -156,7 +156,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     )
     .await;
     schedule_delayed_message(
-        SYNAPSE_CS_API_URL,
+        SYNAPSE_A_CS_API_URL,
         &user.access_token,
         &room_id,
         "e2e-delayed-leave-control-txn",
@@ -169,23 +169,23 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // token is issued for the same member fields, so it carries the LiveKit
     // identity the service will watch.
     let jwt = get_livekit_token(
-        SYNAPSE_CS_API_URL,
+        SYNAPSE_A_CS_API_URL,
         &user,
-        LIVEKIT_URL,
+        LIVEKIT_A_URL,
         &room_id,
         SLOT_ID,
         MEMBER_ID,
         DEVICE_ID,
     )
     .await;
-    let participant = LiveKitParticipant::connect(LIVEKIT_SFU_ADDR, &jwt).await;
+    let participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &jwt).await;
 
     // Delegate the delayed event's lifecycle to the service, through
     // Synapse's C-S API. Synapse proxies the request to its lk-jwt-service
     // running as an application service.
     let resp = reqwest::Client::new()
         .post(format!(
-            "{SYNAPSE_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave"
+            "{SYNAPSE_A_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave"
         ))
         .bearer_auth(&user.access_token)
         .json(&serde_json::json!({
@@ -225,7 +225,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // help — waiting for it to fire is the reference point for how long
     // DELAY_MS actually takes on this homeserver.
     wait_for_message(
-        SYNAPSE_CS_API_URL,
+        SYNAPSE_A_CS_API_URL,
         &user.access_token,
         &room_id,
         CONTROL_MESSAGE_BODY,
@@ -247,7 +247,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // disconnect — not elapsed time — can trigger it.
     assert!(
         !has_message(
-            SYNAPSE_CS_API_URL,
+            SYNAPSE_A_CS_API_URL,
             &user.access_token,
             &room_id,
             MESSAGE_BODY
@@ -266,7 +266,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     participant.disconnect().await;
 
     wait_for_message(
-        SYNAPSE_CS_API_URL,
+        SYNAPSE_A_CS_API_URL,
         &user.access_token,
         &room_id,
         MESSAGE_BODY,

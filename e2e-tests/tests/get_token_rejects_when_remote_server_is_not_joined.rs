@@ -4,31 +4,31 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_URL, SYNAPSE_SERVER_NAME, SYNAPSE2_CS_API_URL, Stack, create_and_join_room,
-    register_user,
+    LIVEKIT_A_URL, SYNAPSE_A_SERVER_NAME, SYNAPSE_B_CS_API_URL, create_and_join_room,
+    register_user, require_stack,
 };
 
 /// A joined user is rejected if the remote server isn't joined.
 #[tokio::test]
 async fn get_token_rejects_when_remote_server_is_not_joined() {
-    let _stack = Stack::start().await;
+    require_stack();
 
-    // Bob creates (and thus joins) a room on hs2. hs1 never joins it.
-    let bob = register_user(SYNAPSE2_CS_API_URL, "bob", "e2e-test-password").await;
-    let room_id = create_and_join_room(SYNAPSE2_CS_API_URL, &bob).await;
+    // Bob creates (and thus joins) a room on hs B. hs A never joins it.
+    let bob = register_user(SYNAPSE_B_CS_API_URL, "bob", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_B_CS_API_URL, &bob).await;
 
-    // Bob requests a token naming hs1 as the SFU-hosting homeserver, even
-    // though hs1 has never seen this room.
+    // Bob requests a token naming hs A as the SFU-hosting homeserver, even
+    // though hs A has never seen this room.
     let resp = reqwest::Client::new()
         .post(format!(
-            "{SYNAPSE2_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+            "{SYNAPSE_B_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
         ))
         .bearer_auth(&bob.access_token)
         .json(&serde_json::json!({
-            "server_name": SYNAPSE_SERVER_NAME,
+            "server_name": SYNAPSE_A_SERVER_NAME,
             "room_id": room_id,
             "slot_id": "m.call#ROOM",
-            "url": LIVEKIT_URL,
+            "url": LIVEKIT_A_URL,
             "member": {
                 "id": "e2e-member",
                 "claimed_device_id": "E2EDEVICE",
