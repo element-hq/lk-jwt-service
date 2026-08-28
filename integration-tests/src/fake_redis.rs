@@ -120,8 +120,8 @@ fn dispatch(
             let mut state = state.lock().unwrap();
             let hash = state.entry(args[1].clone()).or_default();
             let mut added = 0;
-            for pair in args[2..].chunks_exact(2) {
-                if hash.insert(pair[0].clone(), pair[1].clone()).is_none() {
+            for [field, value] in args[2..].as_chunks::<2>().0 {
+                if hash.insert(field.clone(), value.clone()).is_none() {
                     added += 1;
                 }
             }

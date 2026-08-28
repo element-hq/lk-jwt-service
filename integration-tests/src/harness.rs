@@ -16,6 +16,10 @@ use std::time::{Duration, Instant};
 pub const LIVEKIT_KEY: &str = "devkey";
 pub const LIVEKIT_SECRET: &str = "devsecret";
 
+/// The LIVEKIT_URL the harness defaults to when a test doesn't start a
+/// FakeSfu and pass its URL via ServiceConfig::livekit_url.
+pub const DEFAULT_LK_URL: &str = "ws://127.0.0.1:9";
+
 static BINARY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 /// Build the service from the repository root and return the path
@@ -84,7 +88,7 @@ impl Service {
 
         let livekit_url = cfg.livekit_url.unwrap_or_else(|| {
             // Nothing listens here for now.
-            "ws://127.0.0.1:9".to_owned()
+            DEFAULT_LK_URL.to_owned()
         });
 
         let mut env: HashMap<String, String> = HashMap::from([

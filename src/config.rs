@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use rust_yaml::{Value, Yaml};
 use tracing::{info, warn};
 
 use crate::helper::CsApiUrl;
@@ -30,6 +31,31 @@ pub struct Config {
     pub cs_api_url_overrides: HashMap<String, CsApiUrl>,
     /// Connection URL for the Redis store.
     pub redis_url: String,
+    /// Tokens used for authenticating requests to and from the homeserver.
+    pub app_service_config: AppServiceConfig,
+}
+
+/// Configuration options used for running as an application service.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AppServiceConfig {
+    /// A secret token that will be used to authenticate requests to the homeserver.
+    pub as_token: String,
+    /// A secret token that the homeserver will use to authenticate requests to this service.
+    pub hs_token: String,
+    /// The associated homeserver's server_name.
+    pub hs_server_name: String,
+}
+
+impl AppServiceConfig {
+    /// Whether the config is fully empty.
+    pub fn is_empty(&self) -> bool {
+        self.as_token.is_empty() && self.hs_token.is_empty() && self.hs_server_name.is_empty()
+    }
+
+    /// Whether the config has been set up or is (partially) empty.
+    pub fn is_set_up(&self) -> bool {
+        !self.as_token.is_empty() && !self.hs_token.is_empty() && !self.hs_server_name.is_empty()
+    }
 }
 
 fn env_var(name: &str) -> String {
@@ -78,6 +104,72 @@ pub fn read_key_secret() -> Result<(String, String), String> {
         key.trim_matches(trim_chars).to_owned(),
         secret.trim_matches(trim_chars).to_owned(),
     ))
+}
+
+/// Read the application service configuration from environment variables.
+pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
+    let hs_server_name = env_var("LIVEKIT_HS_SERVER_NAME");
+    let path = env_var("LIVEKIT_AS_REGISTRATION_FILE");
+
+    let config = if !path.is_empty() {
+        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let yaml = Yaml::new();
+        let parsed = yaml.load_str(&content).map_err(|e| e.to_string())?;
+        if parsed.as_mapping().is_none() {
+            return Err(
+                "Could not parse app service registration file: invalid root element".into(),
+            );
+        }
+        let as_token = read_app_service_registration_field(&parsed, "as_token")?;
+        let hs_token = read_app_service_registration_field(&parsed, "hs_token")?;
+        info!(
+            path,
+            "Using application service configuration from LIVEKIT_AS_REGISTRATION_FILE"
+        );
+        AppServiceConfig {
+            as_token,
+            hs_token,
+            hs_server_name,
+        }
+    } else {
+        let as_token = env_var("LIVEKIT_AS_TOKEN").trim().to_owned();
+        let hs_token = env_var("LIVEKIT_HS_TOKEN").trim().to_owned();
+        info!("Using application service configuration from LIVEKIT_AS_TOKEN and LIVEKIT_HS_TOKEN");
+        AppServiceConfig {
+            as_token,
+            hs_token,
+            hs_server_name,
+        }
+    };
+
+    if !config.is_empty() && !config.is_set_up() {
+        return Err(
+            "The app service token(s) (LIVEKIT_AS_TOKEN/LIVEKIT_HS_TOKEN or \
+             LIVEKIT_AS_REGISTRATION_FILE) and LIVEKIT_HS_SERVER_NAME must either all be set or \
+             all be left empty"
+                .into(),
+        );
+    }
+
+    Ok(config)
+}
+
+/// Reads a required, trimmed string field from a parsed app service
+/// registration file.
+fn read_app_service_registration_field(parsed: &Value, field: &str) -> Result<String, String> {
+    Ok(parsed
+        .get_str(field)
+        .ok_or_else(|| {
+            format!("Could not parse app service registration file: no {field} property")
+        })?
+        .as_str()
+        .ok_or_else(|| {
+            format!(
+                "Could not parse app service registration file: invalid value for {field} property"
+            )
+        })?
+        .trim()
+        .to_owned())
 }
 
 pub fn read_cs_api_url_overrides(raw: &str) -> Result<HashMap<String, CsApiUrl>, String> {
@@ -159,6 +251,8 @@ pub fn parse_config() -> Result<Config, String> {
     let cs_api_url_overrides = read_cs_api_url_overrides(&env_var("LIVEKIT_CS_API_URL_OVERRIDES"))
         .map_err(|e| format!("failed parsing LIVEKIT_CS_API_URL_OVERRIDES: {e}"))?;
 
+    let app_service_config = read_app_service_config()?;
+
     Ok(Config {
         key,
         secret,
@@ -173,6 +267,7 @@ pub fn parse_config() -> Result<Config, String> {
         sanity_check_interval,
         cs_api_url_overrides,
         redis_url: env_var("LIVEKIT_REDIS_URL"),
+        app_service_config,
     })
 }
 
@@ -185,8 +280,6 @@ pub fn bind_addresses(lk_jwt_bind: &str) -> Vec<String> {
         None => vec![lk_jwt_bind.to_owned()],
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -277,6 +370,180 @@ mod tests {
     }
 
     #[test]
+    fn test_read_app_service_config() {
+        struct Case {
+            name: &'static str,
+            registration_file_content: Option<&'static str>,
+            extra_env: Vec<(&'static str, &'static str)>,
+            expected: Option<AppServiceConfig>,
+        }
+        let cases = [
+            Case {
+                name: "Empty if no env",
+                registration_file_content: None,
+                extra_env: vec![],
+                expected: Some(AppServiceConfig::default()),
+            },
+            Case {
+                name: "Read from env",
+                registration_file_content: None,
+                extra_env: vec![
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
+                ],
+                expected: Some(AppServiceConfig {
+                    as_token: "as_token_env_pheethiewixohp9eecheeGh".into(),
+                    hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".into(),
+                    hs_server_name: "example.com".to_owned(),
+                }),
+            },
+            Case {
+                name: "Read from registration file",
+                registration_file_content: Some(
+                    "as_token: as_token_yaml_iethuB2LeLiNuishiaKe\nhs_token: hs_token_yaml_xefaingo4oos6ohla9ph\n",
+                ),
+                extra_env: vec![("LIVEKIT_HS_SERVER_NAME", "example.com")],
+                expected: Some(AppServiceConfig {
+                    as_token: "as_token_yaml_iethuB2LeLiNuishiaKe".into(),
+                    hs_token: "hs_token_yaml_xefaingo4oos6ohla9ph".into(),
+                    hs_server_name: "example.com".to_owned(),
+                }),
+            },
+            Case {
+                name: "Registration file takes precedence over env vars",
+                registration_file_content: Some(
+                    "as_token: as_token_yaml_iethuB2LeLiNuishiaKe\nhs_token: hs_token_yaml_xefaingo4oos6ohla9ph\n",
+                ),
+                extra_env: vec![
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_ignored"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ignored"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
+                ],
+                expected: Some(AppServiceConfig {
+                    as_token: "as_token_yaml_iethuB2LeLiNuishiaKe".into(),
+                    hs_token: "hs_token_yaml_xefaingo4oos6ohla9ph".into(),
+                    hs_server_name: "example.com".to_owned(),
+                }),
+            },
+            Case {
+                name: "Registration file tokens without hs_server_name is rejected",
+                registration_file_content: Some(
+                    "as_token: as_token_yaml_iethuB2LeLiNuishiaKe\nhs_token: hs_token_yaml_xefaingo4oos6ohla9ph\n",
+                ),
+                extra_env: vec![],
+                expected: None,
+            },
+            Case {
+                name: "Only LIVEKIT_AS_TOKEN set is rejected",
+                registration_file_content: None,
+                extra_env: vec![("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh")],
+                expected: None,
+            },
+            Case {
+                name: "Only LIVEKIT_HS_TOKEN set is rejected",
+                registration_file_content: None,
+                extra_env: vec![("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg")],
+                expected: None,
+            },
+            Case {
+                name: "Only LIVEKIT_HS_SERVER_NAME set is rejected",
+                registration_file_content: None,
+                extra_env: vec![("LIVEKIT_HS_SERVER_NAME", "example.com")],
+                expected: None,
+            },
+            Case {
+                name: "AS/HS tokens without LIVEKIT_HS_SERVER_NAME is rejected",
+                registration_file_content: None,
+                extra_env: vec![
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                ],
+                expected: None,
+            },
+            Case {
+                name: "Registration file does not exist",
+                registration_file_content: None,
+                extra_env: vec![(
+                    "LIVEKIT_AS_REGISTRATION_FILE",
+                    "./tests/does_not_exist_as_app-service.yaml",
+                )],
+                expected: None,
+            },
+            Case {
+                name: "Registration file invalid yaml",
+                registration_file_content: Some("as_token: [unterminated\n"),
+                extra_env: vec![],
+                expected: None,
+            },
+            Case {
+                name: "Registration file root not a mapping",
+                registration_file_content: Some("- as_token\n- hs_token\n"),
+                extra_env: vec![],
+                expected: None,
+            },
+            Case {
+                name: "Registration file missing as_token",
+                registration_file_content: Some("hs_token: hs_token_value\n"),
+                extra_env: vec![],
+                expected: None,
+            },
+            Case {
+                name: "Registration file missing hs_token",
+                registration_file_content: Some("as_token: as_token_value\n"),
+                extra_env: vec![],
+                expected: None,
+            },
+            Case {
+                name: "Registration file as_token wrong type",
+                registration_file_content: Some("as_token: [1, 2, 3]\nhs_token: hs_token_value\n"),
+                extra_env: vec![],
+                expected: None,
+            },
+            Case {
+                name: "Registration file hs_token wrong type",
+                registration_file_content: Some("as_token: as_token_value\nhs_token: [1, 2, 3]\n"),
+                extra_env: vec![],
+                expected: None,
+            },
+        ];
+
+        for (i, tc) in cases.iter().enumerate() {
+            let temp_path = tc.registration_file_content.map(|content| {
+                let path = std::env::temp_dir()
+                    .join(format!("lk_jwt_service_test_as_registration_{i}.yaml"));
+                std::fs::write(&path, content).expect("failed to write temp registration file");
+                path
+            });
+            let temp_path_str = temp_path.as_ref().map(|p| p.to_str().unwrap().to_owned());
+
+            let mut vars: Vec<(&str, Option<&str>)> =
+                tc.extra_env.iter().map(|(k, v)| (*k, Some(*v))).collect();
+            if let Some(path_str) = &temp_path_str {
+                vars.push(("LIVEKIT_AS_REGISTRATION_FILE", Some(path_str.as_str())));
+            }
+
+            temp_env::with_vars(vars, || {
+                let got = read_app_service_config();
+                if let Some(expected) = &tc.expected {
+                    assert_eq!(
+                        got.as_ref(),
+                        Ok(expected),
+                        "{}: as_tokens mismatch",
+                        tc.name
+                    );
+                } else {
+                    assert!(got.is_err());
+                }
+            });
+
+            if let Some(path) = temp_path {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    #[test]
     fn test_read_cs_api_url_overrides() {
         struct Case {
             name: &'static str,
@@ -285,7 +552,12 @@ mod tests {
             expected_err: bool,
         }
         let cases = [
-            Case { name: "Empty", env: "", expected_map: Some(vec![]), expected_err: false },
+            Case {
+                name: "Empty",
+                env: "",
+                expected_map: Some(vec![]),
+                expected_err: false,
+            },
             Case {
                 name: "DNS name",
                 env: "example.com=https://matrix-client.example.com",
@@ -428,6 +700,7 @@ mod tests {
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
+                    app_service_config: Default::default(),
                 }),
                 want_err_msg: "",
             },
@@ -439,13 +712,19 @@ mod tests {
                     ("LIVEKIT_URL", "wss://test.livekit.cloud"),
                     ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "example.com, test.com"),
                     ("LIVEKIT_JWT_BIND", ":9090"),
-                    ("LIVEKIT_INSECURE_SKIP_VERIFY_TLS", "YES_I_KNOW_WHAT_I_AM_DOING"),
+                    (
+                        "LIVEKIT_INSECURE_SKIP_VERIFY_TLS",
+                        "YES_I_KNOW_WHAT_I_AM_DOING",
+                    ),
                     ("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS", "30"),
                     (
                         "LIVEKIT_CS_API_URL_OVERRIDES",
                         "matrix.com=https://matrix-client.matrix.com",
                     ),
                     ("LIVEKIT_REDIS_URL", "localhost:6379"),
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
                 ],
                 want_config: Some(Config {
                     key: "test_key".into(),
@@ -460,6 +739,11 @@ mod tests {
                         CsApiUrl("https://matrix-client.matrix.com".into()),
                     )]),
                     redis_url: "localhost:6379".into(),
+                    app_service_config: AppServiceConfig {
+                        as_token: "as_token_env_pheethiewixohp9eecheeGh".to_owned(),
+                        hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".to_owned(),
+                        hs_server_name: "example.com".to_owned(),
+                    },
                 }),
                 want_err_msg: "",
             },
@@ -482,6 +766,7 @@ mod tests {
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
+                    app_service_config: Default::default(),
                 }),
                 want_err_msg: "",
             },
@@ -515,6 +800,21 @@ mod tests {
                 want_err_msg: "LIVEKIT_JWT_BIND and LIVEKIT_JWT_PORT must not be set together",
             },
             Case {
+                name: "App service tokens without hs_server_name rejected",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                ],
+                want_config: None,
+                want_err_msg: "The app service token(s) (LIVEKIT_AS_TOKEN/LIVEKIT_HS_TOKEN or \
+                    LIVEKIT_AS_REGISTRATION_FILE) and LIVEKIT_HS_SERVER_NAME must either all be \
+                    set or all be left empty",
+            },
+            Case {
                 name: "Sanity check interval invalid",
                 env: vec![
                     ("LIVEKIT_KEY", "test_key"),
@@ -545,6 +845,7 @@ mod tests {
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
+                    app_service_config: Default::default(),
                 }),
                 want_err_msg: "",
             },

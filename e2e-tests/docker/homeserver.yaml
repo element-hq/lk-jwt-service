@@ -1,0 +1,64 @@
+server_name: "synapse.e2e.test"
+public_baseurl: http://synapse.e2e.test/
+
+pid_file: /tmp/homeserver.pid
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    # Some Docker setups disable IPv6 on the container's network interface,
+    # which otherwise leaves the default dual-stack bind reachable only via
+    # loopback.
+    bind_addresses: ["0.0.0.0"]
+    resources:
+      - names: [client]
+        compress: false
+  - port: 8448
+    tls: true
+    type: http
+    # Some Docker setups disable IPv6 on the container's network interface,
+    # which otherwise leaves the default dual-stack bind reachable only via
+    # loopback.
+    bind_addresses: ["0.0.0.0"]
+    resources:
+      - names: [federation]
+        compress: false
+
+tls_certificate_path: "/config/tls.crt"
+tls_private_key_path: "/config/tls.key"
+# The federation TLS certs are self-signed dev certs.
+federation_verify_certificates: false
+# No need for a notary. The two homeservers fetch each other's signing keys
+# directly.
+trusted_key_servers: []
+# Synapse's default deny-list covers RFC1918 space, which is exactly where
+# Docker's bridge network lives; the e2e network is fully isolated, so
+# there's nothing to protect against here.
+ip_range_blacklist: []
+
+database:
+  name: sqlite3
+  args:
+    database: /tmp/homeserver.db
+
+media_store_path: /tmp
+signing_key_path: "/tmp/homeserver.signing.key"
+
+report_stats: false
+
+max_event_delay_duration: 1h
+
+app_service_config_files:
+  - /config/app-service.yaml
+
+# Enable registration so that the test suite can provision its own users.
+enable_registration: true
+enable_registration_without_verification: true
+
+experimental_features:
+  # Enable membership look-up via /is_joined.
+  msc4502_enabled: true
+  # Enable C-S & S-S request proxying for application services.
+  msc4512_enabled: true

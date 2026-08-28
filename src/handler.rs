@@ -10,29 +10,38 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "appservice-ping-trigger")]
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::{Json, Router};
 use chrono::Utc;
-use http::{header, HeaderValue, Method, StatusCode};
+use http::{HeaderValue, Method, StatusCode, header};
 use livekit_api::access_token::{AccessToken, TokenVerifier, VideoGrants};
 use livekit_api::webhooks::WebhookReceiver;
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::config::AppServiceConfig;
 use crate::delayed_event_manager::{
-    start_participant_lookup, DelayedEventJob, DelayedEventJobParams, DelayedEventSignal, JobKey,
-    JobRestartedRequest, LookupCsApiUrlFn, SfuMessage,
+    AppServiceIdentity, DelayedEventJob, DelayedEventJobParams, DelayedEventSignal, JobKey,
+    JobRestartedRequest, LookupCsApiUrlFn, SfuMessage, start_participant_lookup,
 };
+#[cfg(feature = "appservice-ping-trigger")]
+use crate::helper::new_unique_id;
 use crate::helper::{
-    livekit_identity_for, livekit_room_alias_for, CsApiUrl, CsApiUrlCache, Deps, LiveKitAuth,
-    LiveKitIdentity, LiveKitRoomAlias, UniqueId,
+    CsApiUrl, CsApiUrlCache, Deps, GET_TOKEN_SS_PATH, LiveKitAuth, LiveKitIdentity,
+    LiveKitRoomAlias, UniqueId, livekit_identity_for, livekit_room_alias_for, matrix_server_name,
 };
+#[cfg(feature = "appservice-ping-trigger")]
+use crate::requests::AppservicePingTriggerRequest;
 use crate::requests::{
-    DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse, LegacySfuRequest, MatrixErrorBody,
-    MatrixErrorResponse, OpenIdTokenType, SfuRequest, SfuResponse,
+    DelegateDelayedLeaveCsRequest, DelegateDelayedLeaveRequest, DelegateDelayedLeaveResponse,
+    GetTokenCsRequest, GetTokenCsResponse, GetTokenSsRequest, GetTokenSsResponse, LegacySfuRequest,
+    MatrixErrorBody, MatrixErrorResponse, OpenIdTokenType, SfuRequest, SfuResponse,
 };
 use crate::store::{Store, StoredJob};
 
@@ -62,6 +71,27 @@ pub fn get_join_token(
 }
 
 // ── Handler ──────────────────────────────────────────────────────────────────
+
+/// The header the homeserver sets to the pre-authenticated MXID of
+/// the requesting user.
+const USER_ID_HEADER: &str = "X-Matrix-User-Identifier";
+
+/// The header the homeserver sets to the pre-authenticated server name of
+/// the origin of a proxied federation request.
+const ORIGIN_HEADER: &str = "X-Matrix-Origin";
+
+/// Returns 401 M_UNAUTHORIZED with `err` if `header` (e.g. the caller's mxid
+/// or origin server name) is empty.
+fn require_non_empty_header(header: &str, err: &str) -> Result<(), MatrixErrorResponse> {
+    if header.is_empty() {
+        return Err(MatrixErrorResponse {
+            status: 401,
+            errcode: "M_UNAUTHORIZED".into(),
+            err: err.into(),
+        });
+    }
+    Ok(())
+}
 
 /// A request to add a delayed-event job.
 pub(crate) struct AddJobRequest {
@@ -124,6 +154,8 @@ pub struct Handler {
     cancel: CancellationToken,
     pub(crate) livekit_auth: LiveKitAuth,
     full_access_homeservers: Vec<String>,
+    /// Configuration options used for running as an application service.
+    app_service_config: AppServiceConfig,
     /// The period between room-worker sanity checks. Zero disables the sanity
     /// check.
     sanity_check_interval: Duration,
@@ -146,6 +178,7 @@ impl Handler {
     pub fn new(
         lk_auth: LiveKitAuth,
         full_access_homeservers: Vec<String>,
+        app_service_config: AppServiceConfig,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
@@ -154,6 +187,7 @@ impl Handler {
         let (handler, receivers) = Self::new_without_loop(
             lk_auth,
             full_access_homeservers,
+            app_service_config,
             sanity_check_interval,
             cs_api_url_overrides,
             store,
@@ -169,6 +203,7 @@ impl Handler {
     pub(crate) fn new_without_loop(
         lk_auth: LiveKitAuth,
         full_access_homeservers: Vec<String>,
+        app_service_config: AppServiceConfig,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
@@ -185,6 +220,7 @@ impl Handler {
             cancel: CancellationToken::new(),
             livekit_auth: lk_auth,
             full_access_homeservers,
+            app_service_config,
             sanity_check_interval,
             cs_api_url_overrides: Arc::new(cs_api_url_overrides),
             cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
@@ -247,6 +283,7 @@ impl Handler {
             self.make_lookup(),
             self.job_done_tx.clone(),
             self.job_restarted_tx.clone(),
+            self.app_service_config.as_token.clone(),
         )
     }
 
@@ -294,10 +331,10 @@ impl Handler {
         // Enqueues block only when the writer is 256 operations behind,
         // providing backpressure instead of unbounded queueing.
         let enqueue_store_op = |op: StoreOp| async {
-            if let Some(tx) = &store_tx {
-                if tx.send(op).await.is_err() {
-                    error!("Handler: store writer is gone, dropping store operation");
-                }
+            if let Some(tx) = &store_tx
+                && tx.send(op).await.is_err()
+            {
+                error!("Handler: store writer is gone, dropping store operation");
             }
         };
 
@@ -658,6 +695,126 @@ impl Handler {
         Ok(user_info.sub)
     }
 
+    /// Resolves the Client-Server API URL for `server_name`, mapping any
+    /// resolution failure onto the standard "unable to resolve" 400.
+    async fn resolve_cs_api_url_or_bad_request(
+        &self,
+        server_name: &str,
+    ) -> Result<CsApiUrl, MatrixErrorResponse> {
+        self.deps
+            .resolve_cs_api_url(
+                server_name,
+                &self.cs_api_url_overrides,
+                Some(&self.cs_api_url_cache),
+            )
+            .await
+            .map_err(|_| MatrixErrorResponse {
+                status: 400,
+                errcode: "M_BAD_JSON".into(),
+                err: "Unable to resolve client-server API".into(),
+            })
+    }
+
+    /// Looks up the delay of `delay_id` on the homeserver, for delegation
+    /// requests that do not carry one.
+    async fn look_up_delay_timeout(
+        &self,
+        cs_api_url: &CsApiUrl,
+        delay_id: &str,
+        owner_user_id: &str,
+    ) -> Result<Duration, MatrixErrorResponse> {
+        self.deps
+            .get_delayed_event_delay(
+                cs_api_url,
+                delay_id,
+                AppServiceIdentity {
+                    as_token: &self.app_service_config.as_token,
+                    user_id: owner_user_id,
+                },
+            )
+            .await
+            .map_err(|err| {
+                warn!(delay_id = %delay_id, matrix_id = %owner_user_id, err = %err,
+                    "Handler: could not look up the delay of the delayed event");
+                if err.is_delayed_event_not_found() {
+                    MatrixErrorResponse {
+                        status: 404,
+                        errcode: "M_NOT_FOUND".into(),
+                        err: "Unknown `delay_id`".into(),
+                    }
+                } else {
+                    MatrixErrorResponse {
+                        status: 503,
+                        errcode: "M_UNKNOWN".into(),
+                        err: "Unable to look up the delayed event".into(),
+                    }
+                }
+            })
+    }
+
+    /// Mints a LiveKit join token for `(lk_room_alias, lk_identity)`, mapping
+    /// any failure onto the standard 500. `matrix_id` identifies the
+    /// requester in the error log.
+    fn get_join_token_or_internal_error(
+        &self,
+        lk_room_alias: &LiveKitRoomAlias,
+        lk_identity: &LiveKitIdentity,
+        matrix_id: &str,
+    ) -> Result<String, MatrixErrorResponse> {
+        get_join_token(
+            &self.livekit_auth.key,
+            &self.livekit_auth.secret,
+            lk_room_alias,
+            lk_identity,
+        )
+        .map_err(|err| {
+            error!(matrix_id, err = %err, "Handler: error getting LiveKit token");
+            MatrixErrorResponse {
+                status: 500,
+                errcode: "M_UNKNOWN".into(),
+                err: "Internal Server Error".into(),
+            }
+        })
+    }
+
+    /// Creates the LiveKit room for `(lk_room_alias, lk_identity)`, mapping
+    /// any failure onto the standard 500.
+    async fn create_livekit_room_or_internal_error(
+        &self,
+        lk_room_alias: &LiveKitRoomAlias,
+        matrix_id: &str,
+        lk_identity: &LiveKitIdentity,
+    ) -> Result<(), MatrixErrorResponse> {
+        self.deps
+            .create_livekit_room(&self.livekit_auth, lk_room_alias, matrix_id, lk_identity)
+            .await
+            .map_err(|_| MatrixErrorResponse {
+                status: 500,
+                errcode: "M_UNKNOWN".into(),
+                err: "Unable to create room on SFU".into(),
+            })
+    }
+
+    /// Returns 400 M_INVALID_PARAM if `url` doesn't match this service's
+    /// configured LiveKit URL. `endpoint` identifies the call site in the
+    /// warning log.
+    fn require_matching_lk_url(
+        &self,
+        url: &str,
+        endpoint: &str,
+    ) -> Result<(), MatrixErrorResponse> {
+        if url != self.livekit_auth.lk_url {
+            warn!(endpoint, request_url = url, configured_url = %self.livekit_auth.lk_url,
+                "Handler: request `url` does not match the configured LiveKit URL");
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_INVALID_PARAM".into(),
+                err: "The request `url` does not match this service's LiveKit URL".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Deprecated: serves the pre-Matrix-2.0 /sfu/get endpoint. Remove once
     /// all in-the-wild clients have migrated to /get_token.
     pub(crate) async fn process_legacy_sfu_request(
@@ -685,59 +842,22 @@ impl Handler {
         let slot_id = "m.call#ROOM";
         let lk_room_alias = livekit_room_alias_for(&req.room, slot_id);
 
-        let token = get_join_token(
-            &self.livekit_auth.key,
-            &self.livekit_auth.secret,
-            &lk_room_alias,
-            &lk_identity,
-        )
-        .map_err(|_| MatrixErrorResponse {
-            status: 500,
-            errcode: "M_UNKNOWN".into(),
-            err: "Internal Server Error".into(),
-        })?;
+        let token =
+            self.get_join_token_or_internal_error(&lk_room_alias, &lk_identity, &matrix_id)?;
 
         if is_full_access_user {
             // If delegation is requested, verify that we can resolve the
             // Client-Server API and fail the request otherwise. We do this
             // before creating the LiveKit room so that we don't produce
             // lingering rooms in the error case.
-            //
-            // TODO: This code is currently duplicated across the token
-            // endpoints and the delegation endpoint. This will be resolved
-            // once the already deprecated delay parameters are removed from
-            // the token endpoints.
-            if delayed_event_delegation_requested
-                && self
-                    .deps
-                    .resolve_cs_api_url(
-                        &req.openid_token.matrix_server_name,
-                        &self.cs_api_url_overrides,
-                        Some(&self.cs_api_url_cache),
-                    )
-                    .await
-                    .is_err()
-            {
-                return Err(MatrixErrorResponse {
-                    status: 400,
-                    errcode: "M_BAD_JSON".into(),
-                    err: "Unable to resolve client-server API".into(),
-                });
+            if delayed_event_delegation_requested {
+                self.resolve_cs_api_url_or_bad_request(&req.openid_token.matrix_server_name)
+                    .await?;
             }
 
             // Now create the LiveKit room.
-            if self
-                .deps
-                .create_livekit_room(&self.livekit_auth, &lk_room_alias, &matrix_id, &lk_identity)
-                .await
-                .is_err()
-            {
-                return Err(MatrixErrorResponse {
-                    status: 500,
-                    errcode: "M_UNKNOWN".into(),
-                    err: "Unable to create room on SFU".into(),
-                });
-            }
+            self.create_livekit_room_or_internal_error(&lk_room_alias, &matrix_id, &lk_identity)
+                .await?;
 
             if delayed_event_delegation_requested {
                 info!(room = %lk_room_alias, lk_id = %lk_identity, delay_id = %req.delay_id,
@@ -749,6 +869,7 @@ impl Handler {
                     delay_timeout: Duration::from_millis(req.delay_timeout.max(0) as u64),
                     livekit_room: lk_room_alias.clone(),
                     livekit_identity: lk_identity.clone(),
+                    owner_user_id: String::new(), // Unset because the user ID is only used for identity assertion when running as an application service.
                 })
                 .await
                 .map_err(matrix_error_for_add_job)?;
@@ -793,62 +914,22 @@ impl Handler {
             livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
-        let token = get_join_token(
-            &self.livekit_auth.key,
-            &self.livekit_auth.secret,
-            &lk_room_alias,
-            &lk_identity,
-        )
-        .map_err(|err| {
-            error!(matrix_id = %matrix_id, err = %err, "Handler: error getting LiveKit token");
-            MatrixErrorResponse {
-                status: 500,
-                errcode: "M_UNKNOWN".into(),
-                err: "Internal Server Error".into(),
-            }
-        })?;
+        let token =
+            self.get_join_token_or_internal_error(&lk_room_alias, &lk_identity, &matrix_id)?;
 
         if is_full_access_user {
             // If delegation is requested, verify that we can resolve the
             // Client-Server API and fail the request otherwise. We do this
             // before creating the LiveKit room so that we don't produce
             // lingering rooms in the error case.
-            //
-            // TODO: This code is currently duplicated across the token
-            // endpoints and the delegation endpoint. This will be resolved
-            // once the already deprecated delay parameters are removed from
-            // the token endpoints.
-            if delayed_event_delegation_requested
-                && self
-                    .deps
-                    .resolve_cs_api_url(
-                        &req.openid_token.matrix_server_name,
-                        &self.cs_api_url_overrides,
-                        Some(&self.cs_api_url_cache),
-                    )
-                    .await
-                    .is_err()
-            {
-                return Err(MatrixErrorResponse {
-                    status: 400,
-                    errcode: "M_BAD_JSON".into(),
-                    err: "Unable to resolve client-server API".into(),
-                });
+            if delayed_event_delegation_requested {
+                self.resolve_cs_api_url_or_bad_request(&req.openid_token.matrix_server_name)
+                    .await?;
             }
 
             // Now create the LiveKit room.
-            if self
-                .deps
-                .create_livekit_room(&self.livekit_auth, &lk_room_alias, &matrix_id, &lk_identity)
-                .await
-                .is_err()
-            {
-                return Err(MatrixErrorResponse {
-                    status: 500,
-                    errcode: "M_UNKNOWN".into(),
-                    err: "Unable to create room on SFU".into(),
-                });
-            }
+            self.create_livekit_room_or_internal_error(&lk_room_alias, &matrix_id, &lk_identity)
+                .await?;
 
             if delayed_event_delegation_requested {
                 info!(room = %lk_room_alias, lk_id = %lk_identity, delay_id = %req.delay_id,
@@ -860,6 +941,7 @@ impl Handler {
                     delay_timeout: Duration::from_millis(req.delay_timeout.max(0) as u64),
                     livekit_room: lk_room_alias.clone(),
                     livekit_identity: lk_identity.clone(),
+                    owner_user_id: String::new(), // Unset because the user ID is only used for identity assertion when running as an application service.
                 })
                 .await
                 .map_err(matrix_error_for_add_job)?;
@@ -876,6 +958,194 @@ impl Handler {
             url: self.livekit_auth.lk_url.clone(),
             jwt: token,
         })
+    }
+
+    /// Processes `/rtc/livekit/get_token` C-S requests.
+    pub(crate) async fn process_get_token_cs_request(
+        &self,
+        req: GetTokenCsRequest,
+        mxid_header: &str,
+    ) -> Result<GetTokenCsResponse, MatrixErrorResponse> {
+        require_non_empty_header(mxid_header, "Missing request authorization")?;
+
+        let target_server_name = req.server_name.as_str();
+        let is_local = target_server_name.is_empty()
+            || target_server_name == self.app_service_config.hs_server_name;
+
+        if is_local {
+            self.require_matching_lk_url(&req.url, "get_token_cs")?;
+        }
+
+        // Only checked for well-formedness here; the C-S API is always
+        // resolved from the configured, trusted `hs_server_name` below, not
+        // from the (homeserver-supplied, but still request-adjacent) mxid,
+        // so this service never sends its `as_token` to a server other than
+        // the one it's configured for.
+        matrix_server_name(mxid_header).ok_or_else(|| MatrixErrorResponse {
+            status: 400,
+            errcode: "M_INVALID_PARAM".into(),
+            err: "Malformed user identifier".into(),
+        })?;
+
+        // Local users always have full access.
+        debug!(matrix_id = %mxid_header,
+            access = if is_local { "full" } else { "restricted" },
+            "Handler: got Matrix user info (app-service)");
+
+        let cs_api_url = self
+            .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
+            .await?;
+
+        let is_member = self
+            .deps
+            .is_user_joined(
+                &cs_api_url,
+                &req.room_id,
+                mxid_header,
+                &self.app_service_config.as_token,
+            )
+            .await
+            .map_err(|err| {
+                error!(matrix_id = %mxid_header, room = %req.room_id, err = %err,
+                    "Handler: error checking room membership");
+                MatrixErrorResponse {
+                    status: 502,
+                    errcode: "M_CONNECTION_FAILED".into(),
+                    err: "Unable to verify room membership".into(),
+                }
+            })?;
+        if !is_member {
+            return Err(MatrixErrorResponse {
+                status: 403,
+                errcode: "M_FORBIDDEN".into(),
+                err: "The requesting user is not a member of the room".into(),
+            });
+        }
+
+        if is_local {
+            let lk_identity =
+                livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
+            let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+
+            let token =
+                self.get_join_token_or_internal_error(&lk_room_alias, &lk_identity, mxid_header)?;
+
+            self.create_livekit_room_or_internal_error(&lk_room_alias, mxid_header, &lk_identity)
+                .await?;
+
+            info!(matrix_id = %mxid_header, claimed_device_id = %req.member.claimed_device_id,
+                access = if is_local { "full" } else { "restricted" },
+                matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
+                lk_id = %lk_identity, room = %lk_room_alias,
+                "Handler: generated SFU access token (app-service)");
+
+            Ok(GetTokenCsResponse { jwt: token })
+        } else {
+            let ss_req = GetTokenSsRequest {
+                user_id: mxid_header.to_owned(),
+                url: req.url,
+                room_id: req.room_id,
+                slot_id: req.slot_id,
+                member: req.member,
+            };
+            let resp = self
+                .deps
+                .request_get_token_via_federation(
+                    &cs_api_url,
+                    &self.app_service_config.as_token,
+                    target_server_name,
+                    &ss_req,
+                )
+                .await
+                .map_err(|err| {
+                    error!(matrix_id = %mxid_header, destination = %target_server_name, err = %err,
+                        "Handler: error relaying get_token via federation proxy");
+                    MatrixErrorResponse {
+                        status: 502,
+                        errcode: "M_CONNECTION_FAILED".into(),
+                        err: "Unable to reach the specified homeserver".into(),
+                    }
+                })?;
+
+            info!(matrix_id = %mxid_header, destination = %target_server_name,
+                matrix_room = %ss_req.room_id, matrix_rtc_slot = %ss_req.slot_id,
+                "Handler: relayed SFU access token via federation proxy (app-service)");
+
+            Ok(GetTokenCsResponse { jwt: resp.jwt })
+        }
+    }
+
+    /// Processes `/rtc/livekit/get_token` S-S requests.
+    pub(crate) async fn process_get_token_ss_request(
+        &self,
+        req: &GetTokenSsRequest,
+        origin_header: &str,
+    ) -> Result<GetTokenSsResponse, MatrixErrorResponse> {
+        require_non_empty_header(origin_header, "Missing request origin")?;
+
+        let cs_api_url = self
+            .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
+            .await?;
+
+        let membership_error = || MatrixErrorResponse {
+            status: 502,
+            errcode: "M_CONNECTION_FAILED".into(),
+            err: "Unable to verify room membership".into(),
+        };
+
+        let own_is_member = self
+            .deps
+            .is_server_joined(
+                &cs_api_url,
+                &req.room_id,
+                &self.app_service_config.hs_server_name,
+                &self.app_service_config.as_token,
+            )
+            .await
+            .map_err(|err| {
+                error!(room = %req.room_id, err = %err,
+                    "Handler: error checking own server's room membership (app-service S-S)");
+                membership_error()
+            })?;
+
+        let origin_is_member = self
+            .deps
+            .is_server_joined(
+                &cs_api_url,
+                &req.room_id,
+                origin_header,
+                &self.app_service_config.as_token,
+            )
+            .await
+            .map_err(|err| {
+                error!(room = %req.room_id, origin = %origin_header, err = %err,
+                    "Handler: error checking origin server's room membership (app-service S-S)");
+                membership_error()
+            })?;
+
+        if !own_is_member || !origin_is_member {
+            return Err(MatrixErrorResponse {
+                status: 403,
+                errcode: "M_FORBIDDEN".into(),
+                err: "The receiving or requesting server is not a member of the room".into(),
+            });
+        }
+
+        self.require_matching_lk_url(&req.url, "get_token_ss")?;
+
+        let lk_identity =
+            livekit_identity_for(&req.user_id, &req.member.claimed_device_id, &req.member.id);
+        let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+
+        let token =
+            self.get_join_token_or_internal_error(&lk_room_alias, &lk_identity, &req.user_id)?;
+
+        info!(user_id = %req.user_id, claimed_device_id = %req.member.claimed_device_id,
+            origin = %origin_header, matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
+            lk_id = %lk_identity, room = %lk_room_alias,
+            "Handler: generated SFU access token (app-service S-S)");
+
+        Ok(GetTokenSsResponse { jwt: token })
     }
 
     /// Handles /delegate_delayed_leave: schedules a delayed-leave job for a
@@ -906,22 +1176,8 @@ impl Handler {
 
         // Verify that the Client-Server API can be resolved and prime the
         // cache.
-        if self
-            .deps
-            .resolve_cs_api_url(
-                &req.openid_token.matrix_server_name,
-                &self.cs_api_url_overrides,
-                Some(&self.cs_api_url_cache),
-            )
-            .await
-            .is_err()
-        {
-            return Err(MatrixErrorResponse {
-                status: 400,
-                errcode: "M_BAD_JSON".into(),
-                err: "Unable to resolve client-server API".into(),
-            });
-        }
+        self.resolve_cs_api_url_or_bad_request(&req.openid_token.matrix_server_name)
+            .await?;
 
         info!(room = %lk_room_alias, lk_id = %lk_identity, delay_id = %req.delay_id,
             matrix_server_name = %req.openid_token.matrix_server_name,
@@ -933,6 +1189,52 @@ impl Handler {
             delay_timeout: Duration::from_millis(req.delay_timeout.max(0) as u64),
             livekit_room: lk_room_alias.clone(),
             livekit_identity: lk_identity.clone(),
+            owner_user_id: String::new(),
+        })
+        .await
+        .map_err(matrix_error_for_add_job)?;
+
+        Ok(DelegateDelayedLeaveResponse {})
+    }
+
+    /// Processes `/rtc/livekit/delegate_delayed_leave` C-S requests.
+    pub(crate) async fn process_delegate_delayed_leave_cs(
+        &self,
+        req: &DelegateDelayedLeaveCsRequest,
+        mxid_header: &str,
+    ) -> Result<DelegateDelayedLeaveResponse, MatrixErrorResponse> {
+        require_non_empty_header(mxid_header, "Missing request authorization")?;
+
+        let lk_identity =
+            livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
+        let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+
+        // Verify that the Client-Server API can be resolved and prime the
+        // cache.
+        let cs_api_url = self
+            .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
+            .await?;
+
+        // When no timeout is specified, try to read it by looking up the event on the server.
+        let delay_timeout = match req.delay_timeout {
+            Some(timeout) => Duration::from_millis(timeout.max(0) as u64),
+            None => {
+                self.look_up_delay_timeout(&cs_api_url, &req.delay_id, mxid_header)
+                    .await?
+            }
+        };
+
+        info!(room = %lk_room_alias, lk_id = %lk_identity, delay_id = %req.delay_id,
+            matrix_id = %mxid_header, delay_timeout = ?delay_timeout,
+            "Handler: scheduling delayed event job (delegate_delayed_leave, app-service)");
+
+        self.add_delayed_event_job(DelayedEventJobParams {
+            server_name: self.app_service_config.hs_server_name.clone(),
+            delay_id: req.delay_id.clone(),
+            delay_timeout,
+            livekit_room: lk_room_alias.clone(),
+            livekit_identity: lk_identity.clone(),
+            owner_user_id: mxid_header.to_owned(),
         })
         .await
         .map_err(matrix_error_for_add_job)?;
@@ -941,7 +1243,7 @@ impl Handler {
     }
 
     pub fn prepare_router(self: &Arc<Self>) -> Router {
-        Router::new()
+        let mut router = Router::new()
             // Deprecated: pre-Matrix-2.0; remove once clients migrate to
             // /get_token.
             .route("/sfu/get", any(handle_legacy))
@@ -951,8 +1253,28 @@ impl Handler {
                 any(handle_delegate_delayed_leave),
             )
             .route("/sfu_webhook", any(handle_sfu_webhook))
-            .route("/healthz", any(healthcheck))
-            .with_state(self.clone())
+            .route("/healthz", any(healthcheck));
+
+        if self.app_service_config.is_set_up() {
+            router = router
+                .route("/_matrix/app/v1/ping", any(handle_appservice_ping))
+                .route(
+                    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token",
+                    any(handle_get_token_cs),
+                )
+                .route(GET_TOKEN_SS_PATH, any(handle_get_token_ss))
+                .route(
+                    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave",
+                    any(handle_delegate_delayed_leave_cs),
+                );
+
+            #[cfg(feature = "appservice-ping-trigger")]
+            {
+                router = router.route("/appservice-ping", any(handle_appservice_ping_trigger));
+            }
+        }
+
+        router.with_state(self.clone())
     }
 }
 
@@ -1141,6 +1463,252 @@ async fn healthcheck(req: Request) -> Response {
     } else {
         StatusCode::METHOD_NOT_ALLOWED.into_response()
     }
+}
+
+/// Handles /appservice-ping requests.
+#[cfg(feature = "appservice-ping-trigger")]
+async fn handle_appservice_ping_trigger(
+    State(handler): State<Arc<Handler>>,
+    req: Request,
+) -> Response {
+    let req = match gate_post(req) {
+        PostGate::Handle(req) => req,
+        PostGate::Reply(resp) => return resp,
+    };
+
+    let trigger: AppservicePingTriggerRequest = match decode_json_body(req).await {
+        Ok(r) => r,
+        Err(err) => {
+            error!(err = %err, "Handler: appservice ping trigger: error reading body");
+            return matrix_error_response(400, "M_NOT_JSON", "Error reading request");
+        }
+    };
+
+    if trigger.server_name.is_empty() || trigger.appservice_id.is_empty() {
+        return matrix_error_response(
+            400,
+            "M_BAD_JSON",
+            "The request body is missing `server_name` or `appservice_id`",
+        );
+    }
+
+    let cs_api_url = match handler
+        .deps
+        .resolve_cs_api_url(
+            &trigger.server_name,
+            &handler.cs_api_url_overrides,
+            Some(&handler.cs_api_url_cache),
+        )
+        .await
+    {
+        Ok(url) => url,
+        Err(err) => {
+            warn!(server_name = %trigger.server_name, err = %err,
+                "Handler: appservice ping trigger: could not resolve C-S API URL");
+            return matrix_error_response(
+                502,
+                "M_CONNECTION_FAILED",
+                &format!("Could not resolve C-S API URL: {err}"),
+            );
+        }
+    };
+
+    let transaction_id = new_unique_id().to_string();
+    match handler
+        .deps
+        .trigger_appservice_ping(
+            &cs_api_url,
+            &trigger.appservice_id,
+            &handler.app_service_config.as_token,
+            &transaction_id,
+        )
+        .await
+    {
+        Ok((status, body)) => Response::builder()
+            .status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(err) => {
+            warn!(server_name = %trigger.server_name, err = %err,
+                "Handler: appservice ping trigger: request failed");
+            matrix_error_response(
+                502,
+                "M_CONNECTION_FAILED",
+                &format!("Failed to reach homeserver: {err}"),
+            )
+        }
+    }
+}
+
+/// Verifies the `Authorization: Bearer <hs_token>` header the homeserver
+/// attaches to requests it makes to this service.
+fn verify_hs_token(req: &Request, hs_token: &str) -> Option<Response> {
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+
+    if token.is_empty() {
+        return Some(matrix_error_response(
+            401,
+            "M_MISSING_TOKEN",
+            "Missing homeserver access token",
+        ));
+    }
+    if !bool::from(token.as_bytes().ct_eq(hs_token.as_bytes())) {
+        return Some(matrix_error_response(
+            401,
+            "M_UNKNOWN_TOKEN",
+            "Unrecognised homeserver access token",
+        ));
+    }
+
+    None
+}
+
+/// Handles /_matrix/app/v1/ping requests.
+async fn handle_appservice_ping(State(handler): State<Arc<Handler>>, req: Request) -> Response {
+    if let Some(resp) = verify_hs_token(&req, &handler.app_service_config.hs_token) {
+        return resp;
+    }
+
+    Json(serde_json::json!({})).into_response()
+}
+
+/// Handles `/rtc/livekit/get_token` C-S requests.
+async fn handle_get_token_cs(State(handler): State<Arc<Handler>>, req: Request) -> Response {
+    let req = match gate_post(req) {
+        PostGate::Handle(req) => req,
+        PostGate::Reply(resp) => return apply_cors_json(resp),
+    };
+    debug!("Handler: new /get_token C-S request");
+
+    if let Some(resp) = verify_hs_token(&req, &handler.app_service_config.hs_token) {
+        return apply_cors_json(resp);
+    }
+
+    let header_mxid = req
+        .headers()
+        .get(USER_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+
+    let get_token_request: GetTokenCsRequest = match decode_json_body(req).await {
+        Ok(r) => r,
+        Err(err) => {
+            error!(err = %err, "Handler: C-S: error reading body");
+            return apply_cors_json(matrix_error_response(
+                400,
+                "M_NOT_JSON",
+                "Error reading request",
+            ));
+        }
+    };
+
+    if let Err(err) = get_token_request.validate() {
+        return apply_cors_json(matrix_error_into_response(&err));
+    }
+
+    let resp = match handler
+        .process_get_token_cs_request(get_token_request, &header_mxid)
+        .await
+    {
+        Ok(sfu_response) => Json(sfu_response).into_response(),
+        Err(err) => matrix_error_into_response(&err),
+    };
+    apply_cors_json(resp)
+}
+
+/// Handles `/rtc/livekit/get_token` S-S requests.
+async fn handle_get_token_ss(State(handler): State<Arc<Handler>>, req: Request) -> Response {
+    let req = match gate_post(req) {
+        PostGate::Handle(req) => req,
+        PostGate::Reply(resp) => return resp,
+    };
+    debug!("Handler: new /get_token S-S request");
+
+    if let Some(resp) = verify_hs_token(&req, &handler.app_service_config.hs_token) {
+        return resp;
+    }
+
+    let origin_server_name = req
+        .headers()
+        .get(ORIGIN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+
+    let get_token_request: GetTokenSsRequest = match decode_json_body(req).await {
+        Ok(r) => r,
+        Err(err) => {
+            error!(err = %err, "Handler: S-S: error reading body");
+            return matrix_error_response(400, "M_NOT_JSON", "Error reading request");
+        }
+    };
+
+    if let Err(err) = get_token_request.validate() {
+        return matrix_error_into_response(&err);
+    }
+
+    match handler
+        .process_get_token_ss_request(&get_token_request, &origin_server_name)
+        .await
+    {
+        Ok(sfu_response) => Json(sfu_response).into_response(),
+        Err(err) => matrix_error_into_response(&err),
+    }
+}
+
+/// Handles `/rtc/livekit/delegate_delayed_leave` C-S requests.
+async fn handle_delegate_delayed_leave_cs(
+    State(handler): State<Arc<Handler>>,
+    req: Request,
+) -> Response {
+    let req = match gate_post(req) {
+        PostGate::Handle(req) => req,
+        PostGate::Reply(resp) => return apply_cors_json(resp),
+    };
+    debug!("Handler: new delegate_delayed_leave C-S request");
+
+    if let Some(resp) = verify_hs_token(&req, &handler.app_service_config.hs_token) {
+        return apply_cors_json(resp);
+    }
+
+    let header_mxid = req
+        .headers()
+        .get(USER_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+
+    let request: DelegateDelayedLeaveCsRequest = match decode_json_body(req).await {
+        Ok(r) => r,
+        Err(err) => {
+            error!(err = %err, "Handler: delegate_delayed_leave C-S: error reading body");
+            return apply_cors_json(matrix_error_response(
+                400,
+                "M_NOT_JSON",
+                "Error reading request",
+            ));
+        }
+    };
+
+    if let Err(err) = request.validate() {
+        return apply_cors_json(matrix_error_into_response(&err));
+    }
+
+    let resp = match handler
+        .process_delegate_delayed_leave_cs(&request, &header_mxid)
+        .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(err) => matrix_error_into_response(&err),
+    };
+    apply_cors_json(resp)
 }
 
 /// Translates a validated LiveKit webhook event into a

@@ -153,6 +153,30 @@ pub fn expect_delayed_event_request_count(
     );
 }
 
+/// Assert that a /delayed_events request with the given delay ID and action
+/// has been recorded, authenticated via application-service identity
+/// assertion as `as_token` / `user_id`.
+#[track_caller]
+pub fn expect_delayed_event_request_identity(
+    hs: &FakeHomeserver,
+    delay_id: &str,
+    action: &str,
+    as_token: &str,
+    user_id: &str,
+) {
+    let requests = hs.delayed_event_requests();
+    assert!(
+        requests.iter().any(|r| {
+            r.delay_id == delay_id
+                && r.action == action
+                && r.authorization == format!("Bearer {as_token}")
+                && r.user_id == user_id
+        }),
+        "expected a {action:?} request with delay_id {delay_id:?} authenticated as \
+         {user_id:?} via as_token {as_token:?}, got {requests:?}"
+    );
+}
+
 /// Poll until at least `count` /delayed_events requests with the given
 /// delay ID and action have been recorded, or panic once the timeout
 /// elapses.
@@ -180,6 +204,110 @@ pub async fn wait_for_delayed_event_request_count(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Assert that no /is_joined request has been recorded.
+#[track_caller]
+pub fn expect_no_is_joined_requests(hs: &FakeHomeserver) {
+    let requests = hs.is_joined_requests();
+    assert!(
+        requests.is_empty(),
+        "expected no is_joined requests, got {:?}",
+        requests
+    );
+}
+
+/// Assert that an /is_joined request for the given room and mxid has been
+/// recorded with the given `as_token` as its authorization.
+#[track_caller]
+pub fn expect_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &str, as_token: &str) {
+    let requests = hs.is_joined_requests();
+    assert!(
+        requests.iter().any(|r| r.room_id == room_id
+            && r.mxid == mxid
+            && r.authorization == format!("Bearer {as_token}")),
+        "expected an is_joined request for room {room_id:?}, mxid {mxid:?}, as_token {as_token:?}, got {requests:?}"
+    );
+}
+
+/// Assert that no /is_joined request for the given room and mxid has been
+/// recorded.
+#[track_caller]
+pub fn expect_no_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &str) {
+    let requests = hs.is_joined_requests();
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.room_id == room_id && r.mxid == mxid),
+        "expected an is_joined request for room {room_id:?}, mxid {mxid:?}, got {requests:?}"
+    );
+}
+
+/// Assert that an /is_joined request for the given room and server name has been
+/// recorded with the given `as_token` as its authorization.
+#[track_caller]
+pub fn expect_server_is_joined_request(
+    hs: &FakeHomeserver,
+    room_id: &str,
+    server_name: &str,
+    as_token: &str,
+) {
+    let requests = hs.is_joined_requests();
+    assert!(
+        requests.iter().any(|r| r.room_id == room_id
+            && r.server_name == server_name
+            && r.authorization == format!("Bearer {as_token}")),
+        "expected an is_joined request for room {room_id:?}, server_name {server_name:?}, as_token {as_token:?}, got {requests:?}"
+    );
+}
+
+/// Assert that no fed_proxy request has been recorded.
+#[track_caller]
+pub fn expect_no_fed_proxy_requests(hs: &FakeHomeserver) {
+    let requests = hs.fed_proxy_requests();
+    assert!(
+        requests.is_empty(),
+        "expected no fed_proxy requests, got {:?}",
+        requests
+    );
+}
+
+/// The `/get_token` S-S path from MSC4195.
+const GET_TOKEN_SS_PATH: &str =
+    "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token";
+
+/// Assert that exactly one /fed_proxy request targeting `destination` has
+/// been recorded with the specified parameters.
+#[track_caller]
+pub fn expect_fed_proxy_request(
+    hs: &FakeHomeserver,
+    destination: &str,
+    as_token: &str,
+    expected_body: &Value,
+) {
+    let requests = hs.fed_proxy_requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "expected exactly one fed_proxy request to destination {destination:?}, got {requests:?}"
+    );
+    let r = &requests[0];
+    assert_eq!(
+        r.destination, destination,
+        "unexpected fed_proxy destination"
+    );
+    assert_eq!(r.method, "POST", "unexpected fed_proxy method");
+    assert_eq!(
+        r.authorization,
+        format!("Bearer {as_token}"),
+        "unexpected fed_proxy authorization"
+    );
+    assert_eq!(r.path, GET_TOKEN_SS_PATH, "unexpected fed_proxy S-S path");
+    assert_eq!(
+        r.body.as_ref(),
+        Some(expected_body),
+        "unexpected fed_proxy relayed body"
+    );
 }
 
 pub fn livekit_room_alias(matrix_room: &str, slot_id: &str) -> String {

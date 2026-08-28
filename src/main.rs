@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 use lk_jwt_service::config::{bind_addresses, parse_config};
 use lk_jwt_service::handler::Handler;
 use lk_jwt_service::helper::{LiveKitAuth, RealDeps};
-use lk_jwt_service::store::{new_redis_store, Store};
+use lk_jwt_service::store::{Store, new_redis_store};
 
 #[tokio::main]
 async fn main() {
@@ -77,6 +77,7 @@ async fn main() {
             lk_url: config.lk_url.clone(),
         },
         config.full_access_homeservers.clone(),
+        config.app_service_config,
         config.sanity_check_interval,
         config.cs_api_url_overrides.clone(),
         store,
@@ -113,7 +114,8 @@ async fn main() {
         eprintln!("Failed to bind {}", config.lk_jwt_bind);
         std::process::exit(1);
     };
-    if let Err(err) = axum::serve(listener, handler.prepare_router()).await {
+    let router = handler.prepare_router();
+    if let Err(err) = axum::serve(listener, router).await {
         eprintln!("{err}");
         std::process::exit(1);
     }

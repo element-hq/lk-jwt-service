@@ -12,16 +12,20 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD_NO_PAD;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 
-use crate::delayed_event_manager::{DelayEventAction, DELAYED_EVENTS_ENDPOINT};
-use crate::requests::OpenIdTokenType;
+use crate::delayed_event_manager::{AppServiceIdentity, DELAYED_EVENTS_ENDPOINT, DelayEventAction};
+use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, OpenIdTokenType};
 use crate::retry::{Classify, ErrorClass};
+
+/// The path of the `/rtc/livekit/get_token` S-S endpoint,.
+pub const GET_TOKEN_SS_PATH: &str =
+    "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token";
 
 /// The authentication bundle for talking to LiveKit.
 #[derive(Debug, Clone, Default)]
@@ -174,12 +178,13 @@ impl<V: Clone> TtlCache<V> {
     pub fn set(&self, server_name: &str, value: V, ttl: Duration) {
         let now = Instant::now();
         let mut entries = self.entries.write().unwrap();
-        if let Some(max) = self.max_entries {
-            if entries.len() >= max && !entries.contains_key(server_name) {
-                entries.retain(|_, (_, expires_at)| now <= *expires_at);
-                if entries.len() >= max {
-                    return;
-                }
+        if let Some(max) = self.max_entries
+            && entries.len() >= max
+            && !entries.contains_key(server_name)
+        {
+            entries.retain(|_, (_, expires_at)| now <= *expires_at);
+            if entries.len() >= max {
+                return;
             }
         }
         entries.insert(server_name.to_owned(), (value, now + ttl));
@@ -214,6 +219,15 @@ pub fn livekit_identity_for(matrix_id: &str, device_id: &str, member_id: &str) -
     LiveKitIdentity(sha256_unpadded_base64(&marshal_strings(&[
         matrix_id, device_id, member_id,
     ])))
+}
+
+/// Extracts the server name from a Matrix User Identifier.
+pub fn matrix_server_name(mxid: &str) -> Option<&str> {
+    let (localpart, server_name) = mxid.strip_prefix('@')?.split_once(':')?;
+    if localpart.is_empty() || server_name.is_empty() {
+        return None;
+    }
+    Some(server_name)
 }
 
 // ── OpenID / well-known DTOs ─────────────────────────────────────────────────
@@ -459,6 +473,68 @@ struct LimitExceededBody {
     retry_after_ms: i64,
 }
 
+/// Classifies a rate-limited (429) CS-API response: [`ActionError::RetryAfter`]
+/// when it carries a usable retry hint, [`ActionError::Transient`] when it does not.
+async fn retry_after_from_response(resp: reqwest::Response, status: u16) -> ActionError {
+    // Prefer the standard Retry-After header (RFC 7231 §7.1.3).
+    let retry_after_header = resp
+        .headers()
+        .get(http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    if let Ok(seconds) = retry_after_header.parse::<i64>() {
+        let seconds = seconds.max(0) as u64;
+        return ActionError::RetryAfter {
+            status,
+            retry_after: Duration::from_secs(seconds),
+        };
+    }
+    if let Ok(t) = httpdate::parse_http_date(&retry_after_header) {
+        let d = t
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
+        return ActionError::RetryAfter {
+            status,
+            retry_after: Duration::from_secs(d.as_secs()),
+        };
+    }
+    // Fall back to the retry_after_ms field of M_LIMIT_EXCEEDED bodies —
+    // deprecated in Matrix v1.10 but still emitted by common homeservers.
+    if let Ok(body) = resp.json::<LimitExceededBody>().await
+        && body.retry_after_ms > 0
+    {
+        // Ceil ms → s (e.g. 500 ms → 1 s, 1500 ms → 2 s).
+        let seconds = (body.retry_after_ms as u64).div_ceil(1000);
+        return ActionError::RetryAfter {
+            status,
+            retry_after: Duration::from_secs(seconds),
+        };
+    }
+    // No usable hint.
+    ActionError::Transient {
+        status,
+        msg: "CS API temporarily unavailable (http status code 429)".into(),
+    }
+}
+
+/// The subject of an `/is_joined` query (MSC4502): either a specific Matrix
+/// user ID or a server name.
+pub enum IsJoinedSubject<'a> {
+    Mxid(&'a str),
+    ServerName(&'a str),
+}
+
+impl IsJoinedSubject<'_> {
+    /// The `(query parameter name, value)` pair to send for this subject.
+    fn query(&self) -> (&'static str, &str) {
+        match self {
+            IsJoinedSubject::Mxid(mxid) => ("mxid", mxid),
+            IsJoinedSubject::ServerName(server_name) => ("server_name", server_name),
+        }
+    }
+}
+
 // ── Deps: the swappable dependency surface ───────────────────────────────────
 
 /// External interactions of the service. The real logic lives in the default
@@ -643,8 +719,110 @@ pub trait Deps: Send + Sync {
         }
     }
 
+    /// GETs the delay of the delayed event identified by `delay_id` from the C-S API.
+    ///
+    ///   - 200 with a usable delay → `Ok(delay)`
+    ///   - 404, or 200 with a missing/non-positive delay
+    ///                            → permanent [`ActionError::DelayedEventNotFound`]
+    ///   - 429 with a usable retry hint → [`ActionError::RetryAfter`]
+    ///   - anything else                → [`ActionError::Transient`]
+    async fn get_delayed_event_delay(
+        &self,
+        cs_api_url: &CsApiUrl,
+        delay_id: &str,
+        identity: AppServiceIdentity<'_>,
+    ) -> Result<Duration, ActionError> {
+        let mut endpoint =
+            url::Url::parse(cs_api_url.as_str()).map_err(|e| ActionError::Transient {
+                status: 0,
+                msg: format!("get_delayed_event_delay: invalid URL: {e}"),
+            })?;
+        {
+            let mut segments =
+                endpoint
+                    .path_segments_mut()
+                    .map_err(|_| ActionError::Transient {
+                        status: 0,
+                        msg: "get_delayed_event_delay: invalid URL: cannot be a base".into(),
+                    })?;
+            segments.pop_if_empty();
+            for segment in DELAYED_EVENTS_ENDPOINT.trim_matches('/').split('/') {
+                segments.push(segment);
+            }
+            segments.push(delay_id);
+        }
+        endpoint
+            .query_pairs_mut()
+            .append_pair("user_id", identity.user_id);
+
+        let resp = http_client(self.skip_verify_tls())
+            .get(endpoint.clone())
+            .bearer_auth(identity.as_token)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "get_delayed_event_delay");
+                ActionError::Transient { status: 0, msg }
+            })?;
+
+        let status = resp.status().as_u16();
+        debug!(url = %endpoint, status, "get_delayed_event_delay");
+
+        match status {
+            200 => {
+                #[derive(Deserialize, Default)]
+                struct DelayedEventResponse {
+                    /// The field name MSC4140 specifies.
+                    #[serde(default)]
+                    delay_ms: i64,
+                    /// The name earlier revisions of the MSC used, still
+                    /// emitted by homeservers implementing those.
+                    #[serde(default)]
+                    delay: i64,
+                }
+                let parsed: DelayedEventResponse =
+                    resp.json().await.map_err(|e| ActionError::Transient {
+                        status,
+                        msg: format!("failed to parse delayed event response: {e}"),
+                    })?;
+                let delay_ms = if parsed.delay_ms > 0 {
+                    parsed.delay_ms
+                } else {
+                    parsed.delay
+                };
+                if delay_ms <= 0 {
+                    // A delayed event without a usable delay is as good as
+                    // absent — there is nothing to schedule a job for.
+                    return Err(ActionError::DelayedEventNotFound { status });
+                }
+                Ok(Duration::from_millis(delay_ms as u64))
+            }
+
+            404 => Err(ActionError::DelayedEventNotFound { status }),
+
+            500..=599 => Err(ActionError::Transient {
+                status,
+                msg: format!("CS API temporarily unavailable (http status code {status})"),
+            }),
+
+            429 => Err(retry_after_from_response(resp, status).await),
+
+            _ => Err(ActionError::Transient {
+                status,
+                msg: format!("CS API returned unexpected status: {status}"),
+            }),
+        }
+    }
+
     /// POSTs the given action (restart or send) to the Matrix CS-API for
     /// `delay_id`.
+    ///
+    /// When `identity` is `Some`, the request authenticates via an
+    /// application-service identity assertion (see
+    /// https://spec.matrix.org/v1.18/application-service-api/#identity-assertion).
+    /// When `identity` is `None`, the request is sent unauthenticated.
     ///
     /// Return contract:
     ///   - 2xx, and 404 on send (MSC4140 already-sent)  → `Ok(status)`
@@ -657,6 +835,7 @@ pub trait Deps: Send + Sync {
         cs_api_url: &CsApiUrl,
         delay_id: &str,
         action: DelayEventAction,
+        identity: Option<AppServiceIdentity<'_>>,
     ) -> Result<u16, ActionError> {
         // The URL is built by pushing path segments, which percent-escapes
         // delay_id — preventing path-traversal attacks since delay_id is
@@ -681,19 +860,25 @@ pub trait Deps: Send + Sync {
             segments.push(delay_id);
             segments.push(action.as_str());
         }
+        if let Some(identity) = &identity {
+            endpoint
+                .query_pairs_mut()
+                .append_pair("user_id", identity.user_id);
+        }
 
-        let resp = http_client(self.skip_verify_tls())
+        let mut req = http_client(self.skip_verify_tls())
             .post(endpoint.clone())
             .header(http::header::CONTENT_TYPE, "application/json")
             .body("{}")
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|e| {
-                let msg = error_chain(&e);
-                debug!(url = %endpoint, err = %msg, "execute_delayed_event_action");
-                ActionError::Transient { status: 0, msg }
-            })?;
+            .timeout(Duration::from_secs(5));
+        if let Some(identity) = &identity {
+            req = req.bearer_auth(identity.as_token);
+        }
+        let resp = req.send().await.map_err(|e| {
+            let msg = error_chain(&e);
+            debug!(url = %endpoint, err = %msg, "execute_delayed_event_action");
+            ActionError::Transient { status: 0, msg }
+        })?;
 
         let status = resp.status().as_u16();
         debug!(url = %endpoint, status, "execute_delayed_event_action");
@@ -717,49 +902,7 @@ pub trait Deps: Send + Sync {
                 msg: format!("CS API temporarily unavailable (http status code {status})"),
             }),
 
-            429 => {
-                // Prefer the standard Retry-After header (RFC 7231 §7.1.3).
-                let retry_after_header = resp
-                    .headers()
-                    .get(http::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default()
-                    .to_owned();
-                if let Ok(seconds) = retry_after_header.parse::<i64>() {
-                    let seconds = seconds.max(0) as u64;
-                    return Err(ActionError::RetryAfter {
-                        status,
-                        retry_after: Duration::from_secs(seconds),
-                    });
-                }
-                if let Ok(t) = httpdate::parse_http_date(&retry_after_header) {
-                    let d = t
-                        .duration_since(SystemTime::now())
-                        .unwrap_or(Duration::ZERO);
-                    return Err(ActionError::RetryAfter {
-                        status,
-                        retry_after: Duration::from_secs(d.as_secs()),
-                    });
-                }
-                // Fall back to the retry_after_ms field of M_LIMIT_EXCEEDED
-                // bodies — deprecated in Matrix v1.10 but still emitted by
-                // common homeservers.
-                if let Ok(body) = resp.json::<LimitExceededBody>().await {
-                    if body.retry_after_ms > 0 {
-                        // Ceil ms → s (e.g. 500 ms → 1 s, 1500 ms → 2 s).
-                        let seconds = (body.retry_after_ms as u64).div_ceil(1000);
-                        return Err(ActionError::RetryAfter {
-                            status,
-                            retry_after: Duration::from_secs(seconds),
-                        });
-                    }
-                }
-                // No usable hint.
-                Err(ActionError::Transient {
-                    status,
-                    msg: "CS API temporarily unavailable (http status code 429)".into(),
-                })
-            }
+            429 => Err(retry_after_from_response(resp, status).await),
 
             // Everything else is treated as transient — many 4xx codes are
             // genuinely retriable (408, 421, 423, 425, …).
@@ -768,6 +911,215 @@ pub trait Deps: Send + Sync {
                 msg: format!("CS API returned unexpected status: {status}"),
             }),
         }
+    }
+
+    /// Checks whether `mxid` is currently a member of `room_id`, via the
+    /// `/is_joined` endpoint from MSC4502.
+    async fn is_user_joined(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        mxid: &str,
+        as_token: &str,
+    ) -> Result<bool, String> {
+        self.check_is_joined(cs_api_url, room_id, IsJoinedSubject::Mxid(mxid), as_token)
+            .await
+    }
+
+    /// Checks whether `server_name` is currently joined to `room_id`, via the
+    /// `/is_joined` endpoint from MSC4502.
+    async fn is_server_joined(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        server_name: &str,
+        as_token: &str,
+    ) -> Result<bool, String> {
+        self.check_is_joined(
+            cs_api_url,
+            room_id,
+            IsJoinedSubject::ServerName(server_name),
+            as_token,
+        )
+        .await
+    }
+
+    /// Performs a room membership check for an MXID or server name, via the
+    /// `/is_joined` endpoint from MSC4502.
+    async fn check_is_joined(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        subject: IsJoinedSubject<'_>,
+        as_token: &str,
+    ) -> Result<bool, String> {
+        const IS_JOINED_PATH_PREFIX: &str = "_matrix/client/unstable/io.element.msc4502";
+
+        let mut endpoint = url::Url::parse(cs_api_url.as_str())
+            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
+        {
+            let mut segments = endpoint
+                .path_segments_mut()
+                .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?;
+            segments.pop_if_empty();
+            for segment in IS_JOINED_PATH_PREFIX.trim_matches('/').split('/') {
+                segments.push(segment);
+            }
+            segments.push("rooms");
+            segments.push(room_id);
+            segments.push("is_joined");
+        }
+        let (query_param, query_value) = subject.query();
+        endpoint
+            .query_pairs_mut()
+            .append_pair(query_param, query_value);
+
+        let resp = http_client(self.skip_verify_tls())
+            .get(endpoint.clone())
+            .bearer_auth(as_token)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "check_is_joined");
+                format!("failed to check room membership: {msg}")
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!(
+                "failed to check room membership: http status code {}",
+                status.as_u16()
+            ));
+        }
+
+        #[derive(Deserialize, Default)]
+        struct IsJoinedResponse {
+            #[serde(default)]
+            joined: bool,
+        }
+        let parsed: IsJoinedResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse is_joined response: {e}"))?;
+        Ok(parsed.joined)
+    }
+
+    /// Triggers a ping round-trip to ensure the service and the homeserver
+    /// can reach each other.
+    async fn trigger_appservice_ping(
+        &self,
+        cs_api_url: &CsApiUrl,
+        appservice_id: &str,
+        as_token: &str,
+        transaction_id: &str,
+    ) -> Result<(u16, Vec<u8>), String> {
+        let mut endpoint = url::Url::parse(cs_api_url.as_str())
+            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
+        endpoint
+            .path_segments_mut()
+            .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?
+            .pop_if_empty()
+            .extend([
+                "_matrix",
+                "client",
+                "v1",
+                "appservice",
+                appservice_id,
+                "ping",
+            ]);
+
+        let resp = http_client(self.skip_verify_tls())
+            .post(endpoint.clone())
+            .bearer_auth(as_token)
+            .json(&serde_json::json!({ "transaction_id": transaction_id }))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "trigger_appservice_ping");
+                msg
+            })?;
+
+        let status = resp.status().as_u16();
+        let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        debug!(url = %endpoint, status, "trigger_appservice_ping");
+        Ok((status, body))
+    }
+
+    /// Relays a `/rtc/livekit/get_token` S-S request to `destination` via
+    /// this homeserver's federation proxy.
+    async fn request_get_token_via_federation(
+        &self,
+        own_cs_api_url: &CsApiUrl,
+        as_token: &str,
+        destination: &str,
+        req: &GetTokenSsRequest,
+    ) -> Result<GetTokenSsResponse, String> {
+        let mut endpoint = url::Url::parse(own_cs_api_url.as_str())
+            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
+        endpoint
+            .path_segments_mut()
+            .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?
+            .pop_if_empty()
+            .extend([
+                "_matrix",
+                "client",
+                "unstable",
+                "io.element.msc4512",
+                "appservice",
+                "fed_proxy",
+            ]);
+
+        let resp = http_client(self.skip_verify_tls())
+            .post(endpoint.clone())
+            .bearer_auth(as_token)
+            .json(&serde_json::json!({
+                "destination": destination,
+                "method": "POST",
+                "path": GET_TOKEN_SS_PATH,
+                "body": req,
+            }))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "request_get_token_via_federation");
+                format!("failed to reach the federation proxy: {msg}")
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!(
+                "federation proxy request failed: http status code {}",
+                status.as_u16()
+            ));
+        }
+
+        #[derive(Deserialize)]
+        struct FedProxyResponse {
+            status: u16,
+            #[serde(default)]
+            content: Option<GetTokenSsResponse>,
+        }
+        let parsed: FedProxyResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse federation proxy response: {e}"))?;
+
+        if !(200..300).contains(&parsed.status) {
+            return Err(format!(
+                "destination homeserver returned http status code {}",
+                parsed.status
+            ));
+        }
+
+        parsed
+            .content
+            .ok_or_else(|| "destination homeserver returned an empty response".to_string())
     }
 }
 
@@ -795,34 +1147,34 @@ pub async fn resolve_cs_api_url_via<D: Deps + ?Sized>(
     cache: Option<&CsApiUrlCache>,
 ) -> Result<CsApiUrl, String> {
     // Prefer explicit overrides.
-    if let Some(url) = overrides.get(server_name) {
-        if !url.is_empty() {
-            return Ok(url.clone());
-        }
+    if let Some(url) = overrides.get(server_name)
+        && !url.is_empty()
+    {
+        return Ok(url.clone());
     }
 
     // Next, check the cache.
-    if let Some(cache) = cache {
-        if let Some(url) = cache.get(server_name) {
-            return Ok(url);
-        }
+    if let Some(cache) = cache
+        && let Some(url) = cache.get(server_name)
+    {
+        return Ok(url);
     }
 
     // Try .well-known resolution.
     let discovered = deps.discover_client_api(server_name).await;
-    if let Ok(Some(well_known)) = &discovered {
-        if !well_known.homeserver_base_url.is_empty() {
-            if let Some(cache) = cache {
-                // TODO: Read the TTL from cache-control headers and limit
-                // them to a minimum of say 1 hour to prevent DDos-ing.
-                cache.set(
-                    server_name,
-                    CsApiUrl(well_known.homeserver_base_url.clone()),
-                    Duration::from_secs(4 * 60 * 60),
-                );
-            }
-            return Ok(CsApiUrl(well_known.homeserver_base_url.clone()));
+    if let Ok(Some(well_known)) = &discovered
+        && !well_known.homeserver_base_url.is_empty()
+    {
+        if let Some(cache) = cache {
+            // TODO: Read the TTL from cache-control headers and limit
+            // them to a minimum of say 1 hour to prevent DDos-ing.
+            cache.set(
+                server_name,
+                CsApiUrl(well_known.homeserver_base_url.clone()),
+                Duration::from_secs(4 * 60 * 60),
+            );
         }
+        return Ok(CsApiUrl(well_known.homeserver_base_url.clone()));
     }
 
     // We're out of options.
@@ -891,17 +1243,16 @@ async fn resolve_federation_base_url_with(
     };
 
     let mut base = fallback;
-    if resp.status().is_success() {
-        if let Ok(parsed) = resp.json::<WellKnownServer>().await {
-            if !parsed.server.is_empty() {
-                let delegated = if has_explicit_port(&parsed.server) {
-                    parsed.server
-                } else {
-                    format!("{}:8448", parsed.server)
-                };
-                base = format!("https://{delegated}");
-            }
-        }
+    if resp.status().is_success()
+        && let Ok(parsed) = resp.json::<WellKnownServer>().await
+        && !parsed.server.is_empty()
+    {
+        let delegated = if has_explicit_port(&parsed.server) {
+            parsed.server
+        } else {
+            format!("{}:8448", parsed.server)
+        };
+        base = format!("https://{delegated}");
     }
     // The server answered definitively (delegation or no well-known record),
     // so the result is cacheable.
@@ -987,12 +1338,12 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
+    use axum::Router;
     use axum::extract::Request;
     use axum::routing::any;
-    use axum::Router;
 
     use super::test_support::*;
     use super::*;
@@ -1171,6 +1522,27 @@ mod tests {
         assert!(!id.0.contains('='), "identity contains padding '=': {id}");
     }
 
+    // ── matrix_server_name ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_matrix_server_name() {
+        for (mxid, want) in [
+            ("@alice:example.com", Some("example.com")),
+            ("@alice:example.com:8448", Some("example.com:8448")),
+            ("alice:example.com", None),
+            ("@alice", None),
+            ("@:example.com", None),
+            ("@alice:", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                matrix_server_name(mxid),
+                want,
+                "matrix_server_name({mxid:?})"
+            );
+        }
+    }
+
     // ── TtlCache ──────────────────────────────────────────────────────────────
 
     /// A bounded cache purges expired entries before dropping inserts.
@@ -1302,9 +1674,221 @@ mod tests {
     // ── execute_delayed_event_action ──────────────────────────────────────────
 
     async fn exec(url: &str, delay_id: &str, action: DelayEventAction) -> Result<u16, ActionError> {
+        exec_with_auth(url, delay_id, action, "", "").await
+    }
+
+    async fn exec_with_auth(
+        url: &str,
+        delay_id: &str,
+        action: DelayEventAction,
+        as_token: &str,
+        user_id: &str,
+    ) -> Result<u16, ActionError> {
+        let identity = (!as_token.is_empty() && !user_id.is_empty())
+            .then_some(AppServiceIdentity { as_token, user_id });
         RealDeps::default()
-            .execute_delayed_event_action(&CsApiUrl(url.to_owned()), delay_id, action)
+            .execute_delayed_event_action(&CsApiUrl(url.to_owned()), delay_id, action, identity)
             .await
+    }
+
+    // ── get_delayed_event_delay ───────────────────────────────────────────
+
+    async fn get_delay(url: &str, delay_id: &str) -> Result<Duration, ActionError> {
+        RealDeps::default()
+            .get_delayed_event_delay(
+                &CsApiUrl(url.to_owned()),
+                delay_id,
+                AppServiceIdentity {
+                    as_token: "as_token",
+                    user_id: "@user:example.com",
+                },
+            )
+            .await
+    }
+
+    /// The delay is read off a 200 response and the request is a GET against the delayed
+    /// event's own path, authenticated by an application-service identity assertion.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_success() {
+        let captured: Arc<Mutex<(String, String, String, String)>> = Arc::new(Mutex::new((
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )));
+        let captured_clone = captured.clone();
+        let router = Router::new().route(
+            "/{*path}",
+            any(move |req: Request| {
+                let captured = captured_clone.clone();
+                async move {
+                    *captured.lock().unwrap() = (
+                        req.method().to_string(),
+                        req.uri().path().to_owned(),
+                        req.uri().query().unwrap_or_default().to_owned(),
+                        req.headers()
+                            .get(http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                    axum::Json(serde_json::json!({"delay_ms": 30000}))
+                }
+            }),
+        );
+        let server = spawn_http_server(router).await;
+
+        let delay = get_delay(&server.url, "delay id/1")
+            .await
+            .expect("unexpected error");
+        assert_eq!(delay, Duration::from_secs(30));
+
+        let (method, path, query, auth) = captured.lock().unwrap().clone();
+        assert_eq!(method, "GET", "expected GET");
+        assert_eq!(
+            path,
+            format!("{DELAYED_EVENTS_ENDPOINT}/delay%20id%2F1"),
+            "expected the delay_id to be escaped into the path"
+        );
+        assert_eq!(query, "user_id=%40user%3Aexample.com");
+        assert_eq!(auth, "Bearer as_token");
+    }
+
+    /// The field name used by earlier revisions of MSC4140 is still understood.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_legacy_field() {
+        let router = Router::new().route(
+            "/{*path}",
+            any(|| async { axum::Json(serde_json::json!({"delay": 15000})) }),
+        );
+        let server = spawn_http_server(router).await;
+
+        let delay = get_delay(&server.url, "id")
+            .await
+            .expect("unexpected error");
+        assert_eq!(delay, Duration::from_secs(15));
+    }
+
+    /// An unknown delay_id, and a delayed event without a usable delay, both surface
+    /// as the permanent not-found error.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_not_found() {
+        struct Case {
+            name: &'static str,
+            status: http::StatusCode,
+            body: serde_json::Value,
+        }
+        for tc in [
+            Case {
+                name: "404",
+                status: http::StatusCode::NOT_FOUND,
+                body: serde_json::json!({"errcode": "M_NOT_FOUND"}),
+            },
+            Case {
+                name: "200 without a delay",
+                status: http::StatusCode::OK,
+                body: serde_json::json!({"room_id": "!room:example.com"}),
+            },
+            Case {
+                name: "200 with a zero delay",
+                status: http::StatusCode::OK,
+                body: serde_json::json!({"delay_ms": 0}),
+            },
+            Case {
+                name: "200 with a negative delay",
+                status: http::StatusCode::OK,
+                body: serde_json::json!({"delay_ms": -1}),
+            },
+        ] {
+            let status = tc.status;
+            let body = tc.body.clone();
+            let router = Router::new().route(
+                "/{*path}",
+                any(move || {
+                    let body = body.clone();
+                    async move { (status, axum::Json(body)) }
+                }),
+            );
+            let server = spawn_http_server(router).await;
+
+            let err = get_delay(&server.url, "id")
+                .await
+                .expect_err(&format!("{}: expected an error", tc.name));
+            assert!(
+                err.is_delayed_event_not_found(),
+                "{}: expected DelayedEventNotFound, got {err:?}",
+                tc.name
+            );
+        }
+    }
+
+    /// A rate-limited lookup surfaces its retry hint, so callers can classify it as
+    /// retry-after rather than as a hard failure.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_rate_limited() {
+        let router = Router::new().route(
+            "/{*path}",
+            any(|| async {
+                (
+                    http::StatusCode::TOO_MANY_REQUESTS,
+                    [(http::header::RETRY_AFTER, "3")],
+                    axum::Json(serde_json::json!({"errcode": "M_LIMIT_EXCEEDED"})),
+                )
+            }),
+        );
+        let server = spawn_http_server(router).await;
+
+        let err = get_delay(&server.url, "id")
+            .await
+            .expect_err("expected an error for 429");
+        match err {
+            ActionError::RetryAfter { retry_after, .. } => {
+                assert_eq!(retry_after, Duration::from_secs(3))
+            }
+            other => panic!("expected RetryAfter, got {other:?}"),
+        }
+    }
+
+    /// Server errors and unparseable bodies stay transient — the delayed event may well still be there.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_transient() {
+        struct Case {
+            name: &'static str,
+            status: http::StatusCode,
+            body: &'static str,
+        }
+        for tc in [
+            Case {
+                name: "500",
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                body: "{}",
+            },
+            Case {
+                name: "403",
+                status: http::StatusCode::FORBIDDEN,
+                body: "{}",
+            },
+            Case {
+                name: "200 with a malformed body",
+                status: http::StatusCode::OK,
+                body: "not json",
+            },
+        ] {
+            let status = tc.status;
+            let body = tc.body;
+            let router =
+                Router::new().route("/{*path}", any(move || async move { (status, body) }));
+            let server = spawn_http_server(router).await;
+
+            let err = get_delay(&server.url, "id")
+                .await
+                .expect_err(&format!("{}: expected an error", tc.name));
+            assert!(
+                matches!(err, ActionError::Transient { .. }),
+                "{}: expected Transient, got {err:?}",
+                tc.name
+            );
+        }
     }
 
     /// Verifies that a 200 OK response returns the status code without error.
@@ -1729,6 +2313,248 @@ mod tests {
 
         let _ = exec(&server.url, "id", DelayEventAction::Restart).await;
         assert_eq!(*captured.lock().unwrap(), "application/json");
+    }
+
+    /// Captures the Authorization header and the `user_id` query parameter
+    /// of a request, for asserting on identity assertion.
+    struct CapturedAuth {
+        authorization: Option<String>,
+        user_id: Option<String>,
+    }
+
+    async fn spawn_capturing_server() -> (TestHttpServer, Arc<Mutex<Option<CapturedAuth>>>) {
+        let captured: Arc<Mutex<Option<CapturedAuth>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+        let router = Router::new().route(
+            "/{*path}",
+            any(move |req: Request| {
+                let captured = captured_clone.clone();
+                async move {
+                    let authorization = req
+                        .headers()
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    let user_id = req.uri().query().and_then(|q| {
+                        url::Url::parse(&format!("http://x/?{q}"))
+                            .ok()?
+                            .query_pairs()
+                            .find(|(k, _)| k == "user_id")
+                            .map(|(_, v)| v.into_owned())
+                    });
+                    *captured.lock().unwrap() = Some(CapturedAuth {
+                        authorization,
+                        user_id,
+                    });
+                    http::StatusCode::OK
+                }
+            }),
+        );
+        (spawn_http_server(router).await, captured)
+    }
+
+    /// `as_token` and `user_id` are passed through on the request when they are set.
+    #[tokio::test]
+    async fn test_execute_delayed_event_action_identity_assertion() {
+        let (server, captured) = spawn_capturing_server().await;
+
+        let status = exec_with_auth(
+            &server.url,
+            "id",
+            DelayEventAction::Restart,
+            "the-as-token",
+            "@alice:example.com",
+        )
+        .await
+        .expect("unexpected error");
+        assert_eq!(status, 200);
+
+        let captured = captured.lock().unwrap().take().expect("no request seen");
+        assert_eq!(
+            captured.authorization,
+            Some("Bearer the-as-token".to_owned())
+        );
+        assert_eq!(captured.user_id, Some("@alice:example.com".to_owned()));
+    }
+
+    /// When `as_token` is empty, no Authorization header or `user_id` query parameter is sent.
+    #[tokio::test]
+    async fn test_execute_delayed_event_action_no_auth_when_as_token_empty() {
+        let (server, captured) = spawn_capturing_server().await;
+
+        let status = exec(&server.url, "id", DelayEventAction::Restart)
+            .await
+            .expect("unexpected error");
+        assert_eq!(status, 200);
+
+        let captured = captured.lock().unwrap().take().expect("no request seen");
+        assert_eq!(captured.authorization, None);
+        assert_eq!(captured.user_id, None);
+    }
+
+    // ── check_is_joined ──────────────────────────────────────────────────────
+
+    /// A homeserver stub serving /is_joined at the unstable MSC4502 path.
+    struct IsJoinedServer {
+        server: TestHttpServer,
+        requests: Arc<Mutex<Vec<(String, http::HeaderMap)>>>,
+    }
+
+    async fn spawn_is_joined_server(joined: bool) -> IsJoinedServer {
+        let requests: Arc<Mutex<Vec<(String, http::HeaderMap)>>> = Arc::new(Mutex::new(Vec::new()));
+        let requests_clone = requests.clone();
+        let router = Router::new().route(
+            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+            any(move |req: Request| {
+                let requests = requests_clone.clone();
+                async move {
+                    let uri = req.uri().to_string();
+                    let headers = req.headers().clone();
+                    requests.lock().unwrap().push((uri, headers));
+                    axum::Json(serde_json::json!({ "joined": joined }))
+                }
+            }),
+        );
+        let server = spawn_http_server(router).await;
+        IsJoinedServer { server, requests }
+    }
+
+    /// The unstable MSC4502 endpoint is always used, regardless of what the
+    /// homeserver advertises.
+    #[tokio::test]
+    async fn test_check_is_joined_uses_unstable_endpoint() {
+        let hs = spawn_is_joined_server(true).await;
+
+        let joined = RealDeps::default()
+            .check_is_joined(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                IsJoinedSubject::Mxid("@alice:example.com"),
+                "as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert!(joined);
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "expected exactly one is_joined request");
+        assert!(
+            requests[0]
+                .0
+                .starts_with("/_matrix/client/unstable/io.element.msc4502/rooms/"),
+            "expected the unstable endpoint to be used, got {:?}",
+            requests[0].0
+        );
+    }
+
+    /// `joined: false` responses propagate as Ok(false), not an error.
+    #[tokio::test]
+    async fn test_check_is_joined_not_joined() {
+        let hs = spawn_is_joined_server(false).await;
+
+        let joined = RealDeps::default()
+            .check_is_joined(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                IsJoinedSubject::Mxid("@alice:example.com"),
+                "as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert!(!joined);
+    }
+
+    /// A non-2xx response from the is_joined endpoint itself surfaces as an error.
+    #[tokio::test]
+    async fn test_check_is_joined_http_error() {
+        let router = Router::new().route(
+            "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
+            any(|| async { http::StatusCode::FORBIDDEN }),
+        );
+        let server = spawn_http_server(router).await;
+
+        let err = RealDeps::default()
+            .check_is_joined(
+                &CsApiUrl(server.url.clone()),
+                "!room:example.com",
+                IsJoinedSubject::Mxid("@alice:example.com"),
+                "as_token",
+            )
+            .await
+            .expect_err("expected an error for a non-2xx is_joined response");
+        assert!(err.contains("403"), "unexpected error message: {err}");
+    }
+
+    // ── is_user_joined ───────────────────────────────────────────────────────
+
+    /// The request is shaped correctly: it uses `mxid`.
+    #[tokio::test]
+    async fn test_is_user_joined_request_shape() {
+        let hs = spawn_is_joined_server(true).await;
+
+        let _ = RealDeps::default()
+            .is_user_joined(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "@alice:example.com",
+                "the_as_token",
+            )
+            .await
+            .expect("unexpected error");
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let (uri, headers) = &requests[0];
+        assert!(
+            uri.contains("mxid=%40alice%3Aexample.com") || uri.contains("mxid=@alice:example.com"),
+            "expected mxid query param, got {uri:?}"
+        );
+        assert!(
+            uri.contains("%21room%3Aexample.com") || uri.contains("!room:example.com"),
+            "expected the room ID in the path, got {uri:?}"
+        );
+        assert_eq!(
+            headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer the_as_token"),
+        );
+    }
+
+    // ── is_server_joined ─────────────────────────────────────────────────────
+
+    /// The request is shaped correctly: it uses `server_name`, not `mxid`.
+    #[tokio::test]
+    async fn test_is_server_joined_request_shape() {
+        let hs = spawn_is_joined_server(true).await;
+
+        let _ = RealDeps::default()
+            .is_server_joined(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "origin.example.org",
+                "the_as_token",
+            )
+            .await
+            .expect("unexpected error");
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let (uri, headers) = &requests[0];
+        assert!(
+            uri.contains("server_name=origin.example.org"),
+            "expected a server_name query param, got {uri:?}"
+        );
+        assert!(
+            !uri.contains("mxid="),
+            "expected no mxid query param, got {uri:?}"
+        );
+        assert_eq!(
+            headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer the_as_token"),
+        );
     }
 
     // ── resolve_cs_api_url ────────────────────────────────────────────────────
@@ -2162,18 +2988,22 @@ mod tests {
             }),
         };
 
-        assert!(deps
-            .participant_exists(&auth, &room, &identity)
-            .await
-            .unwrap());
-        assert!(!deps
-            .participant_exists(&auth, &room, &identity)
-            .await
-            .unwrap());
-        assert!(deps
-            .participant_exists(&auth, &room, &identity)
-            .await
-            .is_err());
+        assert!(
+            deps.participant_exists(&auth, &room, &identity)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !deps
+                .participant_exists(&auth, &room, &identity)
+                .await
+                .unwrap()
+        );
+        assert!(
+            deps.participant_exists(&auth, &room, &identity)
+                .await
+                .is_err()
+        );
     }
 
     // ── real Twirp room-service client ────────────────────────────────────────
