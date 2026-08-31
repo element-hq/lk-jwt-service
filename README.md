@@ -69,6 +69,12 @@ Releases are available
 docker run -e LIVEKIT_URL="ws://somewhere" -e LIVEKIT_KEY=devkey -e LIVEKIT_SECRET=secret -e LIVEKIT_FULL_ACCESS_HOMESERVERS=example.com -p 8080:8080 ghcr.io/element-hq/lk-jwt-service:latest
 ```
 
+> **Which tag?** `latest` points at the most recent tagged
+> [release](https://github.com/element-hq/lk-jwt-service/releases).
+> `latest-ci` is a rolling build of `main`: it picks up every change
+> immediately but may be unstable — use it only if you are comfortable
+> running code that is under active development.
+
 ### 📦 From Release
 
 1. Download & mark as executable (example is amd64, replace with arm64 if needed):

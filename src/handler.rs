@@ -51,11 +51,12 @@ pub fn get_join_token(
     api_secret: &str,
     room: &LiveKitRoomAlias,
     identity: &LiveKitIdentity,
+    can_publish: bool,
 ) -> Result<String, String> {
     let grants = VideoGrants {
         room_join: true,
         room_create: false,
-        can_publish: true,
+        can_publish,
         can_subscribe: true,
         can_update_own_metadata: true,
         room: room.0.clone(),
@@ -760,12 +761,14 @@ impl Handler {
         lk_room_alias: &LiveKitRoomAlias,
         lk_identity: &LiveKitIdentity,
         matrix_id: &str,
+        can_publish: bool,
     ) -> Result<String, MatrixErrorResponse> {
         get_join_token(
             &self.livekit_auth.key,
             &self.livekit_auth.secret,
             lk_room_alias,
             lk_identity,
+            can_publish,
         )
         .map_err(|err| {
             error!(matrix_id, err = %err, "Handler: error getting LiveKit token");
@@ -842,8 +845,12 @@ impl Handler {
         let slot_id = "m.call#ROOM";
         let lk_room_alias = livekit_room_alias_for(&req.room, slot_id);
 
-        let token =
-            self.get_join_token_or_internal_error(&lk_room_alias, &lk_identity, &matrix_id)?;
+        let token = self.get_join_token_or_internal_error(
+            &lk_room_alias,
+            &lk_identity,
+            &matrix_id,
+            is_full_access_user,
+        )?;
 
         if is_full_access_user {
             // If delegation is requested, verify that we can resolve the
@@ -914,8 +921,12 @@ impl Handler {
             livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
-        let token =
-            self.get_join_token_or_internal_error(&lk_room_alias, &lk_identity, &matrix_id)?;
+        let token = self.get_join_token_or_internal_error(
+            &lk_room_alias,
+            &lk_identity,
+            &matrix_id,
+            is_full_access_user,
+        )?;
 
         if is_full_access_user {
             // If delegation is requested, verify that we can resolve the
@@ -1027,8 +1038,12 @@ impl Handler {
                 livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
             let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
-            let token =
-                self.get_join_token_or_internal_error(&lk_room_alias, &lk_identity, mxid_header)?;
+            let token = self.get_join_token_or_internal_error(
+                &lk_room_alias,
+                &lk_identity,
+                mxid_header,
+                true,
+            )?;
 
             self.create_livekit_room_or_internal_error(&lk_room_alias, mxid_header, &lk_identity)
                 .await?;
@@ -1137,8 +1152,14 @@ impl Handler {
             livekit_identity_for(&req.user_id, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
-        let token =
-            self.get_join_token_or_internal_error(&lk_room_alias, &lk_identity, &req.user_id)?;
+        // Federated participants relayed via the S-S API never get publish
+        // rights.
+        let token = self.get_join_token_or_internal_error(
+            &lk_room_alias,
+            &lk_identity,
+            &req.user_id,
+            false,
+        )?;
 
         info!(user_id = %req.user_id, claimed_device_id = %req.member.claimed_device_id,
             origin = %origin_header, matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
