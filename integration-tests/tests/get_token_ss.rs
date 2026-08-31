@@ -217,7 +217,7 @@ async fn success() {
 
     let claims = decode_livekit_jwt(jwt);
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
-    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
+    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
 
     expect_server_is_joined_request(&hs, "!room:example.com", hs.server_name(), AS_TOKEN);
