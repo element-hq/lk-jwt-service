@@ -3,162 +3,86 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-//! Harness for the appservice-ping end-to-end test: brings up a real
-//! Synapse homeserver and this service via Docker Compose, wired together
-//! as a Matrix application service, and tears them down afterward.
+//! Support code for the end-to-end test suite: the addresses the Docker
+//! Compose stack publishes to the host, and helpers for driving Synapse and
+//! the LiveKit SFU through them.
+//!
+//! The stack itself is not started here. Every test shares one long-lived
+//! stack, brought up and torn down by `cargo xtask e2e` — see
+//! [`assert_stack_is_up`] and the README.
 
-use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// The service under test's published base URL.
-pub const AUTH_SERVICE_URL: &str = "http://127.0.0.1:18080";
+/// This crate's package name, so `xtask` can name it on a `cargo test`
+/// command line without hardcoding it a second time.
+pub const PACKAGE_NAME: &str = env!("CARGO_PKG_NAME");
 
-/// Synapse's client-server API, published to the host.
-pub const SYNAPSE_CS_API_URL: &str = "http://127.0.0.1:18008";
+/// The environment variable `cargo xtask e2e` sets to tell the tests that
+/// the stack is up and theirs to use. See [`assert_stack_is_up`].
+pub const STACK_RUNNING_ENV: &str = "LK_JWT_E2E_STACK_RUNNING";
 
-/// The server name Synapse is configured with in docker/homeserver.yaml.
-pub const SYNAPSE_SERVER_NAME: &str = "synapse.e2e.test";
-
-/// The application service ID registered in docker/app-service.yaml.
+/// The application service ID both service instances are registered under
+/// (in docker/app-service-a.yaml and docker/app-service-b.yaml).
 pub const APPSERVICE_ID: &str = "lk-jwt-service";
 
-/// The LIVEKIT_URL the jwt-service container is configured with. Only resolvable
-/// from inside the Docker network. To actually reach the same LiveKit instance from the
-/// host, use [`LIVEKIT_SFU_ADDR`] instead.
-pub const LIVEKIT_URL: &str = "ws://livekit:7880";
+// ── Stack A ──────────────────────────────────────────────────────────────────
 
-/// The host-published address of the same LiveKit instance [`LIVEKIT_URL`]
+/// Stack A's Synapse client-server API, published to the host.
+pub const SYNAPSE_A_CS_API_URL: &str = "http://127.0.0.1:18008";
+
+/// The server name stack A's Synapse is configured with in
+/// docker/homeserver-a.yaml.
+pub const SYNAPSE_A_SERVER_NAME: &str = "synapse-a.e2e.test";
+
+/// Stack A's service under test, published to the host.
+pub const AUTH_SERVICE_A_URL: &str = "http://127.0.0.1:18080";
+
+/// The LIVEKIT_A_URL stack A's jwt-service container is configured with. Only
+/// resolvable from inside the Docker network. To actually reach the same
+/// LiveKit instance from the host, use [`LIVEKIT_A_SFU_ADDR`] instead.
+pub const LIVEKIT_A_URL: &str = "ws://livekit-a:7880";
+
+/// The host-published address of the same LiveKit instance [`LIVEKIT_A_URL`]
 /// points to from inside the Docker network.
-pub const LIVEKIT_SFU_ADDR: &str = "127.0.0.1:17880";
+pub const LIVEKIT_A_SFU_ADDR: &str = "127.0.0.1:17890";
 
-/// The second service instance's published base URL
-pub const AUTH_SERVICE2_URL: &str = "http://127.0.0.1:18081";
+// ── Stack B ──────────────────────────────────────────────────────────────────
 
-/// The second Synapse instance's client-server API, published to the host.
-pub const SYNAPSE2_CS_API_URL: &str = "http://127.0.0.1:18009";
+/// Stack B's Synapse client-server API, published to the host.
+pub const SYNAPSE_B_CS_API_URL: &str = "http://127.0.0.1:18009";
 
-/// The server name the second Synapse instance is configured with in
-/// docker/homeserver2.yaml.
-pub const SYNAPSE2_SERVER_NAME: &str = "synapse2.e2e.test";
+/// The server name stack B's Synapse is configured with in
+/// docker/homeserver-b.yaml.
+pub const SYNAPSE_B_SERVER_NAME: &str = "synapse-b.e2e.test";
 
-/// The LIVEKIT_URL the second jwt-service container is configured with. Only
-/// resolvable from inside the Docker network. To actually reach the same LiveKit
-/// instance from the host, use [`LIVEKIT2_SFU_ADDR`] instead.
-pub const LIVEKIT2_URL: &str = "ws://livekit2:7880";
+/// Stack B's service under test, published to the host.
+pub const AUTH_SERVICE_B_URL: &str = "http://127.0.0.1:18081";
 
-/// The host-published address of the same LiveKit instance [`LIVEKIT2_URL`]
+/// The LIVEKIT_A_URL stack B's jwt-service container is configured with. Only
+/// resolvable from inside the Docker network. To actually reach the same
+/// LiveKit instance from the host, use [`LIVEKIT_B_SFU_ADDR`] instead.
+pub const LIVEKIT_B_URL: &str = "ws://livekit-b:7880";
+
+/// The host-published address of the same LiveKit instance [`LIVEKIT_B_URL`]
 /// points to from inside the Docker network.
-pub const LIVEKIT2_SFU_ADDR: &str = "127.0.0.1:17881";
+pub const LIVEKIT_B_SFU_ADDR: &str = "127.0.0.1:17891";
 
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
+// ── The shared stack ─────────────────────────────────────────────────────────
 
-/// The `docker compose` (or `docker-compose`) command prefix to use.
-fn compose_base() -> &'static [&'static str] {
-    use std::sync::OnceLock;
-    static BASE: OnceLock<&'static [&'static str]> = OnceLock::new();
-    BASE.get_or_init(|| {
-        let has_plugin = Command::new("docker")
-            .args(["compose", "version"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if has_plugin {
-            &["docker", "compose"]
-        } else {
-            &["docker-compose"]
-        }
-    })
-}
-
-/// Runs a `docker compose` command with the supplied arguments and returns its output.
-fn compose(args: &[&str]) -> Output {
-    let (cmd, base_args) = compose_base()
-        .split_first()
-        .expect("compose_base is non-empty");
-    Command::new(cmd)
-        .args(base_args)
-        .args(["-f", "docker/docker-compose.yml"])
-        .args(args)
-        .current_dir(manifest_dir())
-        .output()
-        .expect("failed to run docker compose")
-}
-
-/// A running instance of the e2e Docker Compose stack.
+/// Asserts that the Docker Compose stack is up, i.e. that the suite was
+/// launched through `cargo xtask e2e`.
 ///
-/// This includes Synapse and the service under test, registered
-/// as an application service. The stack is torn down on drop.
-pub struct Stack;
-
-impl Stack {
-    /// Builds and starts the stack, waiting until both services respond as
-    /// healthy. Panics (dumping container logs) if that doesn't happen in
-    /// time.
-    pub async fn start() -> Stack {
-        let up = compose(&["up", "-d", "--build"]);
-        if !up.status.success() {
-            panic!(
-                "docker compose up failed:\nstdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&up.stdout),
-                String::from_utf8_lossy(&up.stderr),
-            );
-        }
-
-        let stack = Stack;
-        stack.wait_ready().await;
-        stack
-    }
-
-    /// Waits for the stack's components to boot up and declare themselves as ready.
-    async fn wait_ready(&self) {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .expect("failed to build reqwest client");
-        let deadline = Instant::now() + Duration::from_secs(180);
-
-        let checks = [
-            ("synapse", format!("{SYNAPSE_CS_API_URL}/health")),
-            ("jwt-service", format!("{AUTH_SERVICE_URL}/healthz")),
-            ("livekit", format!("http://{LIVEKIT_SFU_ADDR}/")),
-            ("synapse2", format!("{SYNAPSE2_CS_API_URL}/health")),
-            ("jwt-service2", format!("{AUTH_SERVICE2_URL}/healthz")),
-            ("livekit2", format!("http://{LIVEKIT2_SFU_ADDR}/")),
-        ];
-        for (name, url) in checks {
-            loop {
-                if let Ok(resp) = client.get(&url).send().await
-                    && resp.status().is_success()
-                {
-                    break;
-                }
-                if Instant::now() > deadline {
-                    self.dump_logs();
-                    panic!("{name} did not become healthy in time (polled {url})");
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        }
-    }
-
-    /// Prints the output of `docker compose logs`.
-    fn dump_logs(&self) {
-        let logs = compose(&["logs"]);
-        eprintln!(
-            "docker compose logs:\n{}\n{}",
-            String::from_utf8_lossy(&logs.stdout),
-            String::from_utf8_lossy(&logs.stderr),
-        );
-    }
-}
-
-impl Drop for Stack {
-    fn drop(&mut self) {
-        let _ = compose(&["down", "-v"]); // Tear down the stack.
-    }
+/// The stack is shared by every test and none of them starts it, so a test
+/// run without it would otherwise fail with a wall of connection errors
+/// rather than saying what's actually missing. Call this first in every
+/// test.
+pub fn assert_stack_is_up() {
+    assert!(
+        std::env::var_os(STACK_RUNNING_ENV).is_some(),
+        "the e2e stack isn't running: this suite doesn't start it itself. Run it as \
+         `cargo xtask e2e` from the repository root, which brings the stack up once, \
+         runs every test against it and tears it down again."
+    );
 }
 
 // ── Matrix client helpers ────────────────────────────────────────────────────
@@ -169,8 +93,20 @@ pub struct MatrixUser {
     pub access_token: String,
 }
 
+/// Builds a Matrix ID localpart that's unique per call, so tests sharing
+/// one long-lived homeserver never collide when registering users.
+pub fn unique_localpart(prefix: &str) -> String {
+    format!("{prefix}-{}", uuid::Uuid::new_v4())
+}
+
 /// Registers a new user against the homeserver behind `cs_api_url`.
-pub async fn register_user(cs_api_url: &str, username: &str, password: &str) -> MatrixUser {
+///
+/// `name` is only the readable half of the localpart: the homeserver
+/// outlives every individual test, so [`unique_localpart`] makes the
+/// registered localpart unique regardless of how often the same `name` is
+/// used across the suite or across repeated runs.
+pub async fn register_user(cs_api_url: &str, name: &str, password: &str) -> MatrixUser {
+    let username = unique_localpart(name);
     let client = reqwest::Client::new();
     let register_url = format!("{cs_api_url}/_matrix/client/v3/register");
 
@@ -297,6 +233,59 @@ pub struct LiveKitParticipant {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// Connects to the SFU at `sfu_addr` with the given access token and waits
+/// for the JoinResponse — the point at which the SFU has admitted the
+/// participant — returning the still-open signalling socket alongside the
+/// ping interval it carried.
+async fn connect_and_join(
+    sfu_addr: &str,
+    access_token: &str,
+) -> (
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Duration,
+) {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let url = format!(
+        "ws://{sfu_addr}/rtc?access_token={access_token}&protocol=15&sdk=other&version=1.0.0&auto_subscribe=1"
+    );
+    let connect = tokio_tungstenite::connect_async(&url);
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), connect)
+        .await
+        .unwrap_or_else(|_| panic!("timed out connecting to the LiveKit SFU"))
+        .unwrap_or_else(|e| panic!("failed to connect to the LiveKit SFU: {e}"));
+
+    let read_deadline = Duration::from_secs(10);
+    let ping_interval = loop {
+        let msg = tokio::time::timeout(read_deadline, socket.next())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for a JoinResponse from the SFU"))
+            .unwrap_or_else(|| panic!("the SFU closed the connection before joining"))
+            .unwrap_or_else(|e| panic!("error reading from the SFU: {e}"));
+
+        let bytes = match msg {
+            Message::Binary(bytes) => bytes,
+            Message::Close(frame) => {
+                panic!("the SFU rejected the connection (likely an invalid token): {frame:?}")
+            }
+            _ => continue,
+        };
+
+        let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
+            .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
+        if let Some(livekit_protocol::signal_response::Message::Join(join)) = response.message {
+            assert!(
+                join.room.is_some(),
+                "expected the JoinResponse to carry room info"
+            );
+            break Duration::from_secs(join.ping_interval.max(1) as u64);
+        }
+    };
+
+    (socket, ping_interval)
+}
+
 impl LiveKitParticipant {
     /// Connects to the SFU at `sfu_addr` with the given access token and
     /// returns once the SFU has admitted the participant into the room.
@@ -304,43 +293,7 @@ impl LiveKitParticipant {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::Message;
 
-        let url = format!(
-            "ws://{sfu_addr}/rtc?access_token={access_token}&protocol=15&sdk=other&version=1.0.0&auto_subscribe=1"
-        );
-        let connect = tokio_tungstenite::connect_async(&url);
-        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), connect)
-            .await
-            .unwrap_or_else(|_| panic!("timed out connecting to the LiveKit SFU"))
-            .unwrap_or_else(|e| panic!("failed to connect to the LiveKit SFU: {e}"));
-
-        // Wait for the JoinResponse — the point at which the SFU has admitted
-        // the participant. It also carries the ping interval to honour.
-        let read_deadline = Duration::from_secs(10);
-        let ping_interval = loop {
-            let msg = tokio::time::timeout(read_deadline, socket.next())
-                .await
-                .unwrap_or_else(|_| panic!("timed out waiting for a JoinResponse from the SFU"))
-                .unwrap_or_else(|| panic!("the SFU closed the connection before joining"))
-                .unwrap_or_else(|e| panic!("error reading from the SFU: {e}"));
-
-            let bytes = match msg {
-                Message::Binary(bytes) => bytes,
-                Message::Close(frame) => {
-                    panic!("the SFU rejected the connection (likely an invalid token): {frame:?}")
-                }
-                _ => continue,
-            };
-
-            let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
-                .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
-            if let Some(livekit_protocol::signal_response::Message::Join(join)) = response.message {
-                assert!(
-                    join.room.is_some(),
-                    "expected the JoinResponse to carry room info"
-                );
-                break Duration::from_secs(join.ping_interval.max(1) as u64);
-            }
-        };
+        let (mut socket, ping_interval) = connect_and_join(sfu_addr, access_token).await;
 
         let (leave_tx, mut leave_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -412,6 +365,69 @@ impl Drop for LiveKitParticipant {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// Connects to the SFU at `sfu_addr` with the given access token and
+/// attempts to publish a track, returning whether the SFU actually let it
+/// through.
+///
+/// A participant is granted `canPublish` (or not) via the video grant baked
+/// into their access token, and the SFU is the one that enforces it: it
+/// confirms an accepted publish with a `TrackPublished` response naming the
+/// client's `cid`, while a participant without publish rights is simply
+/// never answered. So the only way to observe the rejection from here is a
+/// bounded wait for that response.
+pub async fn attempt_publish_track(sfu_addr: &str, access_token: &str) -> bool {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut socket, _) = connect_and_join(sfu_addr, access_token).await;
+
+    let cid = format!("e2e-track-{}", uuid::Uuid::new_v4());
+    let add_track = livekit_protocol::SignalRequest {
+        message: Some(livekit_protocol::signal_request::Message::AddTrack(
+            livekit_protocol::AddTrackRequest {
+                cid: cid.clone(),
+                name: "e2e-test-track".to_owned(),
+                r#type: livekit_protocol::TrackType::Audio as i32,
+                source: livekit_protocol::TrackSource::Microphone as i32,
+                ..Default::default()
+            },
+        )),
+    };
+    socket
+        .send(Message::binary(prost::Message::encode_to_vec(&add_track)))
+        .await
+        .expect("failed to send AddTrackRequest");
+
+    let published = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = match socket.next().await {
+                Some(Ok(msg)) => msg,
+                _ => return false,
+            };
+            let bytes = match msg {
+                Message::Binary(bytes) => bytes,
+                Message::Close(_) => return false,
+                _ => continue,
+            };
+            let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
+                .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
+            match response.message {
+                Some(livekit_protocol::signal_response::Message::TrackPublished(published))
+                    if published.cid == cid =>
+                {
+                    return true;
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    let _ = socket.close(None).await;
+    published
 }
 
 // ── Helpers ────────────────────────────────────────────────────────

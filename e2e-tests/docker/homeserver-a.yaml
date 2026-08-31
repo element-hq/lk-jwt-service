@@ -1,5 +1,5 @@
-server_name: "synapse.e2e.test"
-public_baseurl: http://synapse.e2e.test/
+server_name: "synapse-a.e2e.test"
+public_baseurl: http://synapse-a.e2e.test/
 
 pid_file: /tmp/homeserver.pid
 
@@ -51,11 +51,17 @@ report_stats: false
 max_event_delay_duration: 1h
 
 app_service_config_files:
-  - /config/app-service.yaml
+  - /config/app-service-a.yaml
 
 # Enable registration so that the test suite can provision its own users.
 enable_registration: true
 enable_registration_without_verification: true
+# Every test shares one long-lived homeserver, so the suite registers a good
+# many users over its lifetime. The default rate limit is tuned to slow down
+# abusive registration on a public-facing server and would reject them.
+rc_registration:
+  per_second: 1000
+  burst_count: 1000
 
 experimental_features:
   # Enable membership look-up via /is_joined.

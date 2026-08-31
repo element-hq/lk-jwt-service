@@ -1,5 +1,5 @@
 [workspace]
-members = ["integration-tests", "e2e-tests"]
+members = ["integration-tests", "e2e-tests", "xtask"]
 
 [package]
 name = "lk-jwt-service"

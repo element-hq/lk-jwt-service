@@ -15,12 +15,14 @@ RUN apk add --no-cache musl-dev cmake make gcc g++ perl linux-headers ca-certifi
 COPY Cargo.toml Cargo.lock ./
 COPY integration-tests/Cargo.toml integration-tests/Cargo.toml
 COPY e2e-tests/Cargo.toml e2e-tests/Cargo.toml
+COPY xtask/Cargo.toml xtask/Cargo.toml
 
 # Build with stub sources first so dependency compilation lands in its own
 # layer and is skipped by the Docker layer cache when only src/ changes.
-RUN mkdir -p src/bin integration-tests/src e2e-tests/src \
+RUN mkdir -p src/bin integration-tests/src e2e-tests/src xtask/src \
     && echo "fn main() {}" > src/main.rs \
     && echo "fn main() {}" > src/bin/healthcheck.rs \
+    && echo "fn main() {}" > xtask/src/main.rs \
     && touch src/lib.rs integration-tests/src/lib.rs e2e-tests/src/lib.rs \
     && cargo build -p lk-jwt-service --release --locked --features "$CARGO_FEATURES" \
     && rm -rf src

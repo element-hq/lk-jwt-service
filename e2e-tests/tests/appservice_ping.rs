@@ -4,20 +4,20 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    APPSERVICE_ID, AUTH_SERVICE_URL, AUTH_SERVICE2_URL, SYNAPSE_SERVER_NAME, SYNAPSE2_SERVER_NAME,
-    Stack,
+    APPSERVICE_ID, AUTH_SERVICE_A_URL, AUTH_SERVICE_B_URL, SYNAPSE_A_SERVER_NAME,
+    SYNAPSE_B_SERVER_NAME, assert_stack_is_up,
 };
 
 /// Triggers the app-service ping roundtrip to ensure the service and the homeserver
 /// can reach each other.
 #[tokio::test]
 async fn appservice_ping_round_trip_succeeds() {
-    let _stack = Stack::start().await;
+    assert_stack_is_up();
 
     let resp = reqwest::Client::new()
-        .post(format!("{AUTH_SERVICE_URL}/appservice-ping"))
+        .post(format!("{AUTH_SERVICE_A_URL}/appservice-ping"))
         .json(&serde_json::json!({
-            "server_name": SYNAPSE_SERVER_NAME,
+            "server_name": SYNAPSE_A_SERVER_NAME,
             "appservice_id": APPSERVICE_ID,
         }))
         .send()
@@ -36,9 +36,9 @@ async fn appservice_ping_round_trip_succeeds() {
     );
 
     let resp = reqwest::Client::new()
-        .post(format!("{AUTH_SERVICE2_URL}/appservice-ping"))
+        .post(format!("{AUTH_SERVICE_B_URL}/appservice-ping"))
         .json(&serde_json::json!({
-            "server_name": SYNAPSE2_SERVER_NAME,
+            "server_name": SYNAPSE_B_SERVER_NAME,
             "appservice_id": APPSERVICE_ID,
         }))
         .send()

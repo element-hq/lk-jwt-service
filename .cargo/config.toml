@@ -1,0 +1,4 @@
+[alias]
+# Workspace automation, see xtask/src/main.rs. Notably `cargo xtask e2e`,
+# which runs the end-to-end suite against a single, shared Docker stack.
+xtask = "run --package xtask --"
