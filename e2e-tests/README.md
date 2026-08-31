@@ -32,8 +32,7 @@ can be exercised, too.
  └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each test file is its own binary and defines exactly one test. They all
-share a single stack: bringing it up costs minutes, so the tests never do it
+All tests share a single stack: bringing it up costs minutes, so the tests never do it
 themselves. `cargo xtask e2e` runs `docker compose up -d --build` once, waits
 for every component to report healthy, runs the whole suite against that one
 stack and finally tears it down again with `docker compose down -v`. A test
