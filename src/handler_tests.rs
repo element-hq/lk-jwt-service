@@ -611,6 +611,7 @@ async fn test_get_join_token() {
         "testSecret",
         &LiveKitRoomAlias("testRoom".into()),
         &LiveKitIdentity("testIdentity@example.com".into()),
+        true,
     )
     .expect("unexpected error");
     assert!(!token_string.is_empty(), "expected token to be non-empty");
@@ -620,6 +621,30 @@ async fn test_get_join_token() {
         claims["video"]["roomCreate"],
         serde_json::Value::Bool(true),
         "roomCreate must be false"
+    );
+    assert_eq!(
+        claims["video"]["canPublish"],
+        serde_json::Value::Bool(true),
+        "canPublish must reflect the passed-in flag"
+    );
+}
+
+#[tokio::test]
+async fn test_get_join_token_can_publish_false() {
+    let token_string = get_join_token(
+        "testKey",
+        "testSecret",
+        &LiveKitRoomAlias("testRoom".into()),
+        &LiveKitIdentity("testIdentity@example.com".into()),
+        false,
+    )
+    .expect("unexpected error");
+
+    let claims = parse_jwt_claims(&token_string, "testSecret");
+    assert_ne!(
+        claims["video"]["canPublish"],
+        serde_json::Value::Bool(true),
+        "canPublish must reflect the passed-in flag"
     );
 }
 
