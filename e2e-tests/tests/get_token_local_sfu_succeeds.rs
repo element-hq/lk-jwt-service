@@ -4,14 +4,14 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, SYNAPSE_A_CS_API_URL, create_and_join_room, register_user,
-    require_stack, verify_livekit_token_is_usable,
+    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, SYNAPSE_A_CS_API_URL, assert_stack_is_up,
+    create_and_join_room, register_user, verify_livekit_token_is_usable,
 };
 
 /// A joined user succeeds in getting a token for the local SFU.
 #[tokio::test]
 async fn get_token_local_sfu_succeeds() {
-    require_stack();
+    assert_stack_is_up();
 
     // Register a user and have them create (and thus join) a room.
     let user = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;

@@ -9,7 +9,7 @@
 //!
 //! The stack itself is not started here. Every test shares one long-lived
 //! stack, brought up and torn down by `cargo xtask e2e` — see
-//! [`require_stack`] and the README.
+//! [`assert_stack_is_up`] and the README.
 
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use std::time::Duration;
 pub const PACKAGE_NAME: &str = env!("CARGO_PKG_NAME");
 
 /// The environment variable `cargo xtask e2e` sets to tell the tests that
-/// the stack is up and theirs to use. See [`require_stack`].
+/// the stack is up and theirs to use. See [`assert_stack_is_up`].
 pub const STACK_RUNNING_ENV: &str = "LK_JWT_E2E_STACK_RUNNING";
 
 /// The application service ID both service instances are registered under
@@ -76,7 +76,7 @@ pub const LIVEKIT_B_SFU_ADDR: &str = "127.0.0.1:17891";
 /// run without it would otherwise fail with a wall of connection errors
 /// rather than saying what's actually missing. Call this first in every
 /// test.
-pub fn require_stack() {
+pub fn assert_stack_is_up() {
     assert!(
         std::env::var_os(STACK_RUNNING_ENV).is_some(),
         "the e2e stack isn't running: this suite doesn't start it itself. Run it as \

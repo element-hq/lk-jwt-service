@@ -4,13 +4,13 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_A_URL, SYNAPSE_A_CS_API_URL, create_and_join_room, register_user, require_stack,
+    LIVEKIT_A_URL, SYNAPSE_A_CS_API_URL, assert_stack_is_up, create_and_join_room, register_user,
 };
 
 /// A non-joined user is rejected.
 #[tokio::test]
 async fn get_token_rejects_non_member() {
-    require_stack();
+    assert_stack_is_up();
 
     // Alice creates (and thus joins) a room; Bob never joins it.
     let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;

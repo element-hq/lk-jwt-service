@@ -5,14 +5,14 @@
 
 use lk_jwt_service_e2e_tests::{
     LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, SYNAPSE_A_CS_API_URL, SYNAPSE_A_SERVER_NAME,
-    SYNAPSE_B_CS_API_URL, create_and_join_room, join_room_via, register_user, require_stack,
+    SYNAPSE_B_CS_API_URL, assert_stack_is_up, create_and_join_room, join_room_via, register_user,
     verify_livekit_token_is_usable,
 };
 
 /// A joined user succeeds in getting a token for a remote SFU.
 #[tokio::test]
 async fn get_token_remote_sfu_succeeds() {
-    require_stack();
+    assert_stack_is_up();
 
     // Alice creates (and thus joins) a room on her own homeserver (hs A).
     let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;

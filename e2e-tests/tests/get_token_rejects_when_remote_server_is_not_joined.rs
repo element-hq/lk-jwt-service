@@ -4,14 +4,14 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_A_URL, SYNAPSE_A_SERVER_NAME, SYNAPSE_B_CS_API_URL, create_and_join_room,
-    register_user, require_stack,
+    LIVEKIT_A_URL, SYNAPSE_A_SERVER_NAME, SYNAPSE_B_CS_API_URL, assert_stack_is_up,
+    create_and_join_room, register_user,
 };
 
 /// A joined user is rejected if the remote server isn't joined.
 #[tokio::test]
 async fn get_token_rejects_when_remote_server_is_not_joined() {
-    require_stack();
+    assert_stack_is_up();
 
     // Bob creates (and thus joins) a room on hs B. hs A never joins it.
     let bob = register_user(SYNAPSE_B_CS_API_URL, "bob", "e2e-test-password").await;

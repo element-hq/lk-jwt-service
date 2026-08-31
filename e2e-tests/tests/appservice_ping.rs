@@ -5,14 +5,14 @@
 
 use lk_jwt_service_e2e_tests::{
     APPSERVICE_ID, AUTH_SERVICE_A_URL, AUTH_SERVICE_B_URL, SYNAPSE_A_SERVER_NAME,
-    SYNAPSE_B_SERVER_NAME, require_stack,
+    SYNAPSE_B_SERVER_NAME, assert_stack_is_up,
 };
 
 /// Triggers the app-service ping roundtrip to ensure the service and the homeserver
 /// can reach each other.
 #[tokio::test]
 async fn appservice_ping_round_trip_succeeds() {
-    require_stack();
+    assert_stack_is_up();
 
     let resp = reqwest::Client::new()
         .post(format!("{AUTH_SERVICE_A_URL}/appservice-ping"))
