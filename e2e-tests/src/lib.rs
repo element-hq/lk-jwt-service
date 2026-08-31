@@ -241,9 +241,7 @@ async fn connect_and_join(
     sfu_addr: &str,
     access_token: &str,
 ) -> (
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Duration,
 ) {
     use futures_util::StreamExt;
@@ -413,9 +411,8 @@ pub async fn attempt_publish_track(sfu_addr: &str, access_token: &str) -> bool {
                 Message::Close(_) => return false,
                 _ => continue,
             };
-            let response =
-                <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
-                    .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
+            let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
+                .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
             match response.message {
                 Some(livekit_protocol::signal_response::Message::TrackPublished(published))
                     if published.cid == cid =>
