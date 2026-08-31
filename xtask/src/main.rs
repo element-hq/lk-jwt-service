@@ -20,9 +20,10 @@ use lk_jwt_service_e2e_tests as e2e;
 
 /// Prints a progress line, prefixed with the time elapsed since startup.
 ///
-/// The stack takes minutes to come up, so the point of these is that
-/// someone reading along -- in a terminal or in a CI log -- can always tell
-/// which step is running and how long it has been at it.
+/// When images need to be rebuilt, the stack may take minutes to come up,
+/// so the point of these is that someone reading along -- in a terminal or in
+/// a CI log -- can always tell which step is running and how long it has been
+/// at it.
 macro_rules! log {
     ($($arg:tt)*) => {
         eprintln!("[xtask {}] {}", clock(), format_args!($($arg)*))
