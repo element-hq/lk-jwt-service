@@ -7,9 +7,8 @@
 //! `.cargo/config.toml`.
 //!
 //! It exists for the end-to-end suite: bringing its Docker Compose stack up
-//! costs minutes, so the tests don't do it themselves. This task brings the
-//! stack up once, runs every e2e test binary against that one stack, and
-//! tears it down once at the end.
+//! costs minutes, so the tests don't do it themselves. This task can bring the
+//! stack up once, run e2e tests against it and tear the stack down.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
