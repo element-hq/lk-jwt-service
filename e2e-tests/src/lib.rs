@@ -233,6 +233,61 @@ pub struct LiveKitParticipant {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// Connects to the SFU at `sfu_addr` with the given access token and waits
+/// for the JoinResponse — the point at which the SFU has admitted the
+/// participant — returning the still-open signalling socket alongside the
+/// ping interval it carried.
+async fn connect_and_join(
+    sfu_addr: &str,
+    access_token: &str,
+) -> (
+    tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    Duration,
+) {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let url = format!(
+        "ws://{sfu_addr}/rtc?access_token={access_token}&protocol=15&sdk=other&version=1.0.0&auto_subscribe=1"
+    );
+    let connect = tokio_tungstenite::connect_async(&url);
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), connect)
+        .await
+        .unwrap_or_else(|_| panic!("timed out connecting to the LiveKit SFU"))
+        .unwrap_or_else(|e| panic!("failed to connect to the LiveKit SFU: {e}"));
+
+    let read_deadline = Duration::from_secs(10);
+    let ping_interval = loop {
+        let msg = tokio::time::timeout(read_deadline, socket.next())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for a JoinResponse from the SFU"))
+            .unwrap_or_else(|| panic!("the SFU closed the connection before joining"))
+            .unwrap_or_else(|e| panic!("error reading from the SFU: {e}"));
+
+        let bytes = match msg {
+            Message::Binary(bytes) => bytes,
+            Message::Close(frame) => {
+                panic!("the SFU rejected the connection (likely an invalid token): {frame:?}")
+            }
+            _ => continue,
+        };
+
+        let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
+            .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
+        if let Some(livekit_protocol::signal_response::Message::Join(join)) = response.message {
+            assert!(
+                join.room.is_some(),
+                "expected the JoinResponse to carry room info"
+            );
+            break Duration::from_secs(join.ping_interval.max(1) as u64);
+        }
+    };
+
+    (socket, ping_interval)
+}
+
 impl LiveKitParticipant {
     /// Connects to the SFU at `sfu_addr` with the given access token and
     /// returns once the SFU has admitted the participant into the room.
@@ -240,43 +295,7 @@ impl LiveKitParticipant {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::Message;
 
-        let url = format!(
-            "ws://{sfu_addr}/rtc?access_token={access_token}&protocol=15&sdk=other&version=1.0.0&auto_subscribe=1"
-        );
-        let connect = tokio_tungstenite::connect_async(&url);
-        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), connect)
-            .await
-            .unwrap_or_else(|_| panic!("timed out connecting to the LiveKit SFU"))
-            .unwrap_or_else(|e| panic!("failed to connect to the LiveKit SFU: {e}"));
-
-        // Wait for the JoinResponse — the point at which the SFU has admitted
-        // the participant. It also carries the ping interval to honour.
-        let read_deadline = Duration::from_secs(10);
-        let ping_interval = loop {
-            let msg = tokio::time::timeout(read_deadline, socket.next())
-                .await
-                .unwrap_or_else(|_| panic!("timed out waiting for a JoinResponse from the SFU"))
-                .unwrap_or_else(|| panic!("the SFU closed the connection before joining"))
-                .unwrap_or_else(|e| panic!("error reading from the SFU: {e}"));
-
-            let bytes = match msg {
-                Message::Binary(bytes) => bytes,
-                Message::Close(frame) => {
-                    panic!("the SFU rejected the connection (likely an invalid token): {frame:?}")
-                }
-                _ => continue,
-            };
-
-            let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
-                .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
-            if let Some(livekit_protocol::signal_response::Message::Join(join)) = response.message {
-                assert!(
-                    join.room.is_some(),
-                    "expected the JoinResponse to carry room info"
-                );
-                break Duration::from_secs(join.ping_interval.max(1) as u64);
-            }
-        };
+        let (mut socket, ping_interval) = connect_and_join(sfu_addr, access_token).await;
 
         let (leave_tx, mut leave_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -348,6 +367,70 @@ impl Drop for LiveKitParticipant {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// Connects to the SFU at `sfu_addr` with the given access token and
+/// attempts to publish a track, returning whether the SFU actually let it
+/// through.
+///
+/// A participant is granted `canPublish` (or not) via the video grant baked
+/// into their access token, and the SFU is the one that enforces it: it
+/// confirms an accepted publish with a `TrackPublished` response naming the
+/// client's `cid`, while a participant without publish rights is simply
+/// never answered. So the only way to observe the rejection from here is a
+/// bounded wait for that response.
+pub async fn attempt_publish_track(sfu_addr: &str, access_token: &str) -> bool {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut socket, _) = connect_and_join(sfu_addr, access_token).await;
+
+    let cid = format!("e2e-track-{}", uuid::Uuid::new_v4());
+    let add_track = livekit_protocol::SignalRequest {
+        message: Some(livekit_protocol::signal_request::Message::AddTrack(
+            livekit_protocol::AddTrackRequest {
+                cid: cid.clone(),
+                name: "e2e-test-track".to_owned(),
+                r#type: livekit_protocol::TrackType::Audio as i32,
+                source: livekit_protocol::TrackSource::Microphone as i32,
+                ..Default::default()
+            },
+        )),
+    };
+    socket
+        .send(Message::binary(prost::Message::encode_to_vec(&add_track)))
+        .await
+        .expect("failed to send AddTrackRequest");
+
+    let published = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = match socket.next().await {
+                Some(Ok(msg)) => msg,
+                _ => return false,
+            };
+            let bytes = match msg {
+                Message::Binary(bytes) => bytes,
+                Message::Close(_) => return false,
+                _ => continue,
+            };
+            let response =
+                <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
+                    .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
+            match response.message {
+                Some(livekit_protocol::signal_response::Message::TrackPublished(published))
+                    if published.cid == cid =>
+                {
+                    return true;
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    let _ = socket.close(None).await;
+    published
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
