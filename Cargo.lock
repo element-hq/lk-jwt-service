@@ -1202,19 +1202,18 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "livekit-api"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4ed580af1187bd8fad22a981fde55cad03d4f9468d9eb9c6ecce6c753371aae"
+checksum = "35d1477ba65e4a5d74c47ceb982e9c582a4543c1b774607652085482821978a6"
 dependencies = [
  "base64 0.21.7",
  "device-info",
- "hmac",
  "http",
- "jsonwebtoken",
  "livekit-common",
  "livekit-net",
  "livekit-protocol",
  "livekit-runtime",
+ "livekit-token",
  "log",
  "os_info",
  "parking_lot",
@@ -1226,7 +1225,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "signature",
  "thiserror 2.0.20",
  "tokio",
  "url",
@@ -1234,9 +1232,9 @@ dependencies = [
 
 [[package]]
 name = "livekit-common"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f903bfee33454f21c553dbf14d6f4ffbf062157b23b04fde9821cbb94ff01169"
+checksum = "854b79dff62b1ce9d1cc08bf8ce927313b4e59fdb8ed1cdc79942715d6494fe4"
 dependencies = [
  "livekit-protocol",
 ]
@@ -1253,7 +1251,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rustls-native-certs",
  "tokio-rustls",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.29.0",
  "url",
 ]
 
@@ -1277,6 +1275,21 @@ checksum = "532e84c6cdc5fe774f2b5d9912597b5f3bea561927a48296d03e24549d21c3f6"
 dependencies = [
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "livekit-token"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb65d06695dd768d7ef2135a9ba169a4048119041b543a50323fd78ec5ee064b"
+dependencies = [
+ "hmac",
+ "jsonwebtoken",
+ "livekit-protocol",
+ "serde",
+ "sha2 0.10.9",
+ "signature",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1327,7 +1340,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde_json",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.30.0",
  "uuid",
 ]
 
@@ -2464,6 +2477,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2838,7 +2862,19 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite",
+ "tungstenite 0.29.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -2984,9 +3020,25 @@ dependencies = [
  "rand 0.9.5",
  "rustls",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.10.7",
  "thiserror 2.0.20",
  "url",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.10.2",
+ "sha1 0.11.0",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
