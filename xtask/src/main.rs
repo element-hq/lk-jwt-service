@@ -34,7 +34,7 @@ const HELP: &str = "\
 cargo xtask — workspace automation
 
 USAGE:
-    cargo xtask e2e [--keep] [-- <cargo test args>...]
+    cargo xtask e2e [--keep] [--logs] [-- <cargo test args>...]
             Bring the e2e Docker Compose stack up, run the whole e2e suite
             against it and tear it down again. Extra arguments after `--`
             are passed on to `cargo test`, e.g.
@@ -45,6 +45,9 @@ USAGE:
             --keep  Leave the stack running afterwards, so the next run
                     doesn't have to boot it again. Tear it down with
                     `cargo xtask e2e-down`.
+
+            --logs  Stream container logs while the suite runs, interleaved
+                    with the test output. Off by default.
 
     cargo xtask e2e-up
             Bring the stack up and leave it running, without running tests.
@@ -94,10 +97,12 @@ fn main() -> ExitCode {
 fn e2e_task(args: std::iter::Skip<std::env::Args>) -> Result<(), String> {
     // Everything up to `--` is ours, everything after it is `cargo test`'s.
     let mut keep = false;
+    let mut logs = false;
     let mut args = args;
     for arg in args.by_ref() {
         match arg.as_str() {
             "--keep" => keep = true,
+            "--logs" => logs = true,
             "--" => break,
             other => return Err(format!("unknown option `{other}`\n\n{HELP}")),
         }
@@ -108,7 +113,7 @@ fn e2e_task(args: std::iter::Skip<std::env::Args>) -> Result<(), String> {
     // healthy still has containers holding its ports, so it has to be torn
     // down like any other failure rather than left behind for the next run
     // to trip over.
-    let outcome = stack_up().and_then(|()| run_e2e_tests(&cargo_test_args));
+    let outcome = stack_up().and_then(|()| run_e2e_tests(&cargo_test_args, logs));
     if outcome.is_err() {
         // The stack is about to go away, so grab what its containers have to
         // say about the failure while they're still there.
@@ -130,13 +135,21 @@ fn e2e_task(args: std::iter::Skip<std::env::Args>) -> Result<(), String> {
 /// `--no-fail-fast` because the stack is the expensive part: once it's up,
 /// running the remaining test binaries after a failure is nearly free, and
 /// far more useful than a single failure per stack boot.
-fn run_e2e_tests(extra_args: &[String]) -> Result<(), String> {
+///
+/// `logs` streams container output for the duration of the run when set --
+/// see `--logs` in [`HELP`].
+fn run_e2e_tests(extra_args: &[String], logs: bool) -> Result<(), String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let args: Vec<String> = ["test", "--package", e2e::PACKAGE_NAME, "--no-fail-fast"]
         .iter()
         .map(|a| (*a).to_owned())
         .chain(extra_args.iter().cloned())
         .collect();
+
+    // Kept alive for the duration of the test run so container output
+    // interleaves with the suite's own -- dropped (and thus killed) however
+    // this function returns, including on the early failure below.
+    let _log_follower = logs.then(LogFollower::spawn).transpose()?;
 
     log!("running the e2e suite against the stack");
     log!("$ {cargo} {}", args.join(" "));
@@ -376,6 +389,38 @@ async fn wait_ready(client: &reqwest::Client) -> Result<(), String> {
         format_duration(waiting_since.elapsed())
     );
     Ok(())
+}
+
+/// Streams `docker compose logs --follow` to this process' stdout/stderr for
+/// as long as it stays alive, so container output interleaves with whatever
+/// else is running -- useful for a test that hangs or a service acting up
+/// without failing outright.
+///
+/// Killed on drop, which covers every way the test run can end: success,
+/// failure, or an early return via `?`.
+struct LogFollower(std::process::Child);
+
+impl LogFollower {
+    fn spawn() -> Result<Self, String> {
+        let cli = compose_cli();
+        let child = Command::new(&cli.program)
+            .args(&cli.args)
+            .args(["logs", "--follow", "--timestamps"])
+            .current_dir(docker_dir())
+            .stdin(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("failed to follow container logs: {e}"))?;
+        Ok(Self(child))
+    }
+}
+
+impl Drop for LogFollower {
+    fn drop(&mut self) {
+        // Best-effort: if the process is already gone there's nothing to do,
+        // and this isn't a place that can usefully report an error anyway.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// Prints the stack's container states.
