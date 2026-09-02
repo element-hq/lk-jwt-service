@@ -39,7 +39,7 @@ type ExecuteDelayedEventActionFn = Box<
     dyn Fn(&CsApiUrl, &str, DelayEventAction, &str, &str) -> Result<u16, ActionError> + Send + Sync,
 >;
 type GetDelayedEventDelayFn =
-    Box<dyn Fn(&CsApiUrl, &str, &str, &str) -> Result<Duration, ActionError> + Send + Sync>;
+    Box<dyn Fn(&CsApiUrl, &str, &str, &str, &str) -> Result<Duration, ActionError> + Send + Sync>;
 type IsJoinedFn = Box<dyn Fn(&CsApiUrl, &str, &str) -> Result<bool, String> + Send + Sync>;
 type RequestGetTokenViaFederationFn = Box<
     dyn Fn(&CsApiUrl, &str, &GetTokenSsRequest) -> Result<GetTokenSsResponse, String> + Send + Sync,
@@ -141,10 +141,17 @@ impl Deps for HandlerTestDeps {
         &self,
         cs_api_url: &CsApiUrl,
         delay_id: &str,
+        room_id: &str,
         identity: AppServiceIdentity<'_>,
     ) -> Result<Duration, ActionError> {
         match &self.get_delayed_event_delay_fn {
-            Some(f) => f(cs_api_url, delay_id, identity.as_token, identity.user_id),
+            Some(f) => f(
+                cs_api_url,
+                delay_id,
+                room_id,
+                identity.as_token,
+                identity.user_id,
+            ),
             None => panic!("get_delayed_event_delay not mocked in HandlerTestDeps"),
         }
     }
@@ -4038,11 +4045,12 @@ async fn test_process_delegate_delayed_leave_cs_restart_uses_identity_assertion(
 }
 
 /// A request without a delay timeout makes the service look the delay up on
-/// the homeserver, asserting the caller's identity as it does so.
+/// the homeserver, asserting the caller's identity and the request's
+/// `room_id` as it does so.
 #[tokio::test]
 async fn test_process_delegate_delayed_leave_cs_looks_up_missing_delay_timeout() {
-    /// (CS API URL, delay ID, as_token, user_id) of the recorded lookup.
-    type Lookup = (String, String, String, String);
+    /// (CS API URL, delay ID, room ID, as_token, user_id) of the recorded lookup.
+    type Lookup = (String, String, String, String, String);
     let looked_up: Arc<Mutex<Option<Lookup>>> = Arc::new(Mutex::new(None));
     let looked_up_clone = looked_up.clone();
     let deps = HandlerTestDeps {
@@ -4051,10 +4059,11 @@ async fn test_process_delegate_delayed_leave_cs_looks_up_missing_delay_timeout()
         })),
         participant_exists_fn: participant_exists_block_until_cancelled(),
         get_delayed_event_delay_fn: Some(Box::new(
-            move |cs_api_url, delay_id, as_token, user_id| {
+            move |cs_api_url, delay_id, room_id, as_token, user_id| {
                 *looked_up_clone.lock().unwrap() = Some((
                     cs_api_url.0.clone(),
                     delay_id.to_owned(),
+                    room_id.to_owned(),
                     as_token.to_owned(),
                     user_id.to_owned(),
                 ));
@@ -4072,13 +4081,14 @@ async fn test_process_delegate_delayed_leave_cs_looks_up_missing_delay_timeout()
         .await
         .expect("unexpected error");
 
-    let (cs_api_url, delay_id, as_token, user_id) = looked_up
+    let (cs_api_url, delay_id, room_id, as_token, user_id) = looked_up
         .lock()
         .unwrap()
         .clone()
         .expect("expected the delay to be looked up");
     assert_eq!(cs_api_url, "https://matrix-client.example.com");
     assert_eq!(delay_id, req.delay_id, "expected the requested delay_id");
+    assert_eq!(room_id, req.room_id, "expected the requested room_id");
     assert_eq!(as_token, "as_token", "expected the configured as_token");
     assert_eq!(
         user_id, DELEGATE_DELAYED_LEAVE_CS_MXID,
@@ -4101,7 +4111,7 @@ async fn test_process_delegate_delayed_leave_cs_looked_up_delay_drives_the_job()
         // Confirmed absent, so the job stays in WaitingForInitialConnect until
         // its timeout — which is the looked-up delay — elapses.
         participant_exists_fn: Some(Box::new(|_, _| Box::pin(async { Ok(false) }))),
-        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _| Ok(Duration::from_millis(200)))),
+        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| Ok(Duration::from_millis(200)))),
         execute_delayed_event_action_fn: Some(Box::new(move |_, _, action, _, _| {
             if action == DelayEventAction::Send {
                 *sent_clone.lock().unwrap() = true;
@@ -4138,7 +4148,7 @@ async fn test_process_delegate_delayed_leave_cs_skips_lookup_when_delay_timeout_
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
         participant_exists_fn: participant_exists_block_until_cancelled(),
-        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _| {
+        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| {
             panic!("the delay must not be looked up when the request carries one")
         })),
         ..Default::default()
@@ -4154,14 +4164,14 @@ async fn test_process_delegate_delayed_leave_cs_skips_lookup_when_delay_timeout_
     handler.close().await;
 }
 
-/// An unknown delay_id surfaces as 404 M_NOT_FOUND.
+/// An unknown delay_id is rejected as HTTP 400 / M_INVALID_PARAM.
 #[tokio::test]
 async fn test_process_delegate_delayed_leave_cs_delay_lookup_not_found() {
     let deps = HandlerTestDeps {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
-        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _| {
+        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| {
             Err(ActionError::DelayedEventNotFound { status: 404 })
         })),
         ..Default::default()
@@ -4174,8 +4184,8 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_not_found() {
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
         .await
         .expect_err("expected MatrixErrorResponse");
-    assert_eq!(err.status, 404, "expected 404");
-    assert_eq!(err.errcode, "M_NOT_FOUND", "expected M_NOT_FOUND");
+    assert_eq!(err.status, 400, "expected 400");
+    assert_eq!(err.errcode, "M_INVALID_PARAM", "expected M_INVALID_PARAM");
     handler.close().await;
 }
 
@@ -4187,7 +4197,7 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_unavailable() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix-client.example.com".into()))
         })),
-        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _| {
+        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| {
             Err(ActionError::Transient {
                 status: 500,
                 msg: "boom".into(),

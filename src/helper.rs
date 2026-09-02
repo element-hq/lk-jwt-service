@@ -719,17 +719,19 @@ pub trait Deps: Send + Sync {
         }
     }
 
-    /// GETs the delay of the delayed event identified by `delay_id` from the C-S API.
+    /// GETs the delay of the delayed event identified by `delay_id` from the C-S API,
+    /// verifying it was scheduled for `room_id`.
     ///
-    ///   - 200 with a usable delay → `Ok(delay)`
-    ///   - 404, or 200 with a missing/non-positive delay
-    ///                            → permanent [`ActionError::DelayedEventNotFound`]
+    ///   - 200 for `room_id` with a usable delay → `Ok(delay)`
+    ///   - 404, or 200 for a different room, or 200 with a missing/non-positive
+    ///     delay → permanent [`ActionError::DelayedEventNotFound`]
     ///   - 429 with a usable retry hint → [`ActionError::RetryAfter`]
-    ///   - anything else                → [`ActionError::Transient`]
+    ///   - anything else → [`ActionError::Transient`]
     async fn get_delayed_event_delay(
         &self,
         cs_api_url: &CsApiUrl,
         delay_id: &str,
+        room_id: &str,
         identity: AppServiceIdentity<'_>,
     ) -> Result<Duration, ActionError> {
         let mut endpoint =
@@ -781,12 +783,19 @@ pub trait Deps: Send + Sync {
                     /// emitted by homeservers implementing those.
                     #[serde(default)]
                     delay: i64,
+                    #[serde(default)]
+                    room_id: String,
                 }
                 let parsed: DelayedEventResponse =
                     resp.json().await.map_err(|e| ActionError::Transient {
                         status,
                         msg: format!("failed to parse delayed event response: {e}"),
                     })?;
+                if parsed.room_id != room_id {
+                    // Belongs to a different room than the one being
+                    // delegated for — treated the same as not found.
+                    return Err(ActionError::DelayedEventNotFound { status });
+                }
                 let delay_ms = if parsed.delay_ms > 0 {
                     parsed.delay_ms
                 } else {
@@ -1693,11 +1702,12 @@ mod tests {
 
     // ── get_delayed_event_delay ───────────────────────────────────────────
 
-    async fn get_delay(url: &str, delay_id: &str) -> Result<Duration, ActionError> {
+    async fn get_delay(url: &str, delay_id: &str, room_id: &str) -> Result<Duration, ActionError> {
         RealDeps::default()
             .get_delayed_event_delay(
                 &CsApiUrl(url.to_owned()),
                 delay_id,
+                room_id,
                 AppServiceIdentity {
                     as_token: "as_token",
                     user_id: "@user:example.com",
@@ -1732,13 +1742,15 @@ mod tests {
                             .unwrap_or_default()
                             .to_owned(),
                     );
-                    axum::Json(serde_json::json!({"delay_ms": 30000}))
+                    axum::Json(
+                        serde_json::json!({"delay_ms": 30000, "room_id": "!room:example.com"}),
+                    )
                 }
             }),
         );
         let server = spawn_http_server(router).await;
 
-        let delay = get_delay(&server.url, "delay id/1")
+        let delay = get_delay(&server.url, "delay id/1", "!room:example.com")
             .await
             .expect("unexpected error");
         assert_eq!(delay, Duration::from_secs(30));
@@ -1759,11 +1771,13 @@ mod tests {
     async fn test_get_delayed_event_delay_legacy_field() {
         let router = Router::new().route(
             "/{*path}",
-            any(|| async { axum::Json(serde_json::json!({"delay": 15000})) }),
+            any(|| async {
+                axum::Json(serde_json::json!({"delay": 15000, "room_id": "!room:example.com"}))
+            }),
         );
         let server = spawn_http_server(router).await;
 
-        let delay = get_delay(&server.url, "id")
+        let delay = get_delay(&server.url, "id", "!room:example.com")
             .await
             .expect("unexpected error");
         assert_eq!(delay, Duration::from_secs(15));
@@ -1792,12 +1806,12 @@ mod tests {
             Case {
                 name: "200 with a zero delay",
                 status: http::StatusCode::OK,
-                body: serde_json::json!({"delay_ms": 0}),
+                body: serde_json::json!({"delay_ms": 0, "room_id": "!room:example.com"}),
             },
             Case {
                 name: "200 with a negative delay",
                 status: http::StatusCode::OK,
-                body: serde_json::json!({"delay_ms": -1}),
+                body: serde_json::json!({"delay_ms": -1, "room_id": "!room:example.com"}),
             },
         ] {
             let status = tc.status;
@@ -1811,7 +1825,7 @@ mod tests {
             );
             let server = spawn_http_server(router).await;
 
-            let err = get_delay(&server.url, "id")
+            let err = get_delay(&server.url, "id", "!room:example.com")
                 .await
                 .expect_err(&format!("{}: expected an error", tc.name));
             assert!(
@@ -1820,6 +1834,28 @@ mod tests {
                 tc.name
             );
         }
+    }
+
+    /// A delayed event that exists but was scheduled for a different room
+    /// than the one being delegated for must be rejected the same way as
+    /// an unknown `delay_id`.
+    #[tokio::test]
+    async fn test_get_delayed_event_delay_wrong_room() {
+        let router = Router::new().route(
+            "/{*path}",
+            any(|| async {
+                axum::Json(serde_json::json!({"delay_ms": 30000, "room_id": "!other:example.com"}))
+            }),
+        );
+        let server = spawn_http_server(router).await;
+
+        let err = get_delay(&server.url, "id", "!room:example.com")
+            .await
+            .expect_err("expected an error for a room_id mismatch");
+        assert!(
+            err.is_delayed_event_not_found(),
+            "expected DelayedEventNotFound, got {err:?}"
+        );
     }
 
     /// A rate-limited lookup surfaces its retry hint, so callers can classify it as
@@ -1838,7 +1874,7 @@ mod tests {
         );
         let server = spawn_http_server(router).await;
 
-        let err = get_delay(&server.url, "id")
+        let err = get_delay(&server.url, "id", "!room:example.com")
             .await
             .expect_err("expected an error for 429");
         match err {
@@ -1880,7 +1916,7 @@ mod tests {
                 Router::new().route("/{*path}", any(move || async move { (status, body) }));
             let server = spawn_http_server(router).await;
 
-            let err = get_delay(&server.url, "id")
+            let err = get_delay(&server.url, "id", "!room:example.com")
                 .await
                 .expect_err(&format!("{}: expected an error", tc.name));
             assert!(
