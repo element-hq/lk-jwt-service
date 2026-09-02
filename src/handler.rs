@@ -718,17 +718,20 @@ impl Handler {
     }
 
     /// Looks up the delay of `delay_id` on the homeserver, for delegation
-    /// requests that do not carry one.
+    /// requests that do not carry one. Also verifies that the delayed event
+    /// was scheduled in `room_id`.
     async fn look_up_delay_timeout(
         &self,
         cs_api_url: &CsApiUrl,
         delay_id: &str,
+        room_id: &str,
         owner_user_id: &str,
     ) -> Result<Duration, MatrixErrorResponse> {
         self.deps
             .get_delayed_event_delay(
                 cs_api_url,
                 delay_id,
+                room_id,
                 AppServiceIdentity {
                     as_token: &self.app_service_config.as_token,
                     user_id: owner_user_id,
@@ -740,8 +743,8 @@ impl Handler {
                     "Handler: could not look up the delay of the delayed event");
                 if err.is_delayed_event_not_found() {
                     MatrixErrorResponse {
-                        status: 404,
-                        errcode: "M_NOT_FOUND".into(),
+                        status: 400,
+                        errcode: "M_INVALID_PARAM".into(),
                         err: "Unknown `delay_id`".into(),
                     }
                 } else {
@@ -1240,7 +1243,7 @@ impl Handler {
         let delay_timeout = match req.delay_timeout {
             Some(timeout) => Duration::from_millis(timeout.max(0) as u64),
             None => {
-                self.look_up_delay_timeout(&cs_api_url, &req.delay_id, mxid_header)
+                self.look_up_delay_timeout(&cs_api_url, &req.delay_id, &req.room_id, mxid_header)
                     .await?
             }
         };

@@ -330,7 +330,7 @@ async fn restart_and_send_use_identity_assertion() {
 async fn delay_timeout_looked_up_when_absent() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
-    hs.set_delay("syd_cs_integration_1", 8000);
+    hs.set_delay("syd_cs_integration_1", 8000, "!room:example.com");
 
     let redis = FakeRedis::new().await;
 
@@ -401,7 +401,7 @@ async fn delay_timeout_not_looked_up_when_given() {
 async fn looked_up_delay_drives_the_job() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
-    hs.set_delay("syd_cs_integration_1", 300);
+    hs.set_delay("syd_cs_integration_1", 300, "!room:example.com");
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec!["*".to_owned()],
@@ -420,8 +420,8 @@ async fn looked_up_delay_drives_the_job() {
         .await;
 }
 
-/// An unknown delay ID is rejected with 404 M_NOT_FOUND, and no job is
-/// scheduled for it.
+/// An unknown delay ID is rejected with 400 M_INVALID_PARAM per MSC4195, and
+/// no job is scheduled for it.
 #[tokio::test]
 async fn unknown_delay_id_rejected() {
     let hs = FakeHomeserver::new().await;
@@ -440,7 +440,31 @@ async fn unknown_delay_id_rejected() {
     request.as_object_mut().unwrap().remove("delay_timeout");
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
-    expect_matrix_error(status, &body, 404, "M_NOT_FOUND");
+    expect_matrix_error(status, &body, 400, "M_INVALID_PARAM");
+    expect_no_delayed_event_requests(&hs);
+}
+
+/// A delay ID that exists but was scheduled for a different room than the
+/// one being delegated for is rejected.
+#[tokio::test]
+async fn delay_id_for_another_room_rejected() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_delay("syd_cs_integration_1", 300, "!other-room:example.com");
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = delegate_request();
+    request.as_object_mut().unwrap().remove("delay_timeout");
+    let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+
+    expect_matrix_error(status, &body, 400, "M_INVALID_PARAM");
     expect_no_delayed_event_requests(&hs);
 }
 
@@ -450,7 +474,7 @@ async fn unknown_delay_id_rejected() {
 async fn delay_lookup_failure_rejected() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
-    hs.set_delay("syd_cs_integration_1", 8000);
+    hs.set_delay("syd_cs_integration_1", 8000, "!room:example.com");
     hs.set_delay_lookup_status(500);
 
     let svc = Service::start(ServiceConfig {

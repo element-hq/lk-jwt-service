@@ -74,9 +74,9 @@ struct HsState {
     /// The recorded /delayed_events requests.
     delayed_event_requests: Vec<DelayedEventRequest>,
 
-    /// The delay (in ms) `GET /delayed_events/{delay_id}` reports, keyed by
-    /// delay ID.
-    delays: HashMap<String, i64>,
+    /// The delay in ms and room_id that `GET /delayed_events/{delay_id}` reports,
+    /// keyed by delay ID.
+    delays: HashMap<String, (i64, String)>,
 
     /// The HTTP status to return on delayed-event look-ups, overriding the
     /// scripted delays.
@@ -237,14 +237,14 @@ impl FakeHomeserver {
         self.state.lock().unwrap().delayed_event_requests.clone()
     }
 
-    /// Makes `GET /delayed_events/{delay_id}` report the given delay for
-    /// `delay_id`.
-    pub fn set_delay(&self, delay_id: &str, delay_ms: i64) {
+    /// Makes `GET /delayed_events/{delay_id}` report the given delay and
+    /// room ID for `delay_id`.
+    pub fn set_delay(&self, delay_id: &str, delay_ms: i64, room_id: &str) {
         self.state
             .lock()
             .unwrap()
             .delays
-            .insert(delay_id.to_owned(), delay_ms);
+            .insert(delay_id.to_owned(), (delay_ms, room_id.to_owned()));
     }
 
     /// Sets the HTTP status delayed-event look-ups fail with, regardless of the
@@ -375,11 +375,11 @@ async fn handle_delayed_event_look_up(
     }
 
     match state.delays.get(&delay_id) {
-        Some(delay_ms) => (
+        Some((delay_ms, room_id)) => (
             StatusCode::OK,
             Json(json!({
                 "delay_id": delay_id,
-                "room_id": "!room:example.com",
+                "room_id": room_id,
                 "type": "m.room.member",
                 "delay_ms": delay_ms,
                 "content": {},
