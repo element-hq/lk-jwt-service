@@ -1161,6 +1161,9 @@ impl Handler {
             false,
         )?;
 
+        self.create_livekit_room_or_internal_error(&lk_room_alias, &req.user_id, &lk_identity)
+            .await?;
+
         info!(user_id = %req.user_id, claimed_device_id = %req.member.claimed_device_id,
             origin = %origin_header, matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
             lk_id = %lk_identity, room = %lk_room_alias,

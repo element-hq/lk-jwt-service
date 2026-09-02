@@ -2885,11 +2885,17 @@ async fn test_handle_get_token_ss_url_mismatch() {
 /// A valid request produces a 200 response.
 #[tokio::test]
 async fn test_handle_get_token_ss_success() {
+    let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let create_called_clone = create_called.clone();
     let deps = HandlerTestDeps {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
         is_server_joined_fn: Some(Box::new(|_, _, _| Ok(true))),
+        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
+            create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })),
         ..Default::default()
     };
     let handler = new_get_token_ss_handler(deps);
@@ -2900,6 +2906,10 @@ async fn test_handle_get_token_ss_success() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK, "status");
+    assert!(
+        create_called.load(std::sync::atomic::Ordering::SeqCst),
+        "expected create_livekit_room to be called for the S-S endpoint"
+    );
 
     let body = body_bytes(resp).await;
     let response: GetTokenSsResponse =
@@ -3027,6 +3037,7 @@ async fn test_process_get_token_ss_request() {
         own_is_member: bool,
         origin_is_member: bool,
         fail_join_token: bool,
+        expect_create_room: bool,
         expect_error: bool,
     }
     let base = Case {
@@ -3039,11 +3050,13 @@ async fn test_process_get_token_ss_request() {
         own_is_member: true,
         origin_is_member: true,
         fail_join_token: false,
+        expect_create_room: false,
         expect_error: false,
     };
     for tc in [
         Case {
             name: "All OK",
+            expect_create_room: true,
             ..base
         },
         Case {
@@ -3095,6 +3108,9 @@ async fn test_process_get_token_ss_request() {
         let own_is_member = tc.own_is_member;
         let origin_is_member = tc.origin_is_member;
 
+        let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let create_called_clone = create_called.clone();
+
         let deps = HandlerTestDeps {
             resolve_cs_api_url_fn: Some(Box::new(move |_| {
                 if fail_resolution {
@@ -3115,6 +3131,10 @@ async fn test_process_get_token_ss_request() {
                 } else {
                     Ok(origin_is_member)
                 }
+            })),
+            create_livekit_room_fn: Some(Box::new(move |_, _, _| {
+                create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
             })),
             ..Default::default()
         };
@@ -3164,6 +3184,12 @@ async fn test_process_get_token_ss_request() {
                 tc.name
             );
         }
+        assert_eq!(
+            create_called.load(std::sync::atomic::Ordering::SeqCst),
+            tc.expect_create_room,
+            "{}: create_livekit_room called mismatch",
+            tc.name
+        );
         handler.close().await;
     }
 }

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use lk_jwt_service_integration_tests::{
-    DEFAULT_LK_URL, FakeHomeserver, Service, ServiceConfig, decode_livekit_jwt,
+    DEFAULT_LK_URL, FakeHomeserver, FakeSfu, Service, ServiceConfig, decode_livekit_jwt,
     expect_matrix_error, expect_server_is_joined_request,
 };
 use serde_json::{Value, json};
@@ -190,14 +190,17 @@ async fn get_instead_of_post() {
 }
 
 /// A valid request from a joined origin server, for a room our own server
-/// is also joined to, succeeds and both memberships are verified.
+/// is also joined to, succeeds, both memberships are verified, and the
+/// LiveKit room is created.
 #[tokio::test]
 async fn success() {
     let hs = FakeHomeserver::new().await;
+    let sfu = FakeSfu::new().await;
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec!["*".to_owned()],
         cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
         extra_env: app_service_env(hs.server_name()),
         ..Default::default()
     })
@@ -205,7 +208,7 @@ async fn success() {
 
     let (status, body) = post_get_token_ss(
         &svc,
-        get_token_ss_request("@alice:origin.example.org", DEFAULT_LK_URL).to_string(),
+        get_token_ss_request("@alice:origin.example.org", sfu.url()).to_string(),
         Some(ORIGIN_SERVER),
         Some(HS_TOKEN),
     )
@@ -217,11 +220,19 @@ async fn success() {
 
     let claims = decode_livekit_jwt(jwt);
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
+    assert_eq!(claims["video"]["roomCreate"].as_bool(), Some(false));
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
 
     expect_server_is_joined_request(&hs, "!room:example.com", hs.server_name(), AS_TOKEN);
     expect_server_is_joined_request(&hs, "!room:example.com", ORIGIN_SERVER, AS_TOKEN);
+
+    let rooms = sfu.create_room_requests();
+    assert_eq!(rooms.len(), 1, "expected exactly one room creation");
+    assert_eq!(
+        claims["video"]["room"].as_str(),
+        Some(rooms[0].name.as_str())
+    );
 }
 
 /// A request is rejected when our own server is not joined to the room.
