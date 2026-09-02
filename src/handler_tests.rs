@@ -42,7 +42,9 @@ type GetDelayedEventDelayFn =
     Box<dyn Fn(&CsApiUrl, &str, &str, &str) -> Result<Duration, ActionError> + Send + Sync>;
 type IsJoinedFn = Box<dyn Fn(&CsApiUrl, &str, &str) -> Result<bool, String> + Send + Sync>;
 type RequestGetTokenViaFederationFn = Box<
-    dyn Fn(&CsApiUrl, &str, &GetTokenSsRequest) -> Result<GetTokenSsResponse, String> + Send + Sync,
+    dyn Fn(&CsApiUrl, &str, &GetTokenSsRequest) -> Result<GetTokenSsResponse, FederationTokenError>
+        + Send
+        + Sync,
 >;
 
 /// A [`Deps`] implementation with per-test swappable behaviours. Un-mocked
@@ -181,7 +183,7 @@ impl Deps for HandlerTestDeps {
         _as_token: &str,
         destination: &str,
         req: &GetTokenSsRequest,
-    ) -> Result<GetTokenSsResponse, String> {
+    ) -> Result<GetTokenSsResponse, FederationTokenError> {
         match &self.request_get_token_via_federation_fn {
             Some(f) => f(own_cs_api_url, destination, req),
             None => panic!("request_get_token_via_federation not mocked in HandlerTestDeps"),
@@ -2340,7 +2342,7 @@ async fn test_handle_get_token_cs_relays_foreign_server_name() {
     handler.close().await;
 }
 
-/// A transport error from the federation proxy surfaces as 502.
+/// A transport error from the federation proxy surfaces as 502 / M_UNKNOWN.
 #[tokio::test]
 async fn test_handle_get_token_cs_federation_proxy_error() {
     let deps = HandlerTestDeps {
@@ -2348,7 +2350,9 @@ async fn test_handle_get_token_cs_federation_proxy_error() {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
         is_user_joined_fn: is_joined_ok(true),
-        request_get_token_via_federation_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
+        request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
+            Err(FederationTokenError::Other("boom".into()))
+        })),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
@@ -2361,6 +2365,146 @@ async fn test_handle_get_token_cs_federation_proxy_error() {
         StatusCode::BAD_GATEWAY,
         "expected 502 when the federation proxy fails"
     );
+    let body = body_bytes(resp).await;
+    let matrix_err: MatrixErrorBody =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(matrix_err.errcode, "M_UNKNOWN", "unexpected error code");
+    handler.close().await;
+}
+
+/// 403 / M_FORBIDDEN from the destination is relayed verbatim.
+#[tokio::test]
+async fn test_handle_get_token_cs_federation_relays_forbidden() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_user_joined_fn: is_joined_ok(true),
+        request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
+            Err(FederationTokenError::Destination {
+                status: 403,
+                errcode: "M_FORBIDDEN".into(),
+            })
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "expected the destination's 403 to be relayed"
+    );
+    let body = body_bytes(resp).await;
+    let matrix_err: MatrixErrorBody =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(matrix_err.errcode, "M_FORBIDDEN", "unexpected error code");
+    handler.close().await;
+}
+
+/// 400 / M_INVALID_PARAM from the destination is relayed verbatim.
+#[tokio::test]
+async fn test_handle_get_token_cs_federation_relays_invalid_param() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_user_joined_fn: is_joined_ok(true),
+        request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
+            Err(FederationTokenError::Destination {
+                status: 400,
+                errcode: "M_INVALID_PARAM".into(),
+            })
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected the destination's 400 to be relayed"
+    );
+    let body = body_bytes(resp).await;
+    let matrix_err: MatrixErrorBody =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(
+        matrix_err.errcode, "M_INVALID_PARAM",
+        "unexpected error code"
+    );
+    handler.close().await;
+}
+
+/// A 403 whose errcode isn't M_FORBIDDEN is not relayed as such — only the
+/// exact (status, errcode) pairs from MSC4195 are, everything else is 502.
+#[tokio::test]
+async fn test_handle_get_token_cs_federation_403_with_unexpected_errcode() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_user_joined_fn: is_joined_ok(true),
+        request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
+            Err(FederationTokenError::Destination {
+                status: 403,
+                errcode: "M_FOOBAR".into(),
+            })
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "expected an unrecognised errcode to collapse to 502, not be relayed"
+    );
+    let body = body_bytes(resp).await;
+    let matrix_err: MatrixErrorBody =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(matrix_err.errcode, "M_UNKNOWN", "unexpected error code");
+    handler.close().await;
+}
+
+/// A destination error status other than 403/400 collapses to 502 / M_UNKNOWN.
+#[tokio::test]
+async fn test_handle_get_token_cs_federation_other_destination_error() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_user_joined_fn: is_joined_ok(true),
+        request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
+            Err(FederationTokenError::Destination {
+                status: 500,
+                errcode: "M_UNKNOWN".into(),
+            })
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "expected an unlisted destination status to collapse to 502"
+    );
+    let body = body_bytes(resp).await;
+    let matrix_err: MatrixErrorBody =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(matrix_err.errcode, "M_UNKNOWN", "unexpected error code");
     handler.close().await;
 }
 
@@ -2644,7 +2788,7 @@ async fn test_process_get_token_cs_request() {
                     "unexpected fed_proxy destination"
                 );
                 if fail_fed_proxy {
-                    Err("boom".into())
+                    Err(FederationTokenError::Other("boom".into()))
                 } else {
                     Ok(GetTokenSsResponse {
                         jwt: "remote-jwt".into(),
