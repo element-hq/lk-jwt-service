@@ -100,31 +100,76 @@ async fn wait_for_message(
     }
 }
 
+/// The parts of a delayed event's state — MSC4140's
+/// `GET /delayed_events/{delay_id}` — this suite cares about.
+struct DelayedEvent {
+    /// The timestamp its current countdown started from. Reset to "now" by
+    /// every `restart` action, so a later lookup returning a greater value
+    /// than an earlier one proves a restart landed in between.
+    delayed_since_ts: u64,
+}
+
+/// Looks up a delayed event by ID, returning `None` once it is no longer
+/// pending: Synapse serves a 404 for a `delay_id` that has already fired or
+/// been cancelled.
+async fn get_delayed_event(
+    cs_api_url: &str,
+    access_token: &str,
+    delay_id: &str,
+) -> Option<DelayedEvent> {
+    let mut url = reqwest::Url::parse(cs_api_url).expect("invalid CS API URL");
+    url.path_segments_mut()
+        .expect("cs_api_url cannot be a base")
+        .extend([
+            "_matrix",
+            "client",
+            "unstable",
+            "org.matrix.msc4140",
+            "delayed_events",
+            delay_id,
+        ]);
+
+    let resp = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .expect("request to look up the delayed event failed");
+    if resp.status().as_u16() == 404 {
+        return None;
+    }
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .expect("delayed-event lookup response was not valid JSON");
+    assert!(
+        status.is_success(),
+        "looking up the delayed event failed: {status}: {body}"
+    );
+    Some(DelayedEvent {
+        delayed_since_ts: body["delayed_since_ts"]
+            .as_u64()
+            .expect("delayed-event lookup response is missing `delayed_since_ts`"),
+    })
+}
+
 /// The service takes over a delegated delayed event: it keeps it alive on the
 /// homeserver while the participant is connected to the SFU, and sends it once
 /// the participant leaves.
 ///
-/// Synapse doesn't yet implement `GET /delayed_events/{delay_id}`, so the
-/// service's `restart` and `send` actions can't be observed directly here.
-/// Instead both are inferred from timing, using an undelegated control event
-/// — scheduled with the same delay — as the reference for what the homeserver's
-/// own countdown does on its own:
+/// Both actions are observed directly through MSC4140's
+/// `GET /delayed_events/{delay_id}`:
 ///
-///   - `restart` — the control, never delegated, fires on the homeserver's
-///     own schedule once its delay elapses. By that point the delegated
-///     event, kept alive by the service's periodic restarts (which land
-///     every ~80% of the delay — see `delay_restart_duration`), must still
-///     be pending: only a restart the homeserver never performs on its own
-///     explains that.
-///   - `send` — once the participant disconnects, the delegated event's
+///   - `restart` — a lookup right after scheduling captures the event's
+///     initial `delayed_since_ts`. A second lookup, made after waiting
+///     comfortably past the original delay, must see both a pending event
+///     and a *later* `delayed_since_ts` — the only way it could still be
+///     pending at that point at all is a restart the homeserver never
+///     performs on its own.
+///   - `send` — once the participant disconnects, the delayed event's
 ///     message must land almost immediately, far faster than a homeserver
 ///     countdown that's just been reset would ever fire it on its own.
-///
-/// This is weaker than directly observing `running_since`: it trusts that
-/// the service's restarts land roughly on schedule rather than proving it,
-/// so a sufficiently starved CI runner could in principle produce a false
-/// failure. Change to reading `running_since` via `GET /delayed_events/{id}`
-/// once that endpoint is available here.
 #[tokio::test]
 async fn delegate_delayed_leave_cs_succeeds() {
     assert_stack_is_up();
@@ -134,18 +179,16 @@ async fn delegate_delayed_leave_cs_succeeds() {
     let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &user).await;
 
     // Short enough to keep the test fast, but long enough that the service's
-    // restarts (every ~80% of the delay) have clearly landed at least twice
-    // — comfortably extending the homeserver deadline past DELAY_MS — before
-    // the "still pending" check below runs, even under CI-level jitter.
+    // restarts (every ~80% of the delay) have clearly landed at least once
+    // before the "still pending" check below runs, even under CI-level
+    // jitter.
     const DELAY_MS: u64 = 5_000;
     const SLOT_ID: &str = "m.call#ROOM";
     const MEMBER_ID: &str = "e2e-member";
     const DEVICE_ID: &str = "E2EDEVICE";
     const MESSAGE_BODY: &str = "e2e-delegate-delayed-leave-proof";
-    const CONTROL_MESSAGE_BODY: &str = "e2e-delegate-delayed-leave-control";
 
-    // Schedule the delayed event the client will hand over, plus an identical
-    // one it keeps to itself as a control.
+    // Schedule the delayed event the client will hand over.
     let delay_id = schedule_delayed_message(
         SYNAPSE_A_CS_API_URL,
         &user.access_token,
@@ -155,15 +198,10 @@ async fn delegate_delayed_leave_cs_succeeds() {
         DELAY_MS,
     )
     .await;
-    schedule_delayed_message(
-        SYNAPSE_A_CS_API_URL,
-        &user.access_token,
-        &room_id,
-        "e2e-delayed-leave-control-txn",
-        CONTROL_MESSAGE_BODY,
-        DELAY_MS,
-    )
-    .await;
+    let delayed_since_ts = get_delayed_event(SYNAPSE_A_CS_API_URL, &user.access_token, &delay_id)
+        .await
+        .expect("the delayed event should still be pending right after scheduling")
+        .delayed_since_ts;
 
     // Connect to the SFU as the participant the delegation will name. The
     // token is issued for the same member fields, so it carries the LiveKit
@@ -196,10 +234,6 @@ async fn delegate_delayed_leave_cs_succeeds() {
                 "claimed_device_id": DEVICE_ID,
             },
             "delay_id": delay_id,
-            // Optional: the service looks the delay up itself when it is
-            // absent. Synapse does not implement MSC4140's
-            // `GET /delayed_events/{delay_id}` yet, so it is still sent here.
-            "delay_timeout": DELAY_MS,
         }))
         .send()
         .await
@@ -221,39 +255,25 @@ async fn delegate_delayed_leave_cs_succeeds() {
 
     // First action: having found the participant on the SFU, the service
     // starts restarting the delayed event to keep the homeserver's timer
-    // from ever reaching zero. The control, never delegated, has no such
-    // help — waiting for it to fire is the reference point for how long
-    // DELAY_MS actually takes on this homeserver.
-    wait_for_message(
-        SYNAPSE_A_CS_API_URL,
-        &user.access_token,
-        &room_id,
-        CONTROL_MESSAGE_BODY,
-        Duration::from_millis(DELAY_MS * 3),
-    )
-    .await;
-
-    // Give the delegated event a further DELAY_MS past that point. If the
-    // service's restarts were failing or landing late rather than actually
-    // preventing the send — i.e. merely delaying it a little instead of
-    // indefinitely — this is roughly when a leak like that would show up, so
-    // checking right as the control fires would let it slip through.
-    tokio::time::sleep(Duration::from_millis(DELAY_MS)).await;
-
-    // The delegated event must still be pending: the same delay has now
-    // demonstrably elapsed (the control just proved it) with a further
-    // DELAY_MS to spare, but the service has kept restarting it on the
-    // homeserver while the participant stays connected, so only a
-    // disconnect — not elapsed time — can trigger it.
-    assert!(
-        !has_message(
-            SYNAPSE_A_CS_API_URL,
-            &user.access_token,
-            &room_id,
-            MESSAGE_BODY
+    // from ever reaching zero. Wait comfortably past the original delay —
+    // long enough that, left alone, the homeserver would already have fired
+    // it — then look it up again.
+    tokio::time::sleep(Duration::from_millis(DELAY_MS * 2)).await;
+    let restarted_since_ts = get_delayed_event(SYNAPSE_A_CS_API_URL, &user.access_token, &delay_id)
+        .await
+        .expect(
+            "the delegated delayed event was sent or cancelled while the participant was \
+             still connected",
         )
-        .await,
-        "the delegated delayed event was sent while the participant was still connected"
+        .delayed_since_ts;
+
+    // Only a restart the homeserver never performs on its own explains the
+    // event still being pending at this point: its `delayed_since_ts` must
+    // have moved forward from the original schedule.
+    assert!(
+        restarted_since_ts > delayed_since_ts,
+        "expected the service to have restarted the delayed event at least once, but \
+         delayed_since_ts stayed at {delayed_since_ts}"
     );
 
     // Second action: the participant hangs up. The SFU reports the departure
