@@ -535,6 +535,17 @@ impl IsJoinedSubject<'_> {
     }
 }
 
+/// The outcome of a failed `/get_token` federation relay: either the
+/// destination homeserver rejected the request (`status` and `errcode` as
+/// reported by it), or something else went wrong reaching it.
+#[derive(Debug, thiserror::Error)]
+pub enum FederationTokenError {
+    #[error("destination homeserver returned http status code {status} ({errcode})")]
+    Destination { status: u16, errcode: String },
+    #[error("{0}")]
+    Other(String),
+}
+
 // ── Deps: the swappable dependency surface ───────────────────────────────────
 
 /// External interactions of the service. The real logic lives in the default
@@ -1057,12 +1068,17 @@ pub trait Deps: Send + Sync {
         as_token: &str,
         destination: &str,
         req: &GetTokenSsRequest,
-    ) -> Result<GetTokenSsResponse, String> {
-        let mut endpoint = url::Url::parse(own_cs_api_url.as_str())
-            .map_err(|e| format!("invalid client-server API URL: {e}"))?;
+    ) -> Result<GetTokenSsResponse, FederationTokenError> {
+        let mut endpoint = url::Url::parse(own_cs_api_url.as_str()).map_err(|e| {
+            FederationTokenError::Other(format!("invalid client-server API URL: {e}"))
+        })?;
         endpoint
             .path_segments_mut()
-            .map_err(|_| "invalid client-server API URL: cannot be a base".to_string())?
+            .map_err(|_| {
+                FederationTokenError::Other(
+                    "invalid client-server API URL: cannot be a base".into(),
+                )
+            })?
             .pop_if_empty()
             .extend([
                 "_matrix",
@@ -1088,38 +1104,51 @@ pub trait Deps: Send + Sync {
             .map_err(|e| {
                 let msg = error_chain(&e);
                 debug!(url = %endpoint, err = %msg, "request_get_token_via_federation");
-                format!("failed to reach the federation proxy: {msg}")
+                FederationTokenError::Other(format!("failed to reach the federation proxy: {msg}"))
             })?;
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!(
+            return Err(FederationTokenError::Other(format!(
                 "federation proxy request failed: http status code {}",
                 status.as_u16()
-            ));
+            )));
         }
 
+        // `content` is left untyped here: on a destination-side error it's a
+        // Matrix error body ({errcode, error}), not a GetTokenSsResponse.
         #[derive(Deserialize)]
         struct FedProxyResponse {
             status: u16,
             #[serde(default)]
-            content: Option<GetTokenSsResponse>,
+            content: Option<serde_json::Value>,
         }
-        let parsed: FedProxyResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("failed to parse federation proxy response: {e}"))?;
+        let parsed: FedProxyResponse = resp.json().await.map_err(|e| {
+            FederationTokenError::Other(format!("failed to parse federation proxy response: {e}"))
+        })?;
 
         if !(200..300).contains(&parsed.status) {
-            return Err(format!(
-                "destination homeserver returned http status code {}",
-                parsed.status
-            ));
+            let errcode = parsed
+                .content
+                .as_ref()
+                .and_then(|c| c.get("errcode"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            return Err(FederationTokenError::Destination {
+                status: parsed.status,
+                errcode,
+            });
         }
 
-        parsed
-            .content
-            .ok_or_else(|| "destination homeserver returned an empty response".to_string())
+        let content = parsed.content.ok_or_else(|| {
+            FederationTokenError::Other("destination homeserver returned an empty response".into())
+        })?;
+        serde_json::from_value(content).map_err(|e| {
+            FederationTokenError::Other(format!(
+                "failed to parse destination homeserver response: {e}"
+            ))
+        })
     }
 }
 

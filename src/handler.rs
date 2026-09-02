@@ -33,8 +33,9 @@ use crate::delayed_event_manager::{
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::helper::new_unique_id;
 use crate::helper::{
-    CsApiUrl, CsApiUrlCache, Deps, GET_TOKEN_SS_PATH, LiveKitAuth, LiveKitIdentity,
-    LiveKitRoomAlias, UniqueId, livekit_identity_for, livekit_room_alias_for, matrix_server_name,
+    CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_SS_PATH, LiveKitAuth,
+    LiveKitIdentity, LiveKitRoomAlias, UniqueId, livekit_identity_for, livekit_room_alias_for,
+    matrix_server_name,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::requests::AppservicePingTriggerRequest;
@@ -1021,7 +1022,7 @@ impl Handler {
                     "Handler: error checking room membership");
                 MatrixErrorResponse {
                     status: 502,
-                    errcode: "M_CONNECTION_FAILED".into(),
+                    errcode: "M_UNKNOWN".into(),
                     err: "Unable to verify room membership".into(),
                 }
             })?;
@@ -1075,11 +1076,7 @@ impl Handler {
                 .map_err(|err| {
                     error!(matrix_id = %mxid_header, destination = %target_server_name, err = %err,
                         "Handler: error relaying get_token via federation proxy");
-                    MatrixErrorResponse {
-                        status: 502,
-                        errcode: "M_CONNECTION_FAILED".into(),
-                        err: "Unable to reach the specified homeserver".into(),
-                    }
+                    matrix_error_for_federation_token(err)
                 })?;
 
             info!(matrix_id = %mxid_header, destination = %target_server_name,
@@ -1104,7 +1101,7 @@ impl Handler {
 
         let membership_error = || MatrixErrorResponse {
             status: 502,
-            errcode: "M_CONNECTION_FAILED".into(),
+            errcode: "M_UNKNOWN".into(),
             err: "Unable to verify room membership".into(),
         };
 
@@ -1299,6 +1296,34 @@ impl Handler {
         }
 
         router.with_state(self.clone())
+    }
+}
+
+/// Maps a `/get_token` federation relay failure to the client response.
+fn matrix_error_for_federation_token(err: FederationTokenError) -> MatrixErrorResponse {
+    match err {
+        FederationTokenError::Destination {
+            status: 403,
+            errcode,
+        } if errcode == "M_FORBIDDEN" => MatrixErrorResponse {
+            status: 403,
+            errcode,
+            err: "The requesting user is not a member of the room on the destination homeserver"
+                .into(),
+        },
+        FederationTokenError::Destination {
+            status: 400,
+            errcode,
+        } if errcode == "M_INVALID_PARAM" => MatrixErrorResponse {
+            status: 400,
+            errcode,
+            err: "The destination homeserver rejected the specified `url`".into(),
+        },
+        _ => MatrixErrorResponse {
+            status: 502,
+            errcode: "M_UNKNOWN".into(),
+            err: "Unable to reach the specified homeserver".into(),
+        },
     }
 }
 
@@ -1531,7 +1556,7 @@ async fn handle_appservice_ping_trigger(
                 "Handler: appservice ping trigger: could not resolve C-S API URL");
             return matrix_error_response(
                 502,
-                "M_CONNECTION_FAILED",
+                "M_UNKNOWN",
                 &format!("Could not resolve C-S API URL: {err}"),
             );
         }
@@ -1558,7 +1583,7 @@ async fn handle_appservice_ping_trigger(
                 "Handler: appservice ping trigger: request failed");
             matrix_error_response(
                 502,
-                "M_CONNECTION_FAILED",
+                "M_UNKNOWN",
                 &format!("Failed to reach homeserver: {err}"),
             )
         }

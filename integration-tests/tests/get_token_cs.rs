@@ -489,13 +489,16 @@ async fn non_member_is_rejected_even_with_foreign_server_name() {
     expect_no_fed_proxy_requests(&hs);
 }
 
-/// A destination-side error relayed through the federation proxy surfaces
-/// as a 502 to the original caller.
+/// An HTTP 403 / M_FORBIDDEN response from the destination homeserver is relayed
+/// to the original caller verbatim.
 #[tokio::test]
-async fn federation_proxy_destination_error_surfaces_as_502() {
+async fn federation_proxy_forbidden_is_relayed_to_client() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
-    hs.set_fed_proxy_response(403, None);
+    hs.set_fed_proxy_response(
+        403,
+        Some(json!({"errcode": "M_FORBIDDEN", "error": "not a member"})),
+    );
     let destination_hs = FakeHomeserver::new().await;
 
     let mut cs_api_url_overrides = hs.cs_api_url_override();
@@ -513,7 +516,108 @@ async fn federation_proxy_destination_error_surfaces_as_502() {
     request["server_name"] = json!(destination_hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
-    expect_matrix_error(status, &body, 502, "M_CONNECTION_FAILED");
+    expect_matrix_error(status, &body, 403, "M_FORBIDDEN");
+    expect_fed_proxy_request(
+        &hs,
+        destination_hs.server_name(),
+        AS_TOKEN,
+        &expected_relayed_body(&user.user_id, DEFAULT_LK_URL),
+    );
+}
+
+/// An HTTP 400 / M_INVALID_PARAM response from the destination homeserver is relayed
+/// to the original caller verbatim.
+#[tokio::test]
+async fn federation_proxy_invalid_param_is_relayed_to_client() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_fed_proxy_response(
+        400,
+        Some(json!({"errcode": "M_INVALID_PARAM", "error": "unknown SFU url"})),
+    );
+    let destination_hs = FakeHomeserver::new().await;
+
+    let mut cs_api_url_overrides = hs.cs_api_url_override();
+    cs_api_url_overrides.extend(destination_hs.cs_api_url_override());
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        cs_api_url_overrides,
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
+    request["server_name"] = json!(destination_hs.server_name());
+    let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+
+    expect_matrix_error(status, &body, 400, "M_INVALID_PARAM");
+    expect_fed_proxy_request(
+        &hs,
+        destination_hs.server_name(),
+        AS_TOKEN,
+        &expected_relayed_body(&user.user_id, DEFAULT_LK_URL),
+    );
+}
+
+/// A destination error status outside 403/400 surfaces as 502 / M_UNKNOWN
+/// rather than being relayed verbatim.
+#[tokio::test]
+async fn federation_proxy_other_destination_error_surfaces_as_502() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_fed_proxy_response(500, None);
+    let destination_hs = FakeHomeserver::new().await;
+
+    let mut cs_api_url_overrides = hs.cs_api_url_override();
+    cs_api_url_overrides.extend(destination_hs.cs_api_url_override());
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        cs_api_url_overrides,
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
+    request["server_name"] = json!(destination_hs.server_name());
+    let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+
+    expect_matrix_error(status, &body, 502, "M_UNKNOWN");
+    expect_fed_proxy_request(
+        &hs,
+        destination_hs.server_name(),
+        AS_TOKEN,
+        &expected_relayed_body(&user.user_id, DEFAULT_LK_URL),
+    );
+}
+
+/// A 403 whose errcode isn't M_FORBIDDEN is not relayed as such and instead results in 502.
+#[tokio::test]
+async fn federation_proxy_403_with_unexpected_errcode_surfaces_as_502() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_fed_proxy_response(403, Some(json!({"errcode": "M_FOOBAR", "error": "?"})));
+    let destination_hs = FakeHomeserver::new().await;
+
+    let mut cs_api_url_overrides = hs.cs_api_url_override();
+    cs_api_url_overrides.extend(destination_hs.cs_api_url_override());
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        cs_api_url_overrides,
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
+    request["server_name"] = json!(destination_hs.server_name());
+    let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
+
+    expect_matrix_error(status, &body, 502, "M_UNKNOWN");
     expect_fed_proxy_request(
         &hs,
         destination_hs.server_name(),

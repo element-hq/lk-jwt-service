@@ -266,8 +266,8 @@ async fn get_token_rejects_when_remote_server_is_not_joined() {
 
     assert_eq!(
         status.as_u16(),
-        502,
-        "expected 502 when the remote homeserver isn't in the room, got {status}: {body}"
+        403,
+        "expected the remote homeserver's 403 to be relayed, got {status}: {body}"
     );
-    assert_eq!(body["errcode"].as_str(), Some("M_CONNECTION_FAILED"));
+    assert_eq!(body["errcode"].as_str(), Some("M_FORBIDDEN"));
 }
