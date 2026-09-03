@@ -20,7 +20,6 @@ pub struct IsJoinedRequest {
     pub authorization: String,
     pub room_id: String,
     pub mxid: String,
-    pub server_name: String,
 }
 
 /// A request to the MSC4512 /fed_proxy endpoint.
@@ -408,22 +407,15 @@ async fn handle_is_joined(
         .unwrap_or_default()
         .to_owned();
     let mxid = query.get("mxid").cloned().unwrap_or_default();
-    let server_name = query.get("server_name").cloned().unwrap_or_default();
-    let subject = if !mxid.is_empty() {
-        mxid.clone()
-    } else {
-        server_name.clone()
-    };
 
     let mut state = state.lock().unwrap();
     state.is_joined_requests.push(IsJoinedRequest {
         authorization,
         room_id: room_id.clone(),
-        mxid,
-        server_name,
+        mxid: mxid.clone(),
     });
 
-    let joined = !state.not_joined.contains(&(room_id, subject));
+    let joined = !state.not_joined.contains(&(room_id, mxid));
     Json(json!({ "joined": joined }))
 }
 
