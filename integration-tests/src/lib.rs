@@ -22,7 +22,7 @@ pub use helpers::{
     expect_job_not_persisted, expect_job_persisted, expect_matrix_error,
     expect_no_delayed_event_request, expect_no_delayed_event_requests,
     expect_no_fed_proxy_requests, expect_no_is_joined_request, expect_no_is_joined_requests,
-    expect_no_user_info_lookups, expect_server_is_joined_request, expect_user_info_lookup,
-    livekit_identity, livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request,
-    wait_for_delayed_event_request_count, wait_for_job_removed,
+    expect_no_user_info_lookups, expect_user_info_lookup, livekit_identity, livekit_room_alias,
+    send_sfu_webhook, wait_for_delayed_event_request, wait_for_delayed_event_request_count,
+    wait_for_job_removed,
 };
