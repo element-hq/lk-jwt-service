@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use tracing::error;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MatrixRtcMemberType {
     #[serde(default)]
     pub id: String,
@@ -36,7 +35,6 @@ impl MatrixRtcMemberType {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OpenIdTokenType {
     #[serde(default)]
     pub access_token: String,
@@ -52,7 +50,6 @@ pub struct OpenIdTokenType {
 /// pre-Matrix-2.0 endpoint. Remove once all in-the-wild clients have
 /// migrated to /get_token (SfuRequest).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LegacySfuRequest {
     #[serde(default)]
     pub room: String,
@@ -71,7 +68,6 @@ pub struct LegacySfuRequest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SfuRequest {
     #[serde(default)]
     pub room_id: String,
@@ -107,7 +103,6 @@ pub struct SfuResponse {
 
 /// Request body of the `/rtc/livekit/get_token` endpoint.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GetTokenCsRequest {
     #[serde(default)]
     pub server_name: String,
@@ -129,7 +124,6 @@ pub struct GetTokenCsResponse {
 
 /// Request body of the `/rtc/livekit/get_token` S-S endpoint.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GetTokenSsRequest {
     #[serde(default)]
     pub url: String,
@@ -195,7 +189,6 @@ impl GetTokenSsRequest {
 /// so the participant-lookup task uses its backoff to confirm presence
 /// rather than waiting for the webhook (which has already fired).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DelegateDelayedLeaveRequest {
     #[serde(default)]
     pub room_id: String,
@@ -259,7 +252,6 @@ pub struct DelegateDelayedLeaveResponse {}
 
 /// The request body of /delegate_delayed_leave.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DelegateDelayedLeaveCsRequest {
     #[serde(default)]
     pub url: String,
@@ -309,7 +301,6 @@ impl DelegateDelayedLeaveCsRequest {
 
 /// The request body of POST /appservice-ping.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppservicePingTriggerRequest {
     #[serde(default)]
     pub server_name: String,
