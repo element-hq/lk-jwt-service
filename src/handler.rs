@@ -1229,6 +1229,8 @@ impl Handler {
     ) -> Result<DelegateDelayedLeaveResponse, MatrixErrorResponse> {
         require_non_empty_header(mxid_header, "Missing request authorization")?;
 
+        self.require_matching_lk_url(&req.url, "delegate_delayed_leave_cs")?;
+
         let lk_identity =
             livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);

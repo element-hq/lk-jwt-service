@@ -511,6 +511,7 @@ const DELEGATE_DELAYED_LEAVE_CS_MXID: &str = "@user:example.com";
 /// A fully populated, valid delegate_delayed_leave C-S request.
 fn valid_delegate_delayed_leave_cs_request() -> DelegateDelayedLeaveCsRequest {
     DelegateDelayedLeaveCsRequest {
+        url: default_auth().lk_url,
         room_id: "!testRoom:example.com".into(),
         slot_id: "m.call#ROOM".into(),
         member: MatrixRtcMemberType {
@@ -4016,6 +4017,48 @@ async fn test_handle_delegate_delayed_leave_cs_missing_fields() {
     handler.close().await;
 }
 
+/// A missing `url` is rejected by DelegateDelayedLeaveCsRequest::validate()
+/// with 400 M_BAD_JSON, before the handler is even invoked.
+#[tokio::test]
+async fn test_handle_delegate_delayed_leave_cs_missing_url() {
+    let handler = new_delegate_delayed_leave_cs_handler(HandlerTestDeps::default());
+    let body = marshal_delegate_delayed_leave_cs_request(|r| {
+        r.url = String::new();
+    });
+    let resp = send_request(
+        &handler,
+        post_delegate_delayed_leave_cs_request(body, DELEGATE_DELAYED_LEAVE_CS_MXID),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for a missing `url`"
+    );
+    handler.close().await;
+}
+
+/// A `url` that doesn't match the configured LiveKit URL is rejected with
+/// 400 M_INVALID_PARAM.
+#[tokio::test]
+async fn test_handle_delegate_delayed_leave_cs_url_mismatch() {
+    let handler = new_delegate_delayed_leave_cs_handler(HandlerTestDeps::default());
+    let body = marshal_delegate_delayed_leave_cs_request(|r| {
+        r.url = "wss://not-the-configured-sfu.example.com".into();
+    });
+    let resp = send_request(
+        &handler,
+        post_delegate_delayed_leave_cs_request(body, DELEGATE_DELAYED_LEAVE_CS_MXID),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "expected 400 for a `url` mismatch"
+    );
+    handler.close().await;
+}
+
 /// A CS-API URL resolution failure surfaces as 400.
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_cs_cs_api_url_resolution_error() {
@@ -4082,6 +4125,23 @@ async fn test_process_delegate_delayed_leave_cs_missing_mxid() {
         .expect_err("expected MatrixErrorResponse");
     assert_eq!(err.status, 401, "expected 401");
     assert_eq!(err.errcode, "M_UNAUTHORIZED", "expected M_UNAUTHORIZED");
+    handler.close().await;
+}
+
+/// A `url` that doesn't match the configured LiveKit URL is rejected with
+/// 400 M_INVALID_PARAM, before any homeserver calls are made.
+#[tokio::test]
+async fn test_process_delegate_delayed_leave_cs_url_mismatch() {
+    let handler = new_delegate_delayed_leave_cs_handler(HandlerTestDeps::default());
+    let mut req = valid_delegate_delayed_leave_cs_request();
+    req.url = "wss://not-the-configured-sfu.example.com".into();
+
+    let err = handler
+        .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
+        .await
+        .expect_err("expected MatrixErrorResponse");
+    assert_eq!(err.status, 400, "expected 400");
+    assert_eq!(err.errcode, "M_INVALID_PARAM", "expected M_INVALID_PARAM");
     handler.close().await;
 }
 

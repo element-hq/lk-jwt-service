@@ -262,6 +262,8 @@ pub struct DelegateDelayedLeaveResponse {}
 #[serde(deny_unknown_fields)]
 pub struct DelegateDelayedLeaveCsRequest {
     #[serde(default)]
+    pub url: String,
+    #[serde(default)]
     pub room_id: String,
     #[serde(default)]
     pub slot_id: String,
@@ -277,11 +279,11 @@ pub struct DelegateDelayedLeaveCsRequest {
 
 impl DelegateDelayedLeaveCsRequest {
     pub fn validate(&self) -> Result<(), MatrixErrorResponse> {
-        if self.room_id.is_empty() || self.slot_id.is_empty() {
+        if self.url.is_empty() || self.room_id.is_empty() || self.slot_id.is_empty() {
             return Err(MatrixErrorResponse {
                 status: 400,
                 errcode: "M_BAD_JSON".into(),
-                err: "The request body is missing `room_id` or `slot_id`".into(),
+                err: "The request body is missing `url`, `room_id` or `slot_id`".into(),
             });
         }
         self.member
@@ -750,6 +752,7 @@ mod tests {
 
     pub(crate) fn valid_delegate_delayed_leave_cs_request() -> DelegateDelayedLeaveCsRequest {
         DelegateDelayedLeaveCsRequest {
+            url: "wss://lk.local".into(),
             room_id: "!testRoom:example.com".into(),
             slot_id: "m.call#ROOM".into(),
             member: MatrixRtcMemberType {
@@ -766,6 +769,13 @@ mod tests {
     fn test_delegate_delayed_leave_cs_request_validate_valid() {
         let req = valid_delegate_delayed_leave_cs_request();
         assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_delegate_delayed_leave_cs_request_validate_missing_url() {
+        let mut req = valid_delegate_delayed_leave_cs_request();
+        req.url = String::new();
+        assert_validation_error(req.validate(), "M_BAD_JSON");
     }
 
     #[test]
@@ -842,6 +852,7 @@ mod tests {
     fn test_delegate_delayed_leave_cs_request_deserialize_without_delay_timeout() {
         let req: DelegateDelayedLeaveCsRequest = serde_json::from_str(
             r#"{
+                "url": "wss://lk.local",
                 "room_id": "!testRoom:example.com",
                 "slot_id": "m.call#ROOM",
                 "member": {"id": "member-id", "claimed_device_id": "device-id"},
