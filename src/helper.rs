@@ -518,23 +518,6 @@ async fn retry_after_from_response(resp: reqwest::Response, status: u16) -> Acti
     }
 }
 
-/// The subject of an `/is_joined` query (MSC4502): either a specific Matrix
-/// user ID or a server name.
-pub enum IsJoinedSubject<'a> {
-    Mxid(&'a str),
-    ServerName(&'a str),
-}
-
-impl IsJoinedSubject<'_> {
-    /// The `(query parameter name, value)` pair to send for this subject.
-    fn query(&self) -> (&'static str, &str) {
-        match self {
-            IsJoinedSubject::Mxid(mxid) => ("mxid", mxid),
-            IsJoinedSubject::ServerName(server_name) => ("server_name", server_name),
-        }
-    }
-}
-
 /// The outcome of a failed `/get_token` federation relay: either the
 /// destination homeserver rejected the request (`status` and `errcode` as
 /// reported by it), or something else went wrong reaching it.
@@ -942,37 +925,6 @@ pub trait Deps: Send + Sync {
         mxid: &str,
         as_token: &str,
     ) -> Result<bool, String> {
-        self.check_is_joined(cs_api_url, room_id, IsJoinedSubject::Mxid(mxid), as_token)
-            .await
-    }
-
-    /// Checks whether `server_name` is currently joined to `room_id`, via the
-    /// `/is_joined` endpoint from MSC4502.
-    async fn is_server_joined(
-        &self,
-        cs_api_url: &CsApiUrl,
-        room_id: &str,
-        server_name: &str,
-        as_token: &str,
-    ) -> Result<bool, String> {
-        self.check_is_joined(
-            cs_api_url,
-            room_id,
-            IsJoinedSubject::ServerName(server_name),
-            as_token,
-        )
-        .await
-    }
-
-    /// Performs a room membership check for an MXID or server name, via the
-    /// `/is_joined` endpoint from MSC4502.
-    async fn check_is_joined(
-        &self,
-        cs_api_url: &CsApiUrl,
-        room_id: &str,
-        subject: IsJoinedSubject<'_>,
-        as_token: &str,
-    ) -> Result<bool, String> {
         const IS_JOINED_PATH_PREFIX: &str = "_matrix/client/unstable/io.element.msc4502";
 
         let mut endpoint = url::Url::parse(cs_api_url.as_str())
@@ -989,10 +941,7 @@ pub trait Deps: Send + Sync {
             segments.push(room_id);
             segments.push("is_joined");
         }
-        let (query_param, query_value) = subject.query();
-        endpoint
-            .query_pairs_mut()
-            .append_pair(query_param, query_value);
+        endpoint.query_pairs_mut().append_pair("mxid", mxid);
 
         let resp = http_client(self.skip_verify_tls())
             .get(endpoint.clone())
@@ -1002,7 +951,7 @@ pub trait Deps: Send + Sync {
             .await
             .map_err(|e| {
                 let msg = error_chain(&e);
-                debug!(url = %endpoint, err = %msg, "check_is_joined");
+                debug!(url = %endpoint, err = %msg, "is_user_joined");
                 format!("failed to check room membership: {msg}")
             })?;
 
@@ -2457,7 +2406,7 @@ mod tests {
         assert_eq!(captured.user_id, None);
     }
 
-    // ── check_is_joined ──────────────────────────────────────────────────────
+    // ── is_user_joined ───────────────────────────────────────────────────────
 
     /// A homeserver stub serving /is_joined at the unstable MSC4502 path.
     struct IsJoinedServer {
@@ -2487,14 +2436,14 @@ mod tests {
     /// The unstable MSC4502 endpoint is always used, regardless of what the
     /// homeserver advertises.
     #[tokio::test]
-    async fn test_check_is_joined_uses_unstable_endpoint() {
+    async fn test_is_user_joined_uses_unstable_endpoint() {
         let hs = spawn_is_joined_server(true).await;
 
         let joined = RealDeps::default()
-            .check_is_joined(
+            .is_user_joined(
                 &CsApiUrl(hs.server.url.clone()),
                 "!room:example.com",
-                IsJoinedSubject::Mxid("@alice:example.com"),
+                "@alice:example.com",
                 "as_token",
             )
             .await
@@ -2514,14 +2463,14 @@ mod tests {
 
     /// `joined: false` responses propagate as Ok(false), not an error.
     #[tokio::test]
-    async fn test_check_is_joined_not_joined() {
+    async fn test_is_user_joined_not_joined() {
         let hs = spawn_is_joined_server(false).await;
 
         let joined = RealDeps::default()
-            .check_is_joined(
+            .is_user_joined(
                 &CsApiUrl(hs.server.url.clone()),
                 "!room:example.com",
-                IsJoinedSubject::Mxid("@alice:example.com"),
+                "@alice:example.com",
                 "as_token",
             )
             .await
@@ -2531,7 +2480,7 @@ mod tests {
 
     /// A non-2xx response from the is_joined endpoint itself surfaces as an error.
     #[tokio::test]
-    async fn test_check_is_joined_http_error() {
+    async fn test_is_user_joined_http_error() {
         let router = Router::new().route(
             "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
             any(|| async { http::StatusCode::FORBIDDEN }),
@@ -2539,18 +2488,16 @@ mod tests {
         let server = spawn_http_server(router).await;
 
         let err = RealDeps::default()
-            .check_is_joined(
+            .is_user_joined(
                 &CsApiUrl(server.url.clone()),
                 "!room:example.com",
-                IsJoinedSubject::Mxid("@alice:example.com"),
+                "@alice:example.com",
                 "as_token",
             )
             .await
             .expect_err("expected an error for a non-2xx is_joined response");
         assert!(err.contains("403"), "unexpected error message: {err}");
     }
-
-    // ── is_user_joined ───────────────────────────────────────────────────────
 
     /// The request is shaped correctly: it uses `mxid`.
     #[tokio::test]
@@ -2577,42 +2524,6 @@ mod tests {
         assert!(
             uri.contains("%21room%3Aexample.com") || uri.contains("!room:example.com"),
             "expected the room ID in the path, got {uri:?}"
-        );
-        assert_eq!(
-            headers
-                .get(http::header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok()),
-            Some("Bearer the_as_token"),
-        );
-    }
-
-    // ── is_server_joined ─────────────────────────────────────────────────────
-
-    /// The request is shaped correctly: it uses `server_name`, not `mxid`.
-    #[tokio::test]
-    async fn test_is_server_joined_request_shape() {
-        let hs = spawn_is_joined_server(true).await;
-
-        let _ = RealDeps::default()
-            .is_server_joined(
-                &CsApiUrl(hs.server.url.clone()),
-                "!room:example.com",
-                "origin.example.org",
-                "the_as_token",
-            )
-            .await
-            .expect("unexpected error");
-
-        let requests = hs.requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        let (uri, headers) = &requests[0];
-        assert!(
-            uri.contains("server_name=origin.example.org"),
-            "expected a server_name query param, got {uri:?}"
-        );
-        assert!(
-            !uri.contains("mxid="),
-            "expected no mxid query param, got {uri:?}"
         );
         assert_eq!(
             headers
