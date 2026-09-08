@@ -2,11 +2,7 @@ networks:
   e2e:
 
 x-synapse-build: &synapse-build
-  # Built from https://github.com/element-hq/synapse/pull/19977 while it is unmerged.
-  image: lk-jwt-e2e-synapse:latest
-  build:
-    context: https://github.com/Johennes/synapse.git#johannes/outgoing-fed-proxy
-    dockerfile: docker/Dockerfile
+  image: matrixdotorg/synapse:develop
 
 x-jwt-service-build: &jwt-service-build
   image: lk-jwt-e2e-jwt-service:latest
