@@ -253,6 +253,29 @@ pub fn parse_config() -> Result<Config, String> {
 
     let app_service_config = read_app_service_config()?;
 
+    let mut redis_url_string = env_var("LIVEKIT_REDIS_URL");
+    let redis_password = env_var("LIVEKIT_REDIS_PASSWORD");
+    if redis_url_string.is_empty() {
+        if !redis_password.is_empty() {
+            warn!(
+                "LIVEKIT_REDIS_PASSWORD was set without setting LIVEKIT_REDIS_URL. Continuing without Redis support"
+            );
+        }
+    } else {
+        match url::Url::parse(&redis_url_string) {
+            Ok(mut parsed_url) => {
+                if !redis_password.is_empty() {
+                    let result = parsed_url.set_password(Some(&redis_password));
+                    if result.is_err() {
+                        return Err("LIVEKIT_REDIS_PASSWORD was set but couldn't be combined with LIVEKIT_REDIS_URL".into());
+                    }
+                }
+                redis_url_string = parsed_url.to_string()
+            }
+            Err(err) => return Err(format!("Could not parse LIVEKIT_REDIS_URL: {}", err)),
+        };
+    }
+
     Ok(Config {
         key,
         secret,
@@ -266,7 +289,7 @@ pub fn parse_config() -> Result<Config, String> {
         lk_jwt_bind,
         sanity_check_interval,
         cs_api_url_overrides,
-        redis_url: env_var("LIVEKIT_REDIS_URL"),
+        redis_url: redis_url_string,
         app_service_config,
     })
 }
@@ -721,7 +744,11 @@ mod tests {
                         "LIVEKIT_CS_API_URL_OVERRIDES",
                         "matrix.com=https://matrix-client.matrix.com",
                     ),
-                    ("LIVEKIT_REDIS_URL", "localhost:6379"),
+                    ("LIVEKIT_REDIS_URL", "redis://localhost:6379"),
+                    (
+                        "LIVEKIT_REDIS_PASSWORD",
+                        "redis_cred_ua5ahg7ahruek4sho6ateeFe",
+                    ),
                     ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
                     ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
                     ("LIVEKIT_HS_SERVER_NAME", "example.com"),
@@ -738,7 +765,7 @@ mod tests {
                         "matrix.com".to_owned(),
                         CsApiUrl("https://matrix-client.matrix.com".into()),
                     )]),
-                    redis_url: "localhost:6379".into(),
+                    redis_url: "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379".into(),
                     app_service_config: AppServiceConfig {
                         as_token: "as_token_env_pheethiewixohp9eecheeGh".to_owned(),
                         hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".to_owned(),
@@ -860,6 +887,68 @@ mod tests {
                 ],
                 want_config: None,
                 want_err_msg: "LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a non-negative integer, got \"-1\"",
+            },
+            Case {
+                name: "Redis with no auth",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_REDIS_URL", "redis://localhost:6379"),
+                ],
+                want_config: Some(Config {
+                    key: "test_key".into(),
+                    secret: "test_secret".into(),
+                    lk_url: "wss://test.livekit.cloud".into(),
+                    skip_verify_tls: false,
+                    full_access_homeservers: vec!["*".into()],
+                    lk_jwt_bind: ":8080".into(),
+                    sanity_check_interval: Duration::ZERO,
+                    cs_api_url_overrides: HashMap::new(),
+                    redis_url: "redis://localhost:6379".to_owned(),
+                    app_service_config: Default::default(),
+                }),
+                want_err_msg: "",
+            },
+            Case {
+                name: "Redis with inline auth",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    (
+                        "LIVEKIT_REDIS_URL",
+                        "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379",
+                    ),
+                ],
+                want_config: Some(Config {
+                    key: "test_key".into(),
+                    secret: "test_secret".into(),
+                    lk_url: "wss://test.livekit.cloud".into(),
+                    skip_verify_tls: false,
+                    full_access_homeservers: vec!["*".into()],
+                    lk_jwt_bind: ":8080".into(),
+                    sanity_check_interval: Duration::ZERO,
+                    cs_api_url_overrides: HashMap::new(),
+                    redis_url: "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379"
+                        .to_owned(),
+                    app_service_config: Default::default(),
+                }),
+                want_err_msg: "",
+            },
+            Case {
+                name: "Sanity check Redis URL",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_REDIS_URL", "not-a-url"),
+                ],
+                want_config: None,
+                want_err_msg: "Could not parse LIVEKIT_REDIS_URL: relative URL without a base",
             },
         ];
 
