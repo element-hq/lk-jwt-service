@@ -207,6 +207,49 @@ pub async fn join_room_via(
     assert!(status.is_success(), "join failed: {status}: {body}");
 }
 
+/// Leaves `room_id` as the given user against the homeserver behind
+/// `cs_api_url`.
+pub async fn leave_room(cs_api_url: &str, user: &MatrixUser, room_id: &str) {
+    let mut url = reqwest::Url::parse(cs_api_url).expect("invalid CS API URL");
+    url.path_segments_mut()
+        .expect("cs_api_url cannot be a base")
+        .extend(["_matrix", "client", "v3", "rooms", room_id, "leave"]);
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(&user.access_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("leave request failed");
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .expect("leave response was not valid JSON");
+    assert!(status.is_success(), "leave failed: {status}: {body}");
+}
+
+/// Kicks `target_user_id` out of `room_id` as the given user against the
+/// homeserver behind `cs_api_url`.
+pub async fn kick_user(cs_api_url: &str, user: &MatrixUser, room_id: &str, target_user_id: &str) {
+    let mut url = reqwest::Url::parse(cs_api_url).expect("invalid CS API URL");
+    url.path_segments_mut()
+        .expect("cs_api_url cannot be a base")
+        .extend(["_matrix", "client", "v3", "rooms", room_id, "kick"]);
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(&user.access_token)
+        .json(&serde_json::json!({ "user_id": target_user_id, "reason": "e2e test" }))
+        .send()
+        .await
+        .expect("kick request failed");
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("kick response was not valid JSON");
+    assert!(status.is_success(), "kick failed: {status}: {body}");
+}
+
 // ── SFU verification ─────────────────────────────────────────────────────────
 
 /// Connects to the LiveKit SFU at `sfu_addr`'s RTC signalling endpoint using
@@ -336,9 +379,23 @@ impl LiveKitParticipant {
                     }
                     // Drain incoming messages so that the connection stays
                     // responsive (this is also what answers WebSocket pings).
+                    // A Leave from the SFU means it is throwing the
+                    // participant out (or closing the room): the participant
+                    // is gone from that moment on, whether or not the socket
+                    // is closed right away.
                     msg = socket.next() => {
                         match msg {
                             None | Some(Err(_)) => return,
+                            Some(Ok(Message::Binary(bytes))) => {
+                                if let Ok(response) =
+                                    <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
+                                    && let Some(livekit_protocol::signal_response::Message::Leave(_)) =
+                                        response.message
+                                {
+                                    let _ = socket.close(None).await;
+                                    return;
+                                }
+                            }
                             Some(Ok(_)) => {}
                         }
                     }
@@ -350,6 +407,27 @@ impl LiveKitParticipant {
             leave_tx: Some(leave_tx),
             task,
         }
+    }
+
+    /// Whether the participant is still connected to the SFU, as far as the
+    /// signalling connection can tell: it has neither been closed by the SFU
+    /// nor told to leave.
+    pub fn is_connected(&self) -> bool {
+        !self.task.is_finished()
+    }
+
+    /// Waits until the SFU has disconnected the participant — by telling
+    /// them to leave or by closing the signalling connection — returning
+    /// whether that happened before `timeout` elapsed.
+    pub async fn wait_for_disconnect(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while self.is_connected() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        true
     }
 
     /// Leaves the room and waits until the signalling connection is closed.
@@ -468,6 +546,54 @@ pub async fn get_livekit_token(
     assert!(
         status.is_success(),
         "expected a successful get_token response, got {status}: {body}"
+    );
+    body["jwt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("get_token response is missing `jwt`: {body}"))
+        .to_owned()
+}
+
+/// Requests a LiveKit access token for an SFU hosted by `target_server_name`,
+/// a different homeserver than the one behind `cs_api_url`, the way a
+/// federated participant does: through their own homeserver's C-S API, which
+/// relays the request via the MSC4512 federation proxy.
+#[allow(clippy::too_many_arguments)]
+pub async fn get_relayed_livekit_token(
+    cs_api_url: &str,
+    user: &MatrixUser,
+    target_server_name: &str,
+    livekit_url: &str,
+    room_id: &str,
+    slot_id: &str,
+    member_id: &str,
+    device_id: &str,
+) -> String {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{cs_api_url}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+        ))
+        .bearer_auth(&user.access_token)
+        .json(&serde_json::json!({
+            "server_name": target_server_name,
+            "room_id": room_id,
+            "slot_id": slot_id,
+            "url": livekit_url,
+            "member": {
+                "id": member_id,
+                "claimed_device_id": device_id,
+            },
+        }))
+        .send()
+        .await
+        .expect("request to /rtc/livekit/get_token failed");
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .expect("get_token response was not valid JSON");
+    assert!(
+        status.is_success(),
+        "expected a successful relayed get_token response, got {status}: {body}"
     );
     body["jwt"]
         .as_str()

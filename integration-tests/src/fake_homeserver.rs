@@ -20,6 +20,17 @@ pub struct IsJoinedRequest {
     pub authorization: String,
     pub room_id: String,
     pub mxid: String,
+    pub server_name: String,
+}
+
+/// A request to the /joined_members endpoint.
+#[derive(Clone, Debug)]
+pub struct JoinedMembersRequest {
+    pub authorization: String,
+    pub room_id: String,
+    /// The `user_id` query parameter (application-service identity
+    /// assertion), if any. Expected to be absent.
+    pub user_id: Option<String>,
 }
 
 /// A request to the MSC4512 /fed_proxy endpoint.
@@ -91,6 +102,21 @@ struct HsState {
     /// The recorded /is_joined requests.
     is_joined_requests: Vec<IsJoinedRequest>,
 
+    /// The users /joined_members reports per room. Rooms not listed here
+    /// report no members.
+    joined_members: HashMap<String, Vec<String>>,
+
+    /// Rooms for which /joined_members is refused with 403, as it is for an
+    /// application service none of whose users is in the room.
+    rooms_left: HashSet<String>,
+
+    /// The HTTP status to return on /joined_members requests, overriding the
+    /// scripted members. None results in 200 OK.
+    joined_members_status: Option<u16>,
+
+    /// The recorded /joined_members requests.
+    joined_members_requests: Vec<JoinedMembersRequest>,
+
     /// The recorded /fed_proxy requests.
     fed_proxy_requests: Vec<FedProxyRequest>,
 
@@ -111,6 +137,10 @@ impl Default for HsState {
             delay_look_ups: Vec::new(),
             not_joined: HashSet::new(),
             is_joined_requests: Vec::new(),
+            joined_members: HashMap::new(),
+            rooms_left: HashSet::new(),
+            joined_members_status: None,
+            joined_members_requests: Vec::new(),
             fed_proxy_requests: Vec::new(),
             fed_proxy_response: (
                 200,
@@ -130,6 +160,11 @@ impl FakeHomeserver {
     /// Start a new fake homeserver. The tasks live on the test's tokio runtime and die
     /// with it.
     pub async fn new() -> FakeHomeserver {
+        // Multiple rustls crypto backends are enabled in the dependency
+        // graph, so the default provider must be installed explicitly.
+        // Harmless (and ignored) if another test already installed one.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let state = Arc::new(Mutex::new(HsState::default()));
 
         // Create a throwaway self-signed certificate.
@@ -178,6 +213,10 @@ impl FakeHomeserver {
             .route(
                 "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
                 get(handle_is_joined),
+            )
+            .route(
+                "/_matrix/client/v3/rooms/{room_id}/joined_members",
+                get(handle_joined_members),
             )
             .route(
                 "/_matrix/client/unstable/io.element.msc4512/appservice/fed_proxy",
@@ -257,19 +296,52 @@ impl FakeHomeserver {
         self.state.lock().unwrap().delay_look_ups.clone()
     }
 
-    /// Marks (room_id, mxid) as NOT a member of the room. Every other pair
-    /// is treated as joined by default.
-    pub fn set_not_joined(&self, room_id: &str, mxid: &str) {
+    /// Marks (room_id, subject) as NOT a member of the room, where `subject`
+    /// is either an mxid or a server name. Every other pair is treated as
+    /// joined by default.
+    pub fn set_not_joined(&self, room_id: &str, subject: &str) {
         self.state
             .lock()
             .unwrap()
             .not_joined
-            .insert((room_id.to_owned(), mxid.to_owned()));
+            .insert((room_id.to_owned(), subject.to_owned()));
     }
 
     /// The recorded /is_joined requests.
     pub fn is_joined_requests(&self) -> Vec<IsJoinedRequest> {
         self.state.lock().unwrap().is_joined_requests.clone()
+    }
+
+    /// Makes /joined_members report exactly the given users as joined to
+    /// `room_id`. Rooms never set up this way report no members.
+    pub fn set_joined_members(&self, room_id: &str, members: &[&str]) {
+        self.state.lock().unwrap().joined_members.insert(
+            room_id.to_owned(),
+            members.iter().map(|m| (*m).to_owned()).collect(),
+        );
+    }
+
+    /// Makes /joined_members refuse `room_id` with 403, the way a homeserver
+    /// does for an application service none of whose users is in the room.
+    /// Whether the homeserver reports itself as joined via /is_joined is
+    /// controlled separately, see [`FakeHomeserver::set_not_joined`].
+    pub fn set_room_left(&self, room_id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .rooms_left
+            .insert(room_id.to_owned());
+    }
+
+    /// Sets the HTTP status /joined_members fails with, regardless of the
+    /// scripted members.
+    pub fn set_joined_members_status(&self, status: u16) {
+        self.state.lock().unwrap().joined_members_status = Some(status);
+    }
+
+    /// The recorded /joined_members requests.
+    pub fn joined_members_requests(&self) -> Vec<JoinedMembersRequest> {
+        self.state.lock().unwrap().joined_members_requests.clone()
     }
 
     /// The recorded /fed_proxy requests.
@@ -407,16 +479,75 @@ async fn handle_is_joined(
         .unwrap_or_default()
         .to_owned();
     let mxid = query.get("mxid").cloned().unwrap_or_default();
+    let server_name = query.get("server_name").cloned().unwrap_or_default();
+    let subject = if !mxid.is_empty() {
+        mxid.clone()
+    } else {
+        server_name.clone()
+    };
 
     let mut state = state.lock().unwrap();
     state.is_joined_requests.push(IsJoinedRequest {
         authorization,
         room_id: room_id.clone(),
-        mxid: mxid.clone(),
+        mxid,
+        server_name,
     });
 
-    let joined = !state.not_joined.contains(&(room_id, mxid));
+    let joined = !state.not_joined.contains(&(room_id, subject));
     Json(json!({ "joined": joined }))
+}
+
+/// Handler for /joined_members requests.
+async fn handle_joined_members(
+    State(state): State<Arc<Mutex<HsState>>>,
+    Path(room_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let authorization = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+
+    let mut state = state.lock().unwrap();
+    state.joined_members_requests.push(JoinedMembersRequest {
+        authorization,
+        room_id: room_id.clone(),
+        user_id: query.get("user_id").cloned(),
+    });
+
+    if let Some(status) = state.joined_members_status {
+        return (
+            StatusCode::from_u16(status).expect("invalid scripted status"),
+            Json(json!({"errcode": "M_UNKNOWN"})),
+        );
+    }
+
+    if state.rooms_left.contains(&room_id) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "errcode": "M_FORBIDDEN",
+                "error": "Appservice not in room",
+            })),
+        );
+    }
+
+    let joined: serde_json::Map<String, serde_json::Value> = state
+        .joined_members
+        .get(&room_id)
+        .into_iter()
+        .flatten()
+        .map(|mxid| {
+            (
+                mxid.clone(),
+                json!({ "display_name": null, "avatar_url": null }),
+            )
+        })
+        .collect();
+    (StatusCode::OK, Json(json!({ "joined": joined })))
 }
 
 /// Handler for /fed_proxy requests (MSC4512).

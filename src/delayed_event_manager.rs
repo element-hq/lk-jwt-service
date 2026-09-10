@@ -20,7 +20,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::helper::{
-    CsApiUrl, Deps, LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId, new_unique_id,
+    CsApiUrl, Deps, LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, ParticipantKey, UniqueId,
+    new_unique_id,
 };
 use crate::retry::{Classify, ErrorClass, ExponentialBackoff, RetryError, retry};
 
@@ -125,14 +126,9 @@ pub struct SfuMessage {
     pub livekit_identity: LiveKitIdentity,
 }
 
-/// The map key used by the handler loop to track active delayed-event jobs.
-/// LiveKit identity encodes the Matrix user ID (which includes the homeserver
-/// domain), so (room, identity) is unique — no need for CsApiUrl in the key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct JobKey {
-    pub room: LiveKitRoomAlias,
-    pub identity: LiveKitIdentity,
-}
+/// The map key used by the handler loop to track active delayed-event jobs:
+/// the (LiveKit room, LiveKit identity) pair the job is for.
+pub type JobKey = ParticipantKey;
 
 /// Resolves the Client-Server API base URL for a homeserver.
 pub type LookupCsApiUrlFn =

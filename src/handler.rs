@@ -34,8 +34,11 @@ use crate::delayed_event_manager::{
 use crate::helper::new_unique_id;
 use crate::helper::{
     CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_SS_PATH, LiveKitAuth,
-    LiveKitIdentity, LiveKitRoomAlias, UniqueId, livekit_identity_for, livekit_room_alias_for,
-    matrix_server_name,
+    LiveKitIdentity, LiveKitRoomAlias, ParticipantKey, UniqueId, livekit_identity_for,
+    livekit_room_alias_for, matrix_server_name,
+};
+use crate::membership_monitor::{
+    MembershipMonitor, MembershipMonitorConfig, Registration, SfuEvent,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::requests::AppservicePingTriggerRequest;
@@ -114,6 +117,25 @@ pub(crate) struct LoopReceivers {
     pub(crate) sfu_event_rx: mpsc::Receiver<SfuEventRequest>,
     job_done_rx: mpsc::Receiver<Arc<DelayedEventJob>>,
     job_restarted_rx: mpsc::Receiver<JobRestartedRequest>,
+    /// Participants the membership monitor removed from the SFU.
+    revoked_rx: mpsc::Receiver<ParticipantKey>,
+}
+
+/// Builds a CS-API URL resolver backed by the given overrides and cache.
+fn make_lookup_fn(
+    deps: Arc<dyn Deps>,
+    overrides: Arc<HashMap<String, CsApiUrl>>,
+    cache: Arc<CsApiUrlCache>,
+) -> LookupCsApiUrlFn {
+    Arc::new(move |server_name| {
+        let deps = deps.clone();
+        let overrides = overrides.clone();
+        let cache = cache.clone();
+        Box::pin(async move {
+            deps.resolve_cs_api_url(&server_name, &overrides, Some(&cache))
+                .await
+        })
+    })
 }
 
 /// A persistence operation queued for the store-writer task.
@@ -152,6 +174,11 @@ pub(crate) enum AddJobError {
 ///   - sfu_event: route an SFU webhook event to the job for (room, identity)
 ///   - job_done: clean up a job that reached a terminal state
 ///   - job_restarted: update the stored job after a delayed-event restart
+///   - revoked: stop the job of a participant the membership monitor removed
+///
+/// Membership enforcement (MSC4195's kick on room leave/ban) lives in a
+/// separate actor, the [`MembershipMonitor`], which is only present when
+/// running as an application service with a non-zero check interval.
 pub struct Handler {
     cancel: CancellationToken,
     pub(crate) livekit_auth: LiveKitAuth,
@@ -174,14 +201,20 @@ pub struct Handler {
     job_restarted_tx: mpsc::Sender<JobRestartedRequest>,
     add_job_tx: mpsc::Sender<AddJobRequest>,
     pub(crate) sfu_event_tx: mpsc::Sender<SfuEventRequest>,
+    /// Enforces room membership on the SFU. None when not running as an
+    /// application service or when disabled via a zero check interval. Owns
+    /// the sending end of the loop's `revoked` channel.
+    membership_monitor: Option<Arc<MembershipMonitor>>,
 }
 
 impl Handler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         lk_auth: LiveKitAuth,
         full_access_homeservers: Vec<String>,
         app_service_config: AppServiceConfig,
         sanity_check_interval: Duration,
+        membership_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
         deps: Arc<dyn Deps>,
@@ -191,6 +224,7 @@ impl Handler {
             full_access_homeservers,
             app_service_config,
             sanity_check_interval,
+            membership_check_interval,
             cs_api_url_overrides,
             store,
             deps,
@@ -201,12 +235,15 @@ impl Handler {
     }
 
     /// Constructs a Handler without starting its actor loop, handing the
-    /// loop's receiving ends to the caller.
+    /// loop's receiving ends to the caller. The membership monitor, if any,
+    /// is started regardless.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_without_loop(
         lk_auth: LiveKitAuth,
         full_access_homeservers: Vec<String>,
         app_service_config: AppServiceConfig,
         sanity_check_interval: Duration,
+        membership_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
         deps: Arc<dyn Deps>,
@@ -215,17 +252,43 @@ impl Handler {
         let (sfu_event_tx, sfu_event_rx) = mpsc::channel(200);
         let (job_done_tx, job_done_rx) = mpsc::channel(10);
         let (job_restarted_tx, job_restarted_rx) = mpsc::channel(10);
+        let (revoked_tx, revoked_rx) = mpsc::channel(64);
         let (loop_done_tx, _) = watch::channel(false);
         let (recovery_done_tx, _) = watch::channel(false);
 
+        let cancel = CancellationToken::new();
+        let cs_api_url_overrides = Arc::new(cs_api_url_overrides);
+        let cs_api_url_cache = Arc::new(CsApiUrlCache::new());
+
+        let membership_monitor =
+            (app_service_config.is_set_up() && !membership_check_interval.is_zero()).then(|| {
+                MembershipMonitor::new(
+                    &cancel,
+                    MembershipMonitorConfig {
+                        check_interval: membership_check_interval,
+                        hs_server_name: app_service_config.hs_server_name.clone(),
+                        as_token: app_service_config.as_token.clone(),
+                    },
+                    deps.clone(),
+                    lk_auth.clone(),
+                    make_lookup_fn(
+                        deps.clone(),
+                        cs_api_url_overrides.clone(),
+                        cs_api_url_cache.clone(),
+                    ),
+                    store.clone(),
+                    revoked_tx,
+                )
+            });
+
         let handler = Arc::new(Self {
-            cancel: CancellationToken::new(),
+            cancel,
             livekit_auth: lk_auth,
             full_access_homeservers,
             app_service_config,
             sanity_check_interval,
-            cs_api_url_overrides: Arc::new(cs_api_url_overrides),
-            cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
+            cs_api_url_overrides,
+            cs_api_url_cache,
             store,
             deps,
             loop_done_tx,
@@ -234,6 +297,7 @@ impl Handler {
             job_restarted_tx,
             add_job_tx,
             sfu_event_tx,
+            membership_monitor,
         });
         (
             handler,
@@ -242,8 +306,15 @@ impl Handler {
                 sfu_event_rx,
                 job_done_rx,
                 job_restarted_rx,
+                revoked_rx,
             },
         )
+    }
+
+    /// The membership monitor, if enabled.
+    #[cfg(test)]
+    pub(crate) fn membership_monitor(&self) -> Option<&Arc<MembershipMonitor>> {
+        self.membership_monitor.as_ref()
     }
 
     /// A watch receiver that flips to true once start-up recovery completed.
@@ -260,18 +331,11 @@ impl Handler {
     /// Builds a CS-API URL resolver backed by this handler's overrides and
     /// cache.
     fn make_lookup(&self) -> LookupCsApiUrlFn {
-        let deps = self.deps.clone();
-        let overrides = self.cs_api_url_overrides.clone();
-        let cache = self.cs_api_url_cache.clone();
-        Arc::new(move |server_name| {
-            let deps = deps.clone();
-            let overrides = overrides.clone();
-            let cache = cache.clone();
-            Box::pin(async move {
-                deps.resolve_cs_api_url(&server_name, &overrides, Some(&cache))
-                    .await
-            })
-        })
+        make_lookup_fn(
+            self.deps.clone(),
+            self.cs_api_url_overrides.clone(),
+            self.cs_api_url_cache.clone(),
+        )
     }
 
     fn new_job(
@@ -424,7 +488,33 @@ impl Handler {
                             warn!(err = %err, "Handler: job close failed during shutdown");
                         }
                     }
+                    // The monitor shares our cancellation token, so it is
+                    // already shutting down; wait for it to finish.
+                    if let Some(monitor) = &self.membership_monitor {
+                        monitor.close().await;
+                    }
                     break;
+                }
+
+                // ── membership revoked ───────────────────────────────────────
+                Some(key) = rx.revoked_rx.recv() => {
+                    // The participant was removed from the SFU for losing
+                    // their room membership. Their delayed leave event, if
+                    // any, is moot: as a non-member they can no longer send
+                    // it, so tear the job down instead of letting it retry a
+                    // doomed send.
+                    if let Some(job) = jobs.remove(&key) {
+                        info!(room = %key.room, lk_id = %key.identity, job_id = %job.job_id,
+                            "Handler: participant lost room membership, dropping job");
+                        job.stop();
+                        if self.store.is_some() {
+                            enqueue_store_op(StoreOp::Delete {
+                                key,
+                                context: "delete persisted job of revoked participant",
+                            })
+                            .await;
+                        }
+                    }
                 }
 
                 // ── add job ──────────────────────────────────────────────────
@@ -802,6 +892,28 @@ impl Handler {
             })
     }
 
+    /// Registers a freshly minted token with the membership monitor, if
+    /// enabled, so the participant is removed from the SFU should they leave
+    /// (or be kicked or banned from) `matrix_room_id`.
+    async fn track_participant(
+        &self,
+        matrix_room_id: &str,
+        matrix_user_id: &str,
+        lk_room_alias: &LiveKitRoomAlias,
+        lk_identity: &LiveKitIdentity,
+    ) {
+        if let Some(monitor) = &self.membership_monitor {
+            monitor
+                .register(Registration {
+                    matrix_room_id: matrix_room_id.to_owned(),
+                    matrix_user_id: matrix_user_id.to_owned(),
+                    livekit_room: lk_room_alias.clone(),
+                    livekit_identity: lk_identity.clone(),
+                })
+                .await;
+        }
+    }
+
     /// Returns 400 M_INVALID_PARAM if `url` doesn't match this service's
     /// configured LiveKit URL. `endpoint` identifies the call site in the
     /// warning log.
@@ -887,6 +999,9 @@ impl Handler {
             }
         }
 
+        self.track_participant(&req.room, &matrix_id, &lk_room_alias, &lk_identity)
+            .await;
+
         info!(matrix_id = %matrix_id, claimed_device_id = %req.device_id,
             access = if is_full_access_user { "full" } else { "restricted" },
             matrix_room = %req.room, lk_id = %lk_identity, room = %lk_room_alias,
@@ -962,6 +1077,9 @@ impl Handler {
                 .map_err(matrix_error_for_add_job)?;
             }
         }
+
+        self.track_participant(&req.room_id, &matrix_id, &lk_room_alias, &lk_identity)
+            .await;
 
         info!(matrix_id = %matrix_id, claimed_device_id = %req.member.claimed_device_id,
             access = if is_full_access_user { "full" } else { "restricted" },
@@ -1051,6 +1169,9 @@ impl Handler {
 
             self.create_livekit_room_or_internal_error(&lk_room_alias, mxid_header, &lk_identity)
                 .await?;
+
+            self.track_participant(&req.room_id, mxid_header, &lk_room_alias, &lk_identity)
+                .await;
 
             info!(matrix_id = %mxid_header, claimed_device_id = %req.member.claimed_device_id,
                 access = if is_local { "full" } else { "restricted" },
@@ -1159,6 +1280,9 @@ impl Handler {
 
         self.create_livekit_room_or_internal_error(&lk_room_alias, &req.user_id, &lk_identity)
             .await?;
+
+        self.track_participant(&req.room_id, &req.user_id, &lk_room_alias, &lk_identity)
+            .await;
 
         info!(user_id = %req.user_id, claimed_device_id = %req.member.claimed_device_id,
             origin = %origin_header, matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
@@ -1808,6 +1932,30 @@ pub(crate) fn sfu_event_from_webhook(
     }
 }
 
+/// Translates a LiveKit webhook event into the membership monitor's view of
+/// it, if it is one the monitor cares about.
+pub(crate) fn membership_event_from_webhook(
+    event: &livekit_protocol::WebhookEvent,
+) -> Option<SfuEvent> {
+    let room = LiveKitRoomAlias(event.room.as_ref()?.name.clone());
+    let key = |participant: &livekit_protocol::ParticipantInfo| ParticipantKey {
+        room: room.clone(),
+        identity: LiveKitIdentity(participant.identity.clone()),
+    };
+    match event.event.as_str() {
+        "participant_joined" => Some(SfuEvent::ParticipantJoined(key(event
+            .participant
+            .as_ref()?))),
+        "participant_left" | "participant_connection_aborted" => {
+            Some(SfuEvent::ParticipantLeft(key(event
+                .participant
+                .as_ref()?)))
+        }
+        "room_finished" => Some(SfuEvent::RoomFinished(room)),
+        _ => None,
+    }
+}
+
 async fn handle_sfu_webhook(State(handler): State<Arc<Handler>>, req: Request) -> Response {
     let auth_token = req
         .headers()
@@ -1835,6 +1983,14 @@ async fn handle_sfu_webhook(State(handler): State<Arc<Handler>>, req: Request) -
             return StatusCode::OK.into_response();
         }
     };
+
+    // The membership monitor sees every event first: it also cares about
+    // room-level events that carry no participant.
+    if let Some(monitor) = &handler.membership_monitor
+        && let Some(membership_event) = membership_event_from_webhook(&event)
+    {
+        monitor.notify_sfu_event(membership_event).await;
+    }
 
     let Some((room_alias, msg)) = sfu_event_from_webhook(&event) else {
         return StatusCode::OK.into_response();

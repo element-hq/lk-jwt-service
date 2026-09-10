@@ -26,6 +26,12 @@ pub struct Config {
     /// the sanity check entirely.
     /// Configure via LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS (unit: seconds).
     pub sanity_check_interval: Duration,
+    /// The period at which SFU participants are reconciled against Matrix
+    /// room membership, removing those who left or were kicked or banned
+    /// (MSC4195). Zero disables the check. Only effective when running as an
+    /// application service.
+    /// Configure via LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS (unit: seconds).
+    pub membership_check_interval: Duration,
     /// Map of URLs for the Client-Server API keyed by server name. These will
     /// be preferred over .well-known resolution for the contained server names.
     pub cs_api_url_overrides: HashMap<String, CsApiUrl>,
@@ -233,20 +239,8 @@ pub fn parse_config() -> Result<Config, String> {
 
     let lk_jwt_bind = parse_bind()?;
 
-    let mut sanity_check_interval = Duration::ZERO;
-    let sanity_check_raw = env_var("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS");
-    if !sanity_check_raw.is_empty() {
-        match sanity_check_raw.parse::<i64>() {
-            Ok(secs) if secs >= 0 => {
-                sanity_check_interval = Duration::from_secs(secs as u64);
-            }
-            _ => {
-                return Err(format!(
-                    "LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS must be a non-negative integer, got {sanity_check_raw:?}"
-                ));
-            }
-        }
-    }
+    let sanity_check_interval =
+        read_interval_seconds("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS")?.unwrap_or(Duration::ZERO);
 
     let cs_api_url_overrides = read_cs_api_url_overrides(&env_var("LIVEKIT_CS_API_URL_OVERRIDES"))
         .map_err(|e| format!("failed parsing LIVEKIT_CS_API_URL_OVERRIDES: {e}"))?;
@@ -276,6 +270,20 @@ pub fn parse_config() -> Result<Config, String> {
         };
     }
 
+    let membership_check_interval =
+        match read_interval_seconds("LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS")? {
+            Some(interval) => {
+                if !interval.is_zero() && !app_service_config.is_set_up() {
+                    warn!(
+                        "LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS has no effect unless running as \
+                         an application service"
+                    );
+                }
+                interval
+            }
+            None => DEFAULT_MEMBERSHIP_CHECK_INTERVAL,
+        };
+
     Ok(Config {
         key,
         secret,
@@ -288,10 +296,31 @@ pub fn parse_config() -> Result<Config, String> {
             .collect(),
         lk_jwt_bind,
         sanity_check_interval,
+        membership_check_interval,
         cs_api_url_overrides,
         redis_url: redis_url_string,
         app_service_config,
     })
+}
+
+/// The membership check interval used when
+/// LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS is unset.
+pub const DEFAULT_MEMBERSHIP_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Reads an interval in whole seconds from the environment variable `name`.
+/// Returns None when the variable is unset or empty and an error when it is
+/// set to anything but a non-negative integer.
+fn read_interval_seconds(name: &str) -> Result<Option<Duration>, String> {
+    let raw = env_var(name);
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    match raw.parse::<i64>() {
+        Ok(secs) if secs >= 0 => Ok(Some(Duration::from_secs(secs as u64))),
+        _ => Err(format!(
+            "{name} must be a non-negative integer, got {raw:?}"
+        )),
+    }
 }
 
 /// Expands a bind address into the socket addresses to try, in order. A bare
@@ -721,6 +750,7 @@ mod tests {
                     full_access_homeservers: vec!["*".into()],
                     lk_jwt_bind: ":8080".into(),
                     sanity_check_interval: Duration::ZERO,
+                    membership_check_interval: DEFAULT_MEMBERSHIP_CHECK_INTERVAL,
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
                     app_service_config: Default::default(),
@@ -761,6 +791,7 @@ mod tests {
                     full_access_homeservers: vec!["example.com".into(), "test.com".into()],
                     lk_jwt_bind: ":9090".into(),
                     sanity_check_interval: Duration::from_secs(30),
+                    membership_check_interval: DEFAULT_MEMBERSHIP_CHECK_INTERVAL,
                     cs_api_url_overrides: HashMap::from([(
                         "matrix.com".to_owned(),
                         CsApiUrl("https://matrix-client.matrix.com".into()),
@@ -791,6 +822,7 @@ mod tests {
                     full_access_homeservers: vec!["*".into()],
                     lk_jwt_bind: ":9090".into(),
                     sanity_check_interval: Duration::ZERO,
+                    membership_check_interval: DEFAULT_MEMBERSHIP_CHECK_INTERVAL,
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
                     app_service_config: Default::default(),
@@ -870,11 +902,72 @@ mod tests {
                     full_access_homeservers: vec!["*".into()],
                     lk_jwt_bind: ":8080".into(),
                     sanity_check_interval: Duration::ZERO,
+                    membership_check_interval: DEFAULT_MEMBERSHIP_CHECK_INTERVAL,
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
                     app_service_config: Default::default(),
                 }),
                 want_err_msg: "",
+            },
+            Case {
+                name: "Membership check interval set",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS", "5"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                ],
+                want_config: Some(Config {
+                    key: "test_key".into(),
+                    secret: "test_secret".into(),
+                    lk_url: "wss://test.livekit.cloud".into(),
+                    skip_verify_tls: false,
+                    full_access_homeservers: vec!["*".into()],
+                    lk_jwt_bind: ":8080".into(),
+                    sanity_check_interval: Duration::ZERO,
+                    membership_check_interval: Duration::from_secs(5),
+                    cs_api_url_overrides: HashMap::new(),
+                    redis_url: String::new(),
+                    app_service_config: Default::default(),
+                }),
+                want_err_msg: "",
+            },
+            Case {
+                name: "Membership check interval zero disables",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS", "0"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                ],
+                want_config: Some(Config {
+                    key: "test_key".into(),
+                    secret: "test_secret".into(),
+                    lk_url: "wss://test.livekit.cloud".into(),
+                    skip_verify_tls: false,
+                    full_access_homeservers: vec!["*".into()],
+                    lk_jwt_bind: ":8080".into(),
+                    sanity_check_interval: Duration::ZERO,
+                    membership_check_interval: Duration::ZERO,
+                    cs_api_url_overrides: HashMap::new(),
+                    redis_url: String::new(),
+                    app_service_config: Default::default(),
+                }),
+                want_err_msg: "",
+            },
+            Case {
+                name: "Membership check interval invalid",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS", "soon"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                ],
+                want_config: None,
+                want_err_msg: "LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS must be a non-negative integer, got \"soon\"",
             },
             Case {
                 name: "Sanity check interval negative rejected",
@@ -908,6 +1001,7 @@ mod tests {
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: "redis://localhost:6379".to_owned(),
                     app_service_config: Default::default(),
+                    membership_check_interval: DEFAULT_MEMBERSHIP_CHECK_INTERVAL,
                 }),
                 want_err_msg: "",
             },
@@ -935,6 +1029,7 @@ mod tests {
                     redis_url: "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379"
                         .to_owned(),
                     app_service_config: Default::default(),
+                    membership_check_interval: DEFAULT_MEMBERSHIP_CHECK_INTERVAL,
                 }),
                 want_err_msg: "",
             },

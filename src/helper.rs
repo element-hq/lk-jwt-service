@@ -7,7 +7,7 @@
 //! service calls and Matrix CS-API calls. External interactions live behind
 //! the [`Deps`] trait so they can be replaced in tests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -112,6 +112,15 @@ string_newtype!(LiveKitRoomAlias);
 string_newtype!(LiveKitIdentity);
 string_newtype!(CsApiUrl);
 string_newtype!(UniqueId);
+
+/// Identifies one participant on the SFU: the LiveKit room they are in and
+/// their LiveKit identity. Identities are derived from the Matrix user ID
+/// (which includes the homeserver domain), so the pair is globally unique.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ParticipantKey {
+    pub room: LiveKitRoomAlias,
+    pub identity: LiveKitIdentity,
+}
 
 /// Generates a unique ID: an 8-byte big-endian microsecond timestamp
 /// followed by 8 random bytes, Base32Hex-encoded without padding. The
@@ -275,6 +284,13 @@ pub enum RoomServiceError {
 pub trait RoomServiceClient: Send + Sync {
     async fn create_room(&self, params: CreateRoomParams) -> Result<RoomInfo, RoomServiceError>;
     async fn get_participant(&self, room: &str, identity: &str) -> Result<(), RoomServiceError>;
+    /// Disconnects the participant `identity` from `room`. Fails with
+    /// [`RoomServiceError::NotFound`] when the participant (or the room) is
+    /// not present.
+    async fn remove_participant(&self, room: &str, identity: &str) -> Result<(), RoomServiceError>;
+    /// Deletes `room`, disconnecting every participant in it. Fails with
+    /// [`RoomServiceError::NotFound`] when the room does not exist.
+    async fn delete_room(&self, room: &str) -> Result<(), RoomServiceError>;
 }
 
 /// Converts a LiveKit URL to its HTTP form: ws:// becomes http://, wss://
@@ -421,6 +437,41 @@ impl RoomServiceClient for LiveKitRoomServiceClient {
             .await?;
         Ok(())
     }
+
+    async fn remove_participant(&self, room: &str, identity: &str) -> Result<(), RoomServiceError> {
+        let _: livekit_protocol::RemoveParticipantResponse = self
+            .twirp_call(
+                "RemoveParticipant",
+                livekit_api::access_token::VideoGrants {
+                    room_admin: true,
+                    room: room.to_owned(),
+                    ..Default::default()
+                },
+                livekit_protocol::RoomParticipantIdentity {
+                    room: room.to_owned(),
+                    identity: identity.to_owned(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_room(&self, room: &str) -> Result<(), RoomServiceError> {
+        let _: livekit_protocol::DeleteRoomResponse = self
+            .twirp_call(
+                "DeleteRoom",
+                livekit_api::access_token::VideoGrants {
+                    room_create: true,
+                    ..Default::default()
+                },
+                livekit_protocol::DeleteRoomRequest {
+                    room: room.to_owned(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 // ── delayed-event action error taxonomy ──────────────────────────────────────
@@ -516,6 +567,36 @@ async fn retry_after_from_response(resp: reqwest::Response, status: u16) -> Acti
         status,
         msg: "CS API temporarily unavailable (http status code 429)".into(),
     }
+}
+
+/// The subject of an `/is_joined` query (MSC4502): either a specific Matrix
+/// user ID or a server name.
+pub enum IsJoinedSubject<'a> {
+    Mxid(&'a str),
+    ServerName(&'a str),
+}
+
+impl IsJoinedSubject<'_> {
+    /// The `(query parameter name, value)` pair to send for this subject.
+    fn query(&self) -> (&'static str, &str) {
+        match self {
+            IsJoinedSubject::Mxid(mxid) => ("mxid", mxid),
+            IsJoinedSubject::ServerName(server_name) => ("server_name", server_name),
+        }
+    }
+}
+
+/// The error side of [`Deps::get_joined_members`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MembershipQueryError {
+    /// The homeserver refused the query (HTTP 403): none of the application
+    /// service's users is joined to the room. With a local-only user
+    /// namespace this means the homeserver itself is no longer in the room.
+    #[error("no application service user is joined to the room")]
+    NotInRoom,
+    /// Transport, server or decoding failure — membership unknown.
+    #[error("{0}")]
+    Other(String),
 }
 
 /// The outcome of a failed `/get_token` federation relay: either the
@@ -711,6 +792,109 @@ pub trait Deps: Send + Sync {
             Err(RoomServiceError::NotFound(_)) => Ok(false),
             Err(err) => Err(err.to_string()),
         }
+    }
+
+    /// Disconnects the given identity from the given LiveKit room. A
+    /// participant that is (no longer) present is not an error: the desired
+    /// end state — the identity being gone from the room — already holds.
+    async fn remove_participant(
+        &self,
+        lk_auth: &LiveKitAuth,
+        room: &LiveKitRoomAlias,
+        identity: &LiveKitIdentity,
+    ) -> Result<(), String> {
+        let room_client =
+            self.new_room_service_client(&lk_auth.lk_url, &lk_auth.key, &lk_auth.secret);
+        match room_client.remove_participant(&room.0, &identity.0).await {
+            Ok(()) | Err(RoomServiceError::NotFound(_)) => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    /// Deletes the given LiveKit room, disconnecting everyone in it. A room
+    /// that does not exist is not an error, for the same reason as in
+    /// [`Deps::remove_participant`].
+    async fn delete_livekit_room(
+        &self,
+        lk_auth: &LiveKitAuth,
+        room: &LiveKitRoomAlias,
+    ) -> Result<(), String> {
+        let room_client =
+            self.new_room_service_client(&lk_auth.lk_url, &lk_auth.key, &lk_auth.secret);
+        match room_client.delete_room(&room.0).await {
+            Ok(()) | Err(RoomServiceError::NotFound(_)) => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    /// Fetches the set of users currently joined to `room_id` via
+    /// `GET /rooms/{roomId}/joined_members`, authenticated as the application
+    /// service itself.
+    ///
+    /// The endpoint is served to an application service as long as one of the
+    /// users in its namespace is joined to the room. With a namespace covering
+    /// this homeserver's local users, a 403 therefore means the homeserver has
+    /// no local user in the room any more, which callers see as
+    /// [`MembershipQueryError::NotInRoom`].
+    async fn get_joined_members(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        as_token: &str,
+    ) -> Result<HashSet<String>, MembershipQueryError> {
+        let mut endpoint = url::Url::parse(cs_api_url.as_str()).map_err(|e| {
+            MembershipQueryError::Other(format!("invalid client-server API URL: {e}"))
+        })?;
+        {
+            let mut segments = endpoint.path_segments_mut().map_err(|_| {
+                MembershipQueryError::Other(
+                    "invalid client-server API URL: cannot be a base".into(),
+                )
+            })?;
+            segments.pop_if_empty();
+            segments.extend([
+                "_matrix",
+                "client",
+                "v3",
+                "rooms",
+                room_id,
+                "joined_members",
+            ]);
+        }
+
+        let resp = http_client(self.skip_verify_tls())
+            .get(endpoint.clone())
+            .bearer_auth(as_token)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = error_chain(&e);
+                debug!(url = %endpoint, err = %msg, "get_joined_members");
+                MembershipQueryError::Other(format!("failed to fetch joined members: {msg}"))
+            })?;
+
+        let status = resp.status();
+        debug!(url = %endpoint, status = status.as_u16(), "get_joined_members");
+        if status == http::StatusCode::FORBIDDEN {
+            return Err(MembershipQueryError::NotInRoom);
+        }
+        if !status.is_success() {
+            return Err(MembershipQueryError::Other(format!(
+                "failed to fetch joined members: http status code {}",
+                status.as_u16()
+            )));
+        }
+
+        #[derive(Deserialize, Default)]
+        struct JoinedMembersResponse {
+            #[serde(default)]
+            joined: HashMap<String, serde_json::Value>,
+        }
+        let parsed: JoinedMembersResponse = resp.json().await.map_err(|e| {
+            MembershipQueryError::Other(format!("failed to parse joined_members response: {e}"))
+        })?;
+        Ok(parsed.joined.into_keys().collect())
     }
 
     /// GETs the delay of the delayed event identified by `delay_id` from the C-S API,
@@ -925,6 +1109,37 @@ pub trait Deps: Send + Sync {
         mxid: &str,
         as_token: &str,
     ) -> Result<bool, String> {
+        self.check_is_joined(cs_api_url, room_id, IsJoinedSubject::Mxid(mxid), as_token)
+            .await
+    }
+
+    /// Checks whether `server_name` is currently joined to `room_id`, via the
+    /// `/is_joined` endpoint from MSC4502.
+    async fn is_server_joined(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        server_name: &str,
+        as_token: &str,
+    ) -> Result<bool, String> {
+        self.check_is_joined(
+            cs_api_url,
+            room_id,
+            IsJoinedSubject::ServerName(server_name),
+            as_token,
+        )
+        .await
+    }
+
+    /// Performs a room membership check for an MXID or server name, via the
+    /// `/is_joined` endpoint from MSC4502.
+    async fn check_is_joined(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        subject: IsJoinedSubject<'_>,
+        as_token: &str,
+    ) -> Result<bool, String> {
         const IS_JOINED_PATH_PREFIX: &str = "_matrix/client/unstable/io.element.msc4502";
 
         let mut endpoint = url::Url::parse(cs_api_url.as_str())
@@ -941,7 +1156,10 @@ pub trait Deps: Send + Sync {
             segments.push(room_id);
             segments.push("is_joined");
         }
-        endpoint.query_pairs_mut().append_pair("mxid", mxid);
+        let (query_param, query_value) = subject.query();
+        endpoint
+            .query_pairs_mut()
+            .append_pair(query_param, query_value);
 
         let resp = http_client(self.skip_verify_tls())
             .get(endpoint.clone())
@@ -951,7 +1169,7 @@ pub trait Deps: Send + Sync {
             .await
             .map_err(|e| {
                 let msg = error_chain(&e);
-                debug!(url = %endpoint, err = %msg, "is_user_joined");
+                debug!(url = %endpoint, err = %msg, "check_is_joined");
                 format!("failed to check room membership: {msg}")
             })?;
 
@@ -2533,6 +2751,195 @@ mod tests {
         );
     }
 
+    // ── is_server_joined ─────────────────────────────────────────────────────
+
+    /// The request is shaped correctly: it uses `server_name`, not `mxid`.
+    #[tokio::test]
+    async fn test_is_server_joined_request_shape() {
+        let hs = spawn_is_joined_server(true).await;
+
+        let _ = RealDeps::default()
+            .is_server_joined(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "origin.example.org",
+                "the_as_token",
+            )
+            .await
+            .expect("unexpected error");
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let (uri, headers) = &requests[0];
+        assert!(
+            uri.contains("server_name=origin.example.org"),
+            "expected a server_name query param, got {uri:?}"
+        );
+        assert!(
+            !uri.contains("mxid="),
+            "expected no mxid query param, got {uri:?}"
+        );
+        assert_eq!(
+            headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer the_as_token"),
+        );
+    }
+
+    // ── get_joined_members ───────────────────────────────────────────────────
+
+    /// A homeserver stub serving /joined_members with a canned status and
+    /// body, recording every request's URI and headers.
+    async fn spawn_joined_members_server(
+        status: http::StatusCode,
+        body: serde_json::Value,
+    ) -> IsJoinedServer {
+        let requests: Arc<Mutex<Vec<(String, http::HeaderMap)>>> = Arc::new(Mutex::new(Vec::new()));
+        let requests_clone = requests.clone();
+        let router = Router::new().route(
+            "/_matrix/client/v3/rooms/{room_id}/joined_members",
+            any(move |req: Request| {
+                let requests = requests_clone.clone();
+                let body = body.clone();
+                async move {
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push((req.uri().to_string(), req.headers().clone()));
+                    (status, axum::Json(body))
+                }
+            }),
+        );
+        let server = spawn_http_server(router).await;
+        IsJoinedServer { server, requests }
+    }
+
+    /// The request is shaped correctly — stable v3 path with the room ID,
+    /// application-service token, no identity assertion — and the response
+    /// is reduced to the set of joined user IDs.
+    #[tokio::test]
+    async fn test_get_joined_members_request_shape_and_parsing() {
+        let hs = spawn_joined_members_server(
+            http::StatusCode::OK,
+            serde_json::json!({
+                "joined": {
+                    "@alice:example.com": {"display_name": "Alice", "avatar_url": null},
+                    "@bob:remote.example.org": {},
+                }
+            }),
+        )
+        .await;
+
+        let members = RealDeps::default()
+            .get_joined_members(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "the_as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert_eq!(
+            members,
+            HashSet::from([
+                "@alice:example.com".to_owned(),
+                "@bob:remote.example.org".to_owned()
+            ])
+        );
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let (uri, headers) = &requests[0];
+        assert!(
+            uri.starts_with("/_matrix/client/v3/rooms/")
+                && uri.ends_with("/joined_members")
+                && (uri.contains("%21room%3Aexample.com") || uri.contains("!room:example.com")),
+            "unexpected request URI {uri:?}"
+        );
+        assert!(
+            !uri.contains("user_id="),
+            "expected no identity assertion, got {uri:?}"
+        );
+        assert_eq!(
+            headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer the_as_token"),
+        );
+    }
+
+    /// A 403 means no application-service user is in the room.
+    #[tokio::test]
+    async fn test_get_joined_members_forbidden_is_not_in_room() {
+        let hs = spawn_joined_members_server(
+            http::StatusCode::FORBIDDEN,
+            serde_json::json!({"errcode": "M_FORBIDDEN", "error": "Appservice not in room"}),
+        )
+        .await;
+
+        let err = RealDeps::default()
+            .get_joined_members(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "the_as_token",
+            )
+            .await
+            .expect_err("expected an error");
+        assert_eq!(err, MembershipQueryError::NotInRoom);
+    }
+
+    /// Any other failure is reported as such, not as a membership fact.
+    #[tokio::test]
+    async fn test_get_joined_members_other_errors() {
+        let hs = spawn_joined_members_server(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"errcode": "M_UNKNOWN"}),
+        )
+        .await;
+        let err = RealDeps::default()
+            .get_joined_members(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "the_as_token",
+            )
+            .await
+            .expect_err("expected an error");
+        assert!(
+            matches!(&err, MembershipQueryError::Other(msg) if msg.contains("500")),
+            "unexpected error: {err:?}"
+        );
+
+        // An unparseable success body is an error as well.
+        let hs =
+            spawn_joined_members_server(http::StatusCode::OK, serde_json::json!([1, 2, 3])).await;
+        let err = RealDeps::default()
+            .get_joined_members(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                "the_as_token",
+            )
+            .await
+            .expect_err("expected an error");
+        assert!(
+            matches!(err, MembershipQueryError::Other(_)),
+            "unexpected error: {err:?}"
+        );
+
+        // As is an unreachable homeserver.
+        let err = RealDeps::default()
+            .get_joined_members(
+                &CsApiUrl("http://127.0.0.1:9".into()),
+                "!room:example.com",
+                "the_as_token",
+            )
+            .await
+            .expect_err("expected an error");
+        assert!(
+            matches!(err, MembershipQueryError::Other(_)),
+            "unexpected error: {err:?}"
+        );
+    }
+
     // ── resolve_cs_api_url ────────────────────────────────────────────────────
 
     /// A Deps implementation with a swappable discover_client_api.
@@ -2744,11 +3151,16 @@ mod tests {
     type CreateRoomFn =
         Box<dyn Fn(CreateRoomParams) -> Result<RoomInfo, RoomServiceError> + Send + Sync>;
     type GetParticipantFn = Box<dyn Fn(&str, &str) -> Result<(), RoomServiceError> + Send + Sync>;
+    type RemoveParticipantFn =
+        Box<dyn Fn(&str, &str) -> Result<(), RoomServiceError> + Send + Sync>;
+    type DeleteRoomFn = Box<dyn Fn(&str) -> Result<(), RoomServiceError> + Send + Sync>;
 
     #[derive(Default)]
     struct MockRoomServiceClient {
         create_room_fn: Option<CreateRoomFn>,
         get_participant_fn: Option<GetParticipantFn>,
+        remove_participant_fn: Option<RemoveParticipantFn>,
+        delete_room_fn: Option<DeleteRoomFn>,
     }
 
     #[async_trait]
@@ -2770,6 +3182,24 @@ mod tests {
         ) -> Result<(), RoomServiceError> {
             match &self.get_participant_fn {
                 Some(f) => f(room, identity),
+                None => Ok(()),
+            }
+        }
+
+        async fn remove_participant(
+            &self,
+            room: &str,
+            identity: &str,
+        ) -> Result<(), RoomServiceError> {
+            match &self.remove_participant_fn {
+                Some(f) => f(room, identity),
+                None => Ok(()),
+            }
+        }
+
+        async fn delete_room(&self, room: &str) -> Result<(), RoomServiceError> {
+            match &self.delete_room_fn {
+                Some(f) => f(room),
                 None => Ok(()),
             }
         }
@@ -2818,7 +3248,7 @@ mod tests {
                         creation_time: creation_start + 1,
                     })
                 })),
-                get_participant_fn: None,
+                ..Default::default()
             }),
         };
 
@@ -2847,7 +3277,7 @@ mod tests {
                         creation_time: creation_start - 100,
                     })
                 })),
-                get_participant_fn: None,
+                ..Default::default()
             }),
         };
 
@@ -2877,7 +3307,7 @@ mod tests {
                 create_room_fn: Some(Box::new(|_| {
                     Err(RoomServiceError::Other("SDK connection failed".into()))
                 })),
-                get_participant_fn: None,
+                ..Default::default()
             }),
         };
 
@@ -2916,7 +3346,7 @@ mod tests {
                         creation_time: unix_now(),
                     })
                 })),
-                get_participant_fn: None,
+                ..Default::default()
             }),
         };
 
@@ -2953,7 +3383,6 @@ mod tests {
         let calls_clone = calls.clone();
         let deps = RoomClientMockDeps {
             client: Arc::new(MockRoomServiceClient {
-                create_room_fn: None,
                 get_participant_fn: Some(Box::new(move |_, _| {
                     match calls_clone.fetch_add(1, Ordering::SeqCst) {
                         0 => Ok(()),
@@ -2961,6 +3390,7 @@ mod tests {
                         _ => Err(RoomServiceError::Other("boom".into())),
                     }
                 })),
+                ..Default::default()
             }),
         };
 
@@ -2980,6 +3410,89 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    // ── remove_participant / delete_livekit_room via mocked room client ───────
+
+    /// A participant that is already gone counts as removed; any other
+    /// failure surfaces.
+    #[tokio::test]
+    async fn test_remove_participant_contract() {
+        let auth = LiveKitAuth::default();
+        let room = LiveKitRoomAlias("room".into());
+        let identity = LiveKitIdentity("id".into());
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        let deps = RoomClientMockDeps {
+            client: Arc::new(MockRoomServiceClient {
+                remove_participant_fn: Some(Box::new(move |room, identity| {
+                    seen_clone
+                        .lock()
+                        .unwrap()
+                        .push((room.to_owned(), identity.to_owned()));
+                    match calls_clone.fetch_add(1, Ordering::SeqCst) {
+                        0 => Ok(()),
+                        1 => Err(RoomServiceError::NotFound("not found".into())),
+                        _ => Err(RoomServiceError::Other("boom".into())),
+                    }
+                })),
+                ..Default::default()
+            }),
+        };
+
+        deps.remove_participant(&auth, &room, &identity)
+            .await
+            .expect("removal should succeed");
+        deps.remove_participant(&auth, &room, &identity)
+            .await
+            .expect("removing an absent participant should succeed");
+        deps.remove_participant(&auth, &room, &identity)
+            .await
+            .expect_err("other errors should surface");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(
+            seen.iter().all(|(r, i)| r == "room" && i == "id"),
+            "unexpected arguments: {seen:?}"
+        );
+    }
+
+    /// A room that does not exist counts as deleted; any other failure
+    /// surfaces.
+    #[tokio::test]
+    async fn test_delete_livekit_room_contract() {
+        let auth = LiveKitAuth::default();
+        let room = LiveKitRoomAlias("room".into());
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let deps = RoomClientMockDeps {
+            client: Arc::new(MockRoomServiceClient {
+                delete_room_fn: Some(Box::new(move |room| {
+                    assert_eq!(room, "room");
+                    match calls_clone.fetch_add(1, Ordering::SeqCst) {
+                        0 => Ok(()),
+                        1 => Err(RoomServiceError::NotFound("not found".into())),
+                        _ => Err(RoomServiceError::Other("boom".into())),
+                    }
+                })),
+                ..Default::default()
+            }),
+        };
+
+        deps.delete_livekit_room(&auth, &room)
+            .await
+            .expect("deletion should succeed");
+        deps.delete_livekit_room(&auth, &room)
+            .await
+            .expect("deleting a missing room should succeed");
+        deps.delete_livekit_room(&auth, &room)
+            .await
+            .expect_err("other errors should surface");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     // ── real Twirp room-service client ────────────────────────────────────────
@@ -3195,5 +3708,87 @@ mod tests {
             result.is_err(),
             "expected transport/server error, got {result:?}"
         );
+    }
+
+    /// Verifies that RemoveParticipant and DeleteRoom reach their prefixed
+    /// Twirp endpoints with a room-service token, and that twirp not_found
+    /// errors are absorbed while other errors surface.
+    #[tokio::test]
+    async fn test_room_service_client_remove_participant_and_delete_room_via_prefix() {
+        use prost::Message;
+
+        let room = LiveKitRoomAlias("r".into());
+        let identity = LiveKitIdentity("i".into());
+        let auth_for = |server: &TestHttpServer| LiveKitAuth {
+            key: "devkey".into(),
+            secret: "secret".into(),
+            lk_url: format!("{}/livekit/sfu", server.url),
+        };
+
+        // RemoveParticipant: 200 with an (empty) response body.
+        let (server, captured) = spawn_twirp_server(
+            livekit_protocol::RemoveParticipantResponse::default().encode_to_vec(),
+            http::StatusCode::OK,
+        )
+        .await;
+        RealDeps::default()
+            .remove_participant(&auth_for(&server), &room, &identity)
+            .await
+            .expect("remove_participant failed");
+        let (path, auth) = captured.lock().unwrap().clone();
+        assert_eq!(
+            path, "/livekit/sfu/twirp/livekit.RoomService/RemoveParticipant",
+            "path prefix must be preserved"
+        );
+        assert!(
+            auth.starts_with("Bearer "),
+            "expected Bearer token, got {auth:?}"
+        );
+
+        // DeleteRoom: 200 with an (empty) response body.
+        let (server, captured) = spawn_twirp_server(
+            livekit_protocol::DeleteRoomResponse::default().encode_to_vec(),
+            http::StatusCode::OK,
+        )
+        .await;
+        RealDeps::default()
+            .delete_livekit_room(&auth_for(&server), &room)
+            .await
+            .expect("delete_livekit_room failed");
+        assert_eq!(
+            captured.lock().unwrap().0,
+            "/livekit/sfu/twirp/livekit.RoomService/DeleteRoom",
+            "path prefix must be preserved"
+        );
+
+        // not_found: the participant / room is already gone, which is fine.
+        let (server, _captured) = spawn_twirp_server(
+            br#"{"code":"not_found","msg":"participant does not exist"}"#.to_vec(),
+            http::StatusCode::NOT_FOUND,
+        )
+        .await;
+        RealDeps::default()
+            .remove_participant(&auth_for(&server), &room, &identity)
+            .await
+            .expect("removing an absent participant should succeed");
+        RealDeps::default()
+            .delete_livekit_room(&auth_for(&server), &room)
+            .await
+            .expect("deleting a missing room should succeed");
+
+        // Server error: surfaced as Err.
+        let (server, _captured) = spawn_twirp_server(
+            br#"{"code":"internal","msg":"boom"}"#.to_vec(),
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+        RealDeps::default()
+            .remove_participant(&auth_for(&server), &room, &identity)
+            .await
+            .expect_err("expected a server error");
+        RealDeps::default()
+            .delete_livekit_room(&auth_for(&server), &room)
+            .await
+            .expect_err("expected a server error");
     }
 }
