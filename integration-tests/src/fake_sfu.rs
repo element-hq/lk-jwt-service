@@ -31,14 +31,30 @@ pub struct GetParticipantRequest {
     pub identity: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoveParticipantRequest {
+    pub room: String,
+    pub identity: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeleteRoomRequest {
+    pub room: String,
+}
+
 #[derive(Default)]
 struct SfuState {
     /// The recorded RoomService/CreateRoom requests.
     create_room_requests: Vec<CreateRoomRequest>,
     /// The recorded RoomService/GetParticipant requests.
     get_participant_requests: Vec<GetParticipantRequest>,
+    /// The recorded RoomService/RemoveParticipant requests.
+    remove_participant_requests: Vec<RemoveParticipantRequest>,
+    /// The recorded RoomService/DeleteRoom requests.
+    delete_room_requests: Vec<DeleteRoomRequest>,
     /// (room, identity) pairs currently considered present, per
-    /// RoomService/GetParticipant.
+    /// RoomService/GetParticipant. Removed by RemoveParticipant and
+    /// DeleteRoom.
     participants: HashSet<(String, String)>,
 }
 
@@ -67,6 +83,14 @@ impl FakeSfu {
                 "/twirp/livekit.RoomService/GetParticipant",
                 post(handle_get_participant),
             )
+            .route(
+                "/twirp/livekit.RoomService/RemoveParticipant",
+                post(handle_remove_participant),
+            )
+            .route(
+                "/twirp/livekit.RoomService/DeleteRoom",
+                post(handle_delete_room),
+            )
             .with_state(Arc::clone(&state));
         tokio::spawn(axum::serve(listener, app).into_future());
 
@@ -86,6 +110,20 @@ impl FakeSfu {
     /// The recorded RoomService/GetParticipant requests.
     pub fn get_participant_requests(&self) -> Vec<GetParticipantRequest> {
         self.state.lock().unwrap().get_participant_requests.clone()
+    }
+
+    /// The recorded RoomService/RemoveParticipant requests.
+    pub fn remove_participant_requests(&self) -> Vec<RemoveParticipantRequest> {
+        self.state
+            .lock()
+            .unwrap()
+            .remove_participant_requests
+            .clone()
+    }
+
+    /// The recorded RoomService/DeleteRoom requests.
+    pub fn delete_room_requests(&self) -> Vec<DeleteRoomRequest> {
+        self.state.lock().unwrap().delete_room_requests.clone()
     }
 
     /// Mark (room, identity) as present, so GetParticipant succeeds for it.
@@ -193,4 +231,72 @@ async fn handle_get_participant(
         )
             .into_response()
     }
+}
+
+/// Handler for RoomService/RemoveParticipant requests. Removes the
+/// participant from the set of present ones; a participant that is not
+/// present is reported as not_found, like the real SFU does.
+async fn handle_remove_participant(
+    State(state): State<Arc<Mutex<SfuState>>>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Ok(request) = proto::RoomParticipantIdentity::decode(body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "code": "malformed", "msg": "invalid protobuf body" })),
+        )
+            .into_response();
+    };
+
+    let mut state = state.lock().unwrap();
+    state
+        .remove_participant_requests
+        .push(RemoveParticipantRequest {
+            room: request.room.clone(),
+            identity: request.identity.clone(),
+        });
+
+    if state
+        .participants
+        .remove(&(request.room.clone(), request.identity.clone()))
+    {
+        (
+            [(header::CONTENT_TYPE, "application/protobuf")],
+            proto::RemoveParticipantResponse::default().encode_to_vec(),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "code": "not_found", "msg": "participant does not exist" })),
+        )
+            .into_response()
+    }
+}
+
+/// Handler for RoomService/DeleteRoom requests. Removes every participant of
+/// the room from the set of present ones.
+async fn handle_delete_room(
+    State(state): State<Arc<Mutex<SfuState>>>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Ok(request) = proto::DeleteRoomRequest::decode(body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "code": "malformed", "msg": "invalid protobuf body" })),
+        )
+            .into_response();
+    };
+
+    let mut state = state.lock().unwrap();
+    state.delete_room_requests.push(DeleteRoomRequest {
+        room: request.room.clone(),
+    });
+    state.participants.retain(|(room, _)| *room != request.room);
+
+    (
+        [(header::CONTENT_TYPE, "application/protobuf")],
+        proto::DeleteRoomResponse::default().encode_to_vec(),
+    )
+        .into_response()
 }

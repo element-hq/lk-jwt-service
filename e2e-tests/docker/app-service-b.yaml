@@ -4,8 +4,9 @@ hs_token: "e2e_hs_token_b"
 sender_localpart: "_lk_jwt_service"
 namespaces:
   users:
+    # Local users only, see app-service-a.yaml.
     - exclusive: false
-      regex: ".*"
+      regex: '@.*:synapse-b\.e2e\.test'
 # Required for Synapse to call POST /_matrix/app/v1/ping on this service.
 # This will also cause event traffic to be sent to the service, so shouldn't
 # be used in production. For our tests this doesn't matter.

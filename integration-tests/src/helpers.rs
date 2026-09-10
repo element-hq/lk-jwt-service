@@ -13,9 +13,11 @@ use sha2::{Digest, Sha256};
 
 use crate::fake_homeserver::FakeHomeserver;
 use crate::fake_redis::FakeRedis;
+use crate::fake_sfu::FakeSfu;
 use crate::harness::{LIVEKIT_KEY, LIVEKIT_SECRET, Service};
 
 const REDIS_JOBS_HASH_KEY: &str = "lk-jwt:jobs";
+const REDIS_PARTICIPANTS_HASH_KEY: &str = "lk-jwt:participants";
 
 /// Decode a LiveKit JWT issued with the service's API secret and return
 /// its claims.
@@ -243,6 +245,24 @@ pub fn expect_no_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &st
     );
 }
 
+/// Assert that an /is_joined request for the given room and server name has been
+/// recorded with the given `as_token` as its authorization.
+#[track_caller]
+pub fn expect_server_is_joined_request(
+    hs: &FakeHomeserver,
+    room_id: &str,
+    server_name: &str,
+    as_token: &str,
+) {
+    let requests = hs.is_joined_requests();
+    assert!(
+        requests.iter().any(|r| r.room_id == room_id
+            && r.server_name == server_name
+            && r.authorization == format!("Bearer {as_token}")),
+        "expected an is_joined request for room {room_id:?}, server_name {server_name:?}, as_token {as_token:?}, got {requests:?}"
+    );
+}
+
 /// Assert that no fed_proxy request has been recorded.
 #[track_caller]
 pub fn expect_no_fed_proxy_requests(hs: &FakeHomeserver) {
@@ -339,6 +359,169 @@ pub async fn wait_for_job_removed(
         if Instant::now() >= deadline {
             panic!(
                 "timed out waiting for the job (room {room:?}, identity {identity:?}) to be removed from the store"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Assert that a /joined_members request for the given room has been
+/// recorded, authenticated with `as_token` and without an identity
+/// assertion.
+#[track_caller]
+pub fn expect_joined_members_request(hs: &FakeHomeserver, room_id: &str, as_token: &str) {
+    let requests = hs.joined_members_requests();
+    assert!(
+        requests.iter().any(|r| r.room_id == room_id
+            && r.authorization == format!("Bearer {as_token}")
+            && r.user_id.is_none()),
+        "expected a joined_members request for room {room_id:?} authenticated with as_token \
+         {as_token:?} and no user_id, got {requests:?}"
+    );
+}
+
+/// Assert that no /joined_members request has been recorded.
+#[track_caller]
+pub fn expect_no_joined_members_requests(hs: &FakeHomeserver) {
+    let requests = hs.joined_members_requests();
+    assert!(
+        requests.is_empty(),
+        "expected no joined_members requests, got {requests:?}"
+    );
+}
+
+/// Poll until a /joined_members request for the given room has been
+/// recorded, or panic once the timeout elapses.
+pub async fn wait_for_joined_members_request(
+    hs: &FakeHomeserver,
+    room_id: &str,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if hs
+            .joined_members_requests()
+            .iter()
+            .any(|r| r.room_id == room_id)
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for a joined_members request for room {room_id:?}, got {:?}",
+                hs.joined_members_requests()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Poll until a RoomService/RemoveParticipant request for the given room
+/// and identity has been recorded, or panic once the timeout elapses.
+pub async fn wait_for_remove_participant_request(
+    sfu: &FakeSfu,
+    room: &str,
+    identity: &str,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if sfu
+            .remove_participant_requests()
+            .iter()
+            .any(|r| r.room == room && r.identity == identity)
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for a RemoveParticipant request for room {room:?}, identity \
+                 {identity:?}, got {:?}",
+                sfu.remove_participant_requests()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Assert that no RoomService/RemoveParticipant request has been recorded.
+#[track_caller]
+pub fn expect_no_remove_participant_requests(sfu: &FakeSfu) {
+    let requests = sfu.remove_participant_requests();
+    assert!(
+        requests.is_empty(),
+        "expected no RemoveParticipant requests, got {requests:?}"
+    );
+}
+
+/// Poll until a RoomService/DeleteRoom request for the given room has been
+/// recorded, or panic once the timeout elapses.
+pub async fn wait_for_delete_room_request(sfu: &FakeSfu, room: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if sfu.delete_room_requests().iter().any(|r| r.room == room) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for a DeleteRoom request for room {room:?}, got {:?}",
+                sfu.delete_room_requests()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Assert that no RoomService/DeleteRoom request has been recorded.
+#[track_caller]
+pub fn expect_no_delete_room_requests(sfu: &FakeSfu) {
+    let requests = sfu.delete_room_requests();
+    assert!(
+        requests.is_empty(),
+        "expected no DeleteRoom requests, got {requests:?}"
+    );
+}
+
+/// Poll until a participant for the given room and identity is persisted,
+/// or panic once the timeout elapses.
+pub async fn wait_for_participant_persisted(
+    redis: &FakeRedis,
+    room: &str,
+    identity: &str,
+    timeout: Duration,
+) {
+    let field = redis_job_field(room, identity);
+    let deadline = Instant::now() + timeout;
+    loop {
+        if redis.hash_field_exists(REDIS_PARTICIPANTS_HASH_KEY, &field) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for the participant (room {room:?}, identity {identity:?}) to be persisted"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Poll until the participant for the given room and identity is no longer
+/// persisted, or panic once the timeout elapses.
+pub async fn wait_for_participant_removed(
+    redis: &FakeRedis,
+    room: &str,
+    identity: &str,
+    timeout: Duration,
+) {
+    let field = redis_job_field(room, identity);
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !redis.hash_field_exists(REDIS_PARTICIPANTS_HASH_KEY, &field) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for the participant (room {room:?}, identity {identity:?}) to be removed from the store"
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

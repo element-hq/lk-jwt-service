@@ -17,10 +17,13 @@ use tower::util::ServiceExt;
 
 use super::*;
 use crate::delayed_event_manager::{AppServiceIdentity, DelayEventAction};
-use crate::helper::{ActionError, RoomServiceClient, UserInfo, resolve_cs_api_url_via};
+use crate::helper::{
+    ActionError, MembershipQueryError, RoomServiceClient, UserInfo, resolve_cs_api_url_via,
+};
 use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, MatrixRtcMemberType};
 use crate::store::test_support::{
     FailingStore, GatedStore, new_in_memory_store, new_notifying_store,
+    new_notifying_store_with_participants,
 };
 
 // ── test deps ─────────────────────────────────────────────────────────────────
@@ -46,6 +49,14 @@ type RequestGetTokenViaFederationFn = Box<
         + Send
         + Sync,
 >;
+type RemoveParticipantFn =
+    Box<dyn Fn(&LiveKitRoomAlias, &LiveKitIdentity) -> Result<(), String> + Send + Sync>;
+type DeleteLiveKitRoomFn = Box<dyn Fn(&LiveKitRoomAlias) -> Result<(), String> + Send + Sync>;
+type GetJoinedMembersFn = Box<
+    dyn Fn(&CsApiUrl, &str) -> Result<std::collections::HashSet<String>, MembershipQueryError>
+        + Send
+        + Sync,
+>;
 
 /// A [`Deps`] implementation with per-test swappable behaviours. Un-mocked
 /// methods panic, except CS-API URL resolution, which falls back to the real
@@ -60,6 +71,9 @@ struct HandlerTestDeps {
     get_delayed_event_delay_fn: Option<GetDelayedEventDelayFn>,
     is_user_joined_fn: Option<IsJoinedFn>,
     request_get_token_via_federation_fn: Option<RequestGetTokenViaFederationFn>,
+    remove_participant_fn: Option<RemoveParticipantFn>,
+    delete_livekit_room_fn: Option<DeleteLiveKitRoomFn>,
+    get_joined_members_fn: Option<GetJoinedMembersFn>,
 }
 
 #[async_trait::async_trait]
@@ -182,6 +196,41 @@ impl Deps for HandlerTestDeps {
             None => panic!("request_get_token_via_federation not mocked in HandlerTestDeps"),
         }
     }
+
+    async fn remove_participant(
+        &self,
+        _lk_auth: &LiveKitAuth,
+        room: &LiveKitRoomAlias,
+        identity: &LiveKitIdentity,
+    ) -> Result<(), String> {
+        match &self.remove_participant_fn {
+            Some(f) => f(room, identity),
+            None => panic!("remove_participant not mocked in HandlerTestDeps"),
+        }
+    }
+
+    async fn delete_livekit_room(
+        &self,
+        _lk_auth: &LiveKitAuth,
+        room: &LiveKitRoomAlias,
+    ) -> Result<(), String> {
+        match &self.delete_livekit_room_fn {
+            Some(f) => f(room),
+            None => panic!("delete_livekit_room not mocked in HandlerTestDeps"),
+        }
+    }
+
+    async fn get_joined_members(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        _as_token: &str,
+    ) -> Result<std::collections::HashSet<String>, MembershipQueryError> {
+        match &self.get_joined_members_fn {
+            Some(f) => f(cs_api_url, room_id),
+            None => panic!("get_joined_members not mocked in HandlerTestDeps"),
+        }
+    }
 }
 
 /// A participant_exists mock that pends until the surrounding job is
@@ -230,6 +279,7 @@ fn new_handler_with(
         full_access.iter().map(|s| s.to_string()).collect(),
         Default::default(),
         Duration::ZERO, // sanity check interval disabled
+        Duration::ZERO, // membership check disabled
         HashMap::new(),
         store,
         Arc::new(deps),
@@ -251,6 +301,7 @@ fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
         vec!["example.com".into()],
         Default::default(),
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::new(),
         None,
         Arc::new(deps),
@@ -272,6 +323,7 @@ fn new_get_token_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> {
             hs_server_name: "example.com".into(),
         },
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::new(),
         None,
         Arc::new(deps),
@@ -285,6 +337,7 @@ fn new_delegate_delayed_leave_handler(deps: HandlerTestDeps) -> Arc<Handler> {
         vec!["example.com".into()],
         Default::default(),
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::from([(
             "example.com".to_owned(),
             CsApiUrl("https://matrix.example.com".into()),
@@ -297,7 +350,11 @@ fn new_delegate_delayed_leave_handler(deps: HandlerTestDeps) -> Arc<Handler> {
 /// Creates a Handler configured for testing delegate_delayed_leave C-S requests.
 fn new_delegate_delayed_leave_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> {
     Handler::new(
-        default_auth(),
+        LiveKitAuth {
+            key: "key".into(),
+            secret: "secret".into(),
+            lk_url: LIVEKIT_URL.into(),
+        },
         vec!["example.com".into()],
         crate::config::AppServiceConfig {
             as_token: "as_token".into(),
@@ -305,6 +362,7 @@ fn new_delegate_delayed_leave_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> 
             hs_server_name: "example.com".into(),
         },
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::from([(
             "example.com".to_owned(),
             CsApiUrl("https://matrix.example.com".into()),
@@ -458,6 +516,7 @@ fn new_get_token_ss_handler(deps: HandlerTestDeps) -> Arc<Handler> {
             hs_server_name: "example.com".into(),
         },
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::new(),
         None,
         Arc::new(deps),
@@ -497,7 +556,7 @@ const DELEGATE_DELAYED_LEAVE_CS_MXID: &str = "@user:example.com";
 /// A fully populated, valid delegate_delayed_leave C-S request.
 fn valid_delegate_delayed_leave_cs_request() -> DelegateDelayedLeaveCsRequest {
     DelegateDelayedLeaveCsRequest {
-        url: default_auth().lk_url,
+        url: LIVEKIT_URL.into(),
         room_id: "!testRoom:example.com".into(),
         slot_id: "m.call#ROOM".into(),
         member: MatrixRtcMemberType {
@@ -573,6 +632,7 @@ async fn test_is_full_access_user() {
         vec!["example.com".into(), "another.example.com".into()],
         Default::default(),
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::new(),
         None,
         Arc::new(HandlerTestDeps::default()),
@@ -770,6 +830,7 @@ async fn test_handler_close_timeout() {
         vec!["*".into()],
         Default::default(),
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::new(),
         None,
         Arc::new(HandlerTestDeps::default()),
@@ -983,6 +1044,7 @@ fn new_sfu_webhook_test_handler(key: &str, secret: &str) -> (Arc<Handler>, LoopR
         vec![],
         Default::default(),
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::new(),
         None,
         Arc::new(HandlerTestDeps::default()),
@@ -2097,6 +2159,7 @@ async fn test_process_sfu_request() {
             vec!["example.com".into()],
             Default::default(),
             Duration::ZERO,
+            Duration::ZERO, // membership check disabled
             HashMap::new(),
             None,
             Arc::new(deps),
@@ -2810,6 +2873,7 @@ async fn test_process_get_token_cs_request() {
                 hs_server_name: "example.com".into(),
             },
             Duration::ZERO,
+            Duration::ZERO, // membership check disabled
             HashMap::new(),
             None,
             Arc::new(deps),
@@ -3277,6 +3341,7 @@ async fn test_process_get_token_ss_request() {
                 hs_server_name: OWN_SERVER.into(),
             },
             Duration::ZERO,
+            Duration::ZERO, // membership check disabled
             HashMap::new(),
             None,
             Arc::new(deps),
@@ -3396,6 +3461,7 @@ async fn test_handle_sfu_get_success() {
         vec![MATRIX_SERVER_NAME.into()],
         Default::default(),
         Duration::ZERO,
+        Duration::ZERO, // membership check disabled
         HashMap::new(),
         Some(new_in_memory_store()),
         Arc::new(deps),
@@ -3546,6 +3612,7 @@ async fn test_process_legacy_sfu_request() {
             vec!["example.com".into()],
             Default::default(),
             Duration::ZERO,
+            Duration::ZERO, // membership check disabled
             HashMap::new(),
             Some(new_in_memory_store()),
             Arc::new(deps),
@@ -4388,4 +4455,379 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_unavailable() {
     assert_eq!(err.status, 503, "expected 503");
     assert_eq!(err.errcode, "M_UNKNOWN", "expected M_UNKNOWN");
     handler.close().await;
+}
+
+// ── membership monitor wiring ─────────────────────────────────────────────────
+// The monitor's own behaviour is covered in membership_monitor_tests.rs. These
+// tests cover how the handler feeds it: which endpoints register participants,
+// how SFU webhooks reach it, and what happens to a delayed-event job once the
+// monitor removes its participant.
+
+/// A monitor check interval long enough never to fire during a test; sweeps
+/// are triggered explicitly.
+const NEVER: Duration = Duration::from_secs(60 * 60);
+
+/// The application service configuration the membership tests run with.
+fn membership_app_service_config() -> crate::config::AppServiceConfig {
+    crate::config::AppServiceConfig {
+        as_token: "as_token".into(),
+        hs_token: HS_TOKEN.into(),
+        hs_server_name: "example.com".into(),
+    }
+}
+
+/// Creates a Handler running as an application service with the membership
+/// monitor enabled, example.com as the only full-access homeserver and a
+/// CS-API override for it.
+fn new_membership_handler(deps: HandlerTestDeps, store: Option<Arc<dyn Store>>) -> Arc<Handler> {
+    Handler::new(
+        LiveKitAuth {
+            key: "key".into(),
+            secret: "secret".into(),
+            lk_url: LIVEKIT_URL.into(),
+        },
+        vec!["example.com".into()],
+        membership_app_service_config(),
+        Duration::ZERO,
+        NEVER,
+        HashMap::from([(
+            "example.com".to_owned(),
+            CsApiUrl("https://matrix.example.com".into()),
+        )]),
+        store,
+        Arc::new(deps),
+    )
+}
+
+/// The deps a successful C-S /get_token needs.
+fn get_token_cs_deps() -> HandlerTestDeps {
+    HandlerTestDeps {
+        is_user_joined_fn: is_joined_ok(true),
+        create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+        ..Default::default()
+    }
+}
+
+/// The one participant the monitor tracks, or a panic.
+async fn sole_tracked_participant(
+    handler: &Arc<Handler>,
+) -> crate::membership_monitor::TrackedParticipant {
+    let snapshot = handler
+        .membership_monitor()
+        .expect("expected the membership monitor to be enabled")
+        .snapshot()
+        .await;
+    assert_eq!(
+        snapshot.len(),
+        1,
+        "expected exactly one tracked participant, got {snapshot:?}"
+    );
+    snapshot.into_iter().next().unwrap()
+}
+
+/// Without an application service configuration there is nothing to query
+/// membership with, so no monitor is created however the interval is set.
+#[tokio::test]
+async fn test_membership_monitor_requires_app_service_config() {
+    let handler = Handler::new(
+        default_auth(),
+        vec!["example.com".into()],
+        Default::default(),
+        Duration::ZERO,
+        NEVER,
+        HashMap::new(),
+        None,
+        Arc::new(HandlerTestDeps::default()),
+    );
+    assert!(handler.membership_monitor().is_none());
+    handler.close().await;
+}
+
+/// A zero check interval disables the monitor.
+#[tokio::test]
+async fn test_membership_monitor_disabled_by_zero_interval() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    assert!(handler.membership_monitor().is_none());
+    handler.close().await;
+}
+
+/// A locally minted C-S token registers the participant with the Matrix room
+/// and user it was issued for, as pending until the SFU reports them.
+#[tokio::test]
+async fn test_get_token_cs_registers_participant() {
+    let handler = new_membership_handler(get_token_cs_deps(), None);
+
+    let body = marshal_get_token_cs_request(|_| {});
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let tracked = sole_tracked_participant(&handler).await;
+    assert_eq!(tracked.stored.matrix_room_id, "!testRoom:example.com");
+    assert_eq!(tracked.stored.matrix_user_id, GET_TOKEN_CS_MXID);
+    assert_eq!(
+        tracked.stored.livekit_room,
+        livekit_room_alias_for("!testRoom:example.com", "m.call#ROOM")
+    );
+    assert_eq!(
+        tracked.stored.livekit_identity,
+        livekit_identity_for(GET_TOKEN_CS_MXID, "device-id", "member-id")
+    );
+    assert!(!tracked.connected);
+    handler.close().await;
+}
+
+/// A token relayed from another homeserver was minted there, not here, so
+/// there is nothing to track locally.
+#[tokio::test]
+async fn test_get_token_cs_relay_does_not_register() {
+    let deps = HandlerTestDeps {
+        is_user_joined_fn: is_joined_ok(true),
+        request_get_token_via_federation_fn: request_get_token_via_federation_ok("remote-jwt"),
+        ..Default::default()
+    };
+    let handler = new_membership_handler(deps, None);
+
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+        r.url = "wss://sfu.other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert!(
+        handler
+            .membership_monitor()
+            .unwrap()
+            .snapshot()
+            .await
+            .is_empty()
+    );
+    handler.close().await;
+}
+
+/// A token minted for a federated participant via the S-S endpoint is
+/// tracked against the requesting remote user.
+#[tokio::test]
+async fn test_get_token_ss_registers_participant() {
+    let deps = HandlerTestDeps {
+        is_user_joined_fn: is_joined_ok(true),
+        create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+        ..Default::default()
+    };
+    let handler = new_membership_handler(deps, None);
+
+    let body = marshal_get_token_ss_request(|_| {});
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let tracked = sole_tracked_participant(&handler).await;
+    assert_eq!(tracked.stored.matrix_room_id, "!testRoom:example.com");
+    assert_eq!(tracked.stored.matrix_user_id, "@user:origin.example.org");
+    assert_eq!(
+        tracked.stored.livekit_identity,
+        livekit_identity_for("@user:origin.example.org", "device-id", "member-id")
+    );
+    handler.close().await;
+}
+
+/// The OpenID-authenticated /get_token endpoint registers participants too.
+#[tokio::test]
+async fn test_get_token_registers_participant() {
+    let deps = HandlerTestDeps {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
+        create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+        ..Default::default()
+    };
+    let handler = new_membership_handler(deps, None);
+
+    let body = marshal_sfu_request(|r| r.openid_token.matrix_server_name = "example.com".into());
+    let resp = send_request(&handler, post_json("/get_token", body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let tracked = sole_tracked_participant(&handler).await;
+    assert_eq!(tracked.stored.matrix_room_id, "!testRoom:example.com");
+    assert_eq!(tracked.stored.matrix_user_id, "@user:example.com");
+    assert_eq!(
+        tracked.stored.livekit_identity,
+        livekit_identity_for("@user:example.com", "device-id", "member-id")
+    );
+    handler.close().await;
+}
+
+/// The deprecated /sfu/get endpoint registers participants under its legacy
+/// identity scheme.
+#[tokio::test]
+async fn test_legacy_sfu_get_registers_participant() {
+    let deps = HandlerTestDeps {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
+        create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+        ..Default::default()
+    };
+    let handler = new_membership_handler(deps, None);
+
+    let body = serde_json::json!({
+        "room": "!testRoom:example.com",
+        "openid_token": {
+            "access_token": "test-token",
+            "matrix_server_name": "example.com",
+        },
+        "device_id": "device-id",
+    });
+    let resp = send_request(&handler, post_json("/sfu/get", body.to_string())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let tracked = sole_tracked_participant(&handler).await;
+    assert_eq!(tracked.stored.matrix_room_id, "!testRoom:example.com");
+    assert_eq!(tracked.stored.matrix_user_id, "@user:example.com");
+    assert_eq!(
+        tracked.stored.livekit_room,
+        livekit_room_alias_for("!testRoom:example.com", "m.call#ROOM")
+    );
+    assert_eq!(
+        tracked.stored.livekit_identity,
+        LiveKitIdentity("@user:example.com:device-id".into())
+    );
+    handler.close().await;
+}
+
+/// SFU webhooks reach the monitor: a join marks the participant connected, a
+/// leave forgets them, and a finished room forgets everyone in it.
+#[tokio::test]
+async fn test_sfu_webhook_feeds_membership_monitor() {
+    let handler = new_membership_handler(get_token_cs_deps(), None);
+    let monitor = handler.membership_monitor().unwrap().clone();
+    let room = livekit_room_alias_for("!testRoom:example.com", "m.call#ROOM");
+    let identity = livekit_identity_for(GET_TOKEN_CS_MXID, "device-id", "member-id");
+    let webhook = |event: &str, participant: bool| {
+        let event = livekit_protocol::WebhookEvent {
+            event: event.into(),
+            room: Some(livekit_protocol::Room {
+                name: room.0.clone(),
+                ..Default::default()
+            }),
+            participant: participant.then(|| livekit_protocol::ParticipantInfo {
+                identity: identity.0.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        signed_sfu_webhook_request("key", "secret", &event)
+    };
+    let mint =
+        || post_get_token_cs_request(marshal_get_token_cs_request(|_| {}), GET_TOKEN_CS_MXID);
+
+    // Join.
+    assert_eq!(
+        send_request(&handler, mint()).await.status(),
+        StatusCode::OK
+    );
+    assert!(!sole_tracked_participant(&handler).await.connected);
+    send_request(&handler, webhook("participant_joined", true)).await;
+    assert!(sole_tracked_participant(&handler).await.connected);
+
+    // Leave.
+    send_request(&handler, webhook("participant_left", true)).await;
+    assert!(monitor.snapshot().await.is_empty());
+
+    // Room finished.
+    assert_eq!(
+        send_request(&handler, mint()).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(monitor.snapshot().await.len(), 1);
+    send_request(&handler, webhook("room_finished", false)).await;
+    assert!(monitor.snapshot().await.is_empty());
+
+    handler.close().await;
+}
+
+/// Once the monitor removes a participant for losing their room membership,
+/// the handler drops that participant's delayed-event job — from the loop
+/// and from the store — instead of letting it attempt a send the homeserver
+/// would refuse.
+#[tokio::test]
+async fn test_revoked_participant_drops_delayed_event_job() {
+    let (store, mut job_saved_rx, mut job_deleted_rx, mut participants) =
+        new_notifying_store_with_participants();
+    let removed: Arc<Mutex<Vec<ParticipantKey>>> = Arc::new(Mutex::new(Vec::new()));
+    let removed_clone = removed.clone();
+    let deps = HandlerTestDeps {
+        is_user_joined_fn: is_joined_ok(true),
+        create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+        // The job's participant lookup and restarts.
+        participant_exists_fn: Some(Box::new(|_, _| Box::pin(async { Ok(true) }))),
+        execute_delayed_event_action_fn: execute_delayed_event_action_ok(),
+        // The monitor: the user is gone from the room.
+        get_joined_members_fn: Some(Box::new(|_, _| Ok(std::collections::HashSet::new()))),
+        remove_participant_fn: Some(Box::new(move |room, identity| {
+            removed_clone.lock().unwrap().push(ParticipantKey {
+                room: room.clone(),
+                identity: identity.clone(),
+            });
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let handler = new_membership_handler(deps, Some(store));
+    let monitor = handler.membership_monitor().unwrap().clone();
+    let key = ParticipantKey {
+        room: livekit_room_alias_for("!testRoom:example.com", "m.call#ROOM"),
+        identity: livekit_identity_for(GET_TOKEN_CS_MXID, "device-id", "member-id"),
+    };
+
+    // Mint a token and delegate a delayed leave for the same participant.
+    let resp = send_request(
+        &handler,
+        post_get_token_cs_request(marshal_get_token_cs_request(|_| {}), GET_TOKEN_CS_MXID),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = send_request(
+        &handler,
+        post_delegate_delayed_leave_cs_request(
+            marshal_delegate_delayed_leave_cs_request(|_| {}),
+            DELEGATE_DELAYED_LEAVE_CS_MXID,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), job_saved_rx.recv())
+            .await
+            .expect("timed out waiting for the job to be stored"),
+        Some(key.clone())
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), participants.saved_rx.recv())
+            .await
+            .expect("timed out waiting for the participant to be stored"),
+        Some(key.clone())
+    );
+
+    // The participant connects, then the monitor finds them gone from the
+    // room.
+    monitor
+        .notify_sfu_event(SfuEvent::ParticipantJoined(key.clone()))
+        .await;
+    monitor.sweep_now().await;
+
+    // The job is gone from the store — and so is the participant.
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), job_deleted_rx.recv())
+            .await
+            .expect("timed out waiting for the job to be deleted"),
+        Some(key.clone())
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), participants.deleted_rx.recv())
+            .await
+            .expect("timed out waiting for the participant to be deleted"),
+        Some(key.clone())
+    );
+    handler.close().await;
+    assert_eq!(removed.lock().unwrap().as_slice(), [key]);
 }

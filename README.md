@@ -104,6 +104,7 @@ Set environment variables to configure the service:
 | `LIVEKIT_JWT_PORT`                            | ⚠️ Deprecated Port to bind the server to                      | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_BIND` |         |
 | `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all — see security note below). Ignored when serving C-S and S-S endpoints as an application service. | ✅ Yes                                               |         |
 | `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS`       | Interval (seconds) at which delegated-leave jobs re-check that a connected participant is still on the SFU. Guards against missed SFU webhooks. Unset/`0` disables the sanity check. | ❌ No                                                | `0` (disabled) |
+| `LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS`   | Interval (seconds) at which SFU participants are checked against Matrix room membership and removed if they left, or were kicked or banned (see [Kicking users from the SFU](#-kicking-users-from-the-sfu-on-room-leaveban)). `0` disables the check. Only effective when running as an application service. | ❌ No                                                | `30` |
 | `LIVEKIT_LOG_LEVEL`                           | One of `debug`, `info`, `warn`/`warning`, `error`             | ❌ No                                                | `info` |
 | `LIVEKIT_CS_API_URL_OVERRIDES`                | Comma-separated list of overrides for Client-Server API locations that cannot be inferred using .well-known discovery (e.g. `example.com=matrix-client.example.com`) | ❌ No                                                | |
 | `LIVEKIT_REDIS_URL`                           | Redis connection URL (e.g. `redis://localhost:6379`). When set, service state will be persisted during operation and restored upon service restarts. When unset, the service falls back to an in-memory store. | ❌ No | |
@@ -135,15 +136,20 @@ When set up as an application service, the integration depends on
 [MSC4502](https://github.com/matrix-org/matrix-spec-proposals/pull/4502) and
 [MSC4512](https://github.com/matrix-org/matrix-spec-proposals/pull/4512).
 
-The service needs to cover all local users because it needs to verify room memberships
-without being joined to any rooms itself. This requires the `urn:matrix:client:rooms:is_joined`
-scope to be set. The service does not require any event traffic, however. So make sure to set
-`url` to `null`.
+The service needs to cover all *local* users of the homeserver: it acts on their behalf when
+managing delegated delayed events and queries room memberships without being joined to any
+rooms itself. The latter requires the `urn:matrix:client:rooms:is_joined` scope to be set.
+The `users` namespace should not extend to remote users though (i.e. don't use `.*`): the
+service relies on the homeserver refusing `/joined_members` once none of the service's users
+is in a room any more, which is how it notices that the homeserver itself has left (see
+[Kicking users from the SFU](#-kicking-users-from-the-sfu-on-room-leaveban)). The service
+does not require any event traffic. So make sure to set `url` to `null`.
 
 Additionally, request proxying needs to be enabled for the `/rtc/livekit` subpath in the Client-Server
 and Server-Server API. This is done via the `proxy_prefix` and `proxy_url` properties.
 
-Below is an example application service registration file.
+Below is an example application service registration file for a homeserver with the server
+name `example.com`.
 
 ```yaml
 id: "LiveKit JWT service"
@@ -153,7 +159,7 @@ sender_localpart: "_lk_jwt_service"
 namespaces:
   users:
     - exclusive: false
-      regex: ".*" # Cover all users
+      regex: '@.*:example\.com' # Cover all local users
 url: null # No event traffic required
 # Stable scope for membership look-up
 scopes: [ "urn:matrix:client:rooms:is_joined" ]
@@ -163,11 +169,38 @@ proxy_prefix: "rtc/livekit" # Proxy /rtc/livekit requests on the C-S and S-S API
 proxy_url: "http://127.0.0.1:1234" # Forward proxied requests to this URL
 ```
 
+## 🚪 Kicking users from the SFU on room leave/ban
+
+[MSC4195](https://github.com/matrix-org/matrix-spec-proposals/pull/4195) recommends removing
+participants from the SFU once they leave, or are kicked or banned from, the Matrix room their
+access token was issued for. When running as an application service, the service does this
+by tracking every participant it issues a token for and, every
+`LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS`, reconciling them against the homeserver:
+
+- One `GET /rooms/{roomId}/joined_members` request is made per Matrix room with tracked
+  participants. Connected participants whose user is no longer joined are removed from the
+  LiveKit room. Participants who were issued a token but never connected to the SFU are left
+  alone until they do.
+- Once the homeserver has no local user left in a room, it refuses that request. The service
+  confirms the homeserver's departure via `/is_joined` and then deletes the room's LiveKit
+  rooms outright: only local users can publish on this SFU, so nothing legitimate is left in
+  them. A refusal while the homeserver is still in the room points at a `users` namespace
+  that doesn't match the homeserver's local users and is logged as an error; nothing is
+  removed in that case.
+- Any other failure to determine membership leaves the participants untouched, so a
+  homeserver outage never drops calls.
+
+Tracked participants are persisted in the Redis store, if configured, so that enforcement
+resumes after a restart. Note that this doesn't obsolete short-lived access tokens: a
+participant is only ever removed at the next check, up to one interval after losing their
+membership.
+
 ## 🔌 LiveKit SFU Wiring (Webhooks)
 
 Delegated MatrixRTC leave handling
 ([MSC4140](https://github.com/matrix-org/matrix-spec-proposals/pull/4140))
-relies on participant lifecycle events from the SFU. Point the LiveKit
+and [membership enforcement](#-kicking-users-from-the-sfu-on-room-leaveban)
+rely on participant and room lifecycle events from the SFU. Point the LiveKit
 SFU's webhook receiver at this service's `/sfu_webhook` endpoint in its
 [config.yaml](https://github.com/livekit/livekit/blob/master/config-sample.yaml):
 
