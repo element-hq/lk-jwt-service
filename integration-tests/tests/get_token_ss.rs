@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use lk_jwt_service_integration_tests::{
     DEFAULT_LK_URL, FakeHomeserver, FakeSfu, Service, ServiceConfig, decode_livekit_jwt,
-    expect_matrix_error, expect_server_is_joined_request,
+    expect_is_joined_request, expect_matrix_error,
 };
 use serde_json::{Value, json};
 
@@ -189,9 +189,8 @@ async fn get_instead_of_post() {
     assert_eq!(resp.status().as_u16(), 405);
 }
 
-/// A valid request from a joined origin server, for a room our own server
-/// is also joined to, succeeds, both memberships are verified, and the
-/// LiveKit room is created.
+/// A valid request from a joined user of the origin server succeeds, the
+/// user's membership is verified, and the LiveKit room is created.
 #[tokio::test]
 async fn success() {
     let hs = FakeHomeserver::new().await;
@@ -224,8 +223,12 @@ async fn success() {
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
 
-    expect_server_is_joined_request(&hs, "!room:example.com", hs.server_name(), AS_TOKEN);
-    expect_server_is_joined_request(&hs, "!room:example.com", ORIGIN_SERVER, AS_TOKEN);
+    expect_is_joined_request(
+        &hs,
+        "!room:example.com",
+        "@alice:origin.example.org",
+        AS_TOKEN,
+    );
 
     let rooms = sfu.create_room_requests();
     assert_eq!(rooms.len(), 1, "expected exactly one room creation");
@@ -235,11 +238,11 @@ async fn success() {
     );
 }
 
-/// A request is rejected when our own server is not joined to the room.
+/// A request is rejected when the requesting user is not joined to the room.
 #[tokio::test]
-async fn own_server_not_a_member() {
+async fn user_not_a_member() {
     let hs = FakeHomeserver::new().await;
-    hs.set_not_joined("!room:example.com", hs.server_name());
+    hs.set_not_joined("!room:example.com", "@alice:origin.example.org");
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec!["*".to_owned()],
@@ -260,11 +263,11 @@ async fn own_server_not_a_member() {
     expect_matrix_error(status, &body, 403, "M_FORBIDDEN");
 }
 
-/// A request is rejected when the origin server is not joined to the room.
+/// A request is rejected when `user_id` doesn't belong to the origin
+/// server, without ever checking room membership.
 #[tokio::test]
-async fn origin_server_not_a_member() {
+async fn user_id_domain_mismatch() {
     let hs = FakeHomeserver::new().await;
-    hs.set_not_joined("!room:example.com", ORIGIN_SERVER);
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec!["*".to_owned()],
@@ -276,7 +279,7 @@ async fn origin_server_not_a_member() {
 
     let (status, body) = post_get_token_ss(
         &svc,
-        get_token_ss_request("@alice:origin.example.org", DEFAULT_LK_URL).to_string(),
+        get_token_ss_request("@alice:not-the-origin.example.org", DEFAULT_LK_URL).to_string(),
         Some(ORIGIN_SERVER),
         Some(HS_TOKEN),
     )

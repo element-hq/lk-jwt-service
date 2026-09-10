@@ -1098,51 +1098,47 @@ impl Handler {
     ) -> Result<GetTokenSsResponse, MatrixErrorResponse> {
         require_non_empty_header(origin_header, "Missing request origin")?;
 
+        let user_server_name =
+            matrix_server_name(&req.user_id).ok_or_else(|| MatrixErrorResponse {
+                status: 400,
+                errcode: "M_INVALID_PARAM".into(),
+                err: "Malformed user identifier".into(),
+            })?;
+        if user_server_name != origin_header {
+            return Err(MatrixErrorResponse {
+                status: 403,
+                errcode: "M_FORBIDDEN".into(),
+                err: "The user_id does not belong to the origin server".into(),
+            });
+        }
+
         let cs_api_url = self
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
-        let membership_error = || MatrixErrorResponse {
-            status: 502,
-            errcode: "M_UNKNOWN".into(),
-            err: "Unable to verify room membership".into(),
-        };
-
-        let own_is_member = self
+        let is_member = self
             .deps
-            .is_server_joined(
+            .is_user_joined(
                 &cs_api_url,
                 &req.room_id,
-                &self.app_service_config.hs_server_name,
+                &req.user_id,
                 &self.app_service_config.as_token,
             )
             .await
             .map_err(|err| {
-                error!(room = %req.room_id, err = %err,
-                    "Handler: error checking own server's room membership (app-service S-S)");
-                membership_error()
+                error!(user_id = %req.user_id, room = %req.room_id, err = %err,
+                    "Handler: error checking room membership (app-service S-S)");
+                MatrixErrorResponse {
+                    status: 502,
+                    errcode: "M_UNKNOWN".into(),
+                    err: "Unable to verify room membership".into(),
+                }
             })?;
-
-        let origin_is_member = self
-            .deps
-            .is_server_joined(
-                &cs_api_url,
-                &req.room_id,
-                origin_header,
-                &self.app_service_config.as_token,
-            )
-            .await
-            .map_err(|err| {
-                error!(room = %req.room_id, origin = %origin_header, err = %err,
-                    "Handler: error checking origin server's room membership (app-service S-S)");
-                membership_error()
-            })?;
-
-        if !own_is_member || !origin_is_member {
+        if !is_member {
             return Err(MatrixErrorResponse {
                 status: 403,
                 errcode: "M_FORBIDDEN".into(),
-                err: "The receiving or requesting server is not a member of the room".into(),
+                err: "The requesting user is not a member of the room".into(),
             });
         }
 

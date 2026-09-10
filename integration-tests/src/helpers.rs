@@ -243,24 +243,6 @@ pub fn expect_no_is_joined_request(hs: &FakeHomeserver, room_id: &str, mxid: &st
     );
 }
 
-/// Assert that an /is_joined request for the given room and server name has been
-/// recorded with the given `as_token` as its authorization.
-#[track_caller]
-pub fn expect_server_is_joined_request(
-    hs: &FakeHomeserver,
-    room_id: &str,
-    server_name: &str,
-    as_token: &str,
-) {
-    let requests = hs.is_joined_requests();
-    assert!(
-        requests.iter().any(|r| r.room_id == room_id
-            && r.server_name == server_name
-            && r.authorization == format!("Bearer {as_token}")),
-        "expected an is_joined request for room {room_id:?}, server_name {server_name:?}, as_token {as_token:?}, got {requests:?}"
-    );
-}
-
 /// Assert that no fed_proxy request has been recorded.
 #[track_caller]
 pub fn expect_no_fed_proxy_requests(hs: &FakeHomeserver) {

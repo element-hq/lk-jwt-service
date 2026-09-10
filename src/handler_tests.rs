@@ -59,7 +59,6 @@ struct HandlerTestDeps {
     execute_delayed_event_action_fn: Option<ExecuteDelayedEventActionFn>,
     get_delayed_event_delay_fn: Option<GetDelayedEventDelayFn>,
     is_user_joined_fn: Option<IsJoinedFn>,
-    is_server_joined_fn: Option<IsJoinedFn>,
     request_get_token_via_federation_fn: Option<RequestGetTokenViaFederationFn>,
 }
 
@@ -168,19 +167,6 @@ impl Deps for HandlerTestDeps {
         match &self.is_user_joined_fn {
             Some(f) => f(cs_api_url, room_id, mxid),
             None => panic!("is_user_joined not mocked in HandlerTestDeps"),
-        }
-    }
-
-    async fn is_server_joined(
-        &self,
-        cs_api_url: &CsApiUrl,
-        room_id: &str,
-        server_name: &str,
-        _as_token: &str,
-    ) -> Result<bool, String> {
-        match &self.is_server_joined_fn {
-            Some(f) => f(cs_api_url, room_id, server_name),
-            None => panic!("is_server_joined not mocked in HandlerTestDeps"),
         }
     }
 
@@ -3013,7 +2999,7 @@ async fn test_handle_get_token_ss_url_mismatch() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_server_joined_fn: Some(Box::new(|_, _, _| Ok(true))),
+        is_user_joined_fn: is_joined_ok(true),
         ..Default::default()
     };
     let handler = new_get_token_ss_handler(deps);
@@ -3042,7 +3028,7 @@ async fn test_handle_get_token_ss_success() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_server_joined_fn: Some(Box::new(|_, _, _| Ok(true))),
+        is_user_joined_fn: is_joined_ok(true),
         create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -3069,20 +3055,20 @@ async fn test_handle_get_token_ss_success() {
     handler.close().await;
 }
 
-/// If our own server isn't a member of the room, the request is rejected.
+/// If `user_id` does not belong to the origin server, the request is
+/// rejected without even checking room membership.
 #[tokio::test]
-async fn test_handle_get_token_ss_own_server_not_a_member() {
+async fn test_handle_get_token_ss_user_id_domain_mismatch() {
     let deps = HandlerTestDeps {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_server_joined_fn: Some(Box::new(|_, _, server_name| {
-            Ok(server_name != "example.com")
-        })),
         ..Default::default()
     };
     let handler = new_get_token_ss_handler(deps);
-    let body = marshal_get_token_ss_request(|_| {});
+    let body = marshal_get_token_ss_request(|r| {
+        r.user_id = "@user:not-the-origin.example.org".into();
+    });
     let resp = send_request(
         &handler,
         post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
@@ -3091,22 +3077,20 @@ async fn test_handle_get_token_ss_own_server_not_a_member() {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "expected 403 when our own server isn't a member"
+        "expected 403 when user_id doesn't belong to the origin server"
     );
     handler.close().await;
 }
 
-/// If the origin server isn't a member of the room, the request is
+/// If the requesting user isn't a member of the room, the request is
 /// rejected.
 #[tokio::test]
-async fn test_handle_get_token_ss_origin_server_not_a_member() {
+async fn test_handle_get_token_ss_user_not_a_member() {
     let deps = HandlerTestDeps {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_server_joined_fn: Some(Box::new(|_, _, server_name| {
-            Ok(server_name == "example.com")
-        })),
+        is_user_joined_fn: is_joined_ok(false),
         ..Default::default()
     };
     let handler = new_get_token_ss_handler(deps);
@@ -3119,7 +3103,7 @@ async fn test_handle_get_token_ss_origin_server_not_a_member() {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "expected 403 when the origin server isn't a member"
+        "expected 403 when the requesting user isn't a member"
     );
     handler.close().await;
 }
@@ -3131,7 +3115,7 @@ async fn test_handle_get_token_ss_membership_check_error() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_server_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
+        is_user_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
         ..Default::default()
     };
     let handler = new_get_token_ss_handler(deps);
@@ -3182,11 +3166,10 @@ async fn test_process_get_token_ss_request() {
         name: &'static str,
         origin: &'static str,
         url: &'static str,
+        user_id: &'static str,
         fail_resolution: bool,
-        fail_own_membership: bool,
-        fail_origin_membership: bool,
-        own_is_member: bool,
-        origin_is_member: bool,
+        fail_membership: bool,
+        is_member: bool,
         fail_join_token: bool,
         expect_create_room: bool,
         expect_error: bool,
@@ -3195,11 +3178,10 @@ async fn test_process_get_token_ss_request() {
         name: "",
         origin: ORIGIN_SERVER,
         url: LK_URL,
+        user_id: "@user:origin.example.org",
         fail_resolution: false,
-        fail_own_membership: false,
-        fail_origin_membership: false,
-        own_is_member: true,
-        origin_is_member: true,
+        fail_membership: false,
+        is_member: true,
         fail_join_token: false,
         expect_create_room: false,
         expect_error: false,
@@ -3217,26 +3199,20 @@ async fn test_process_get_token_ss_request() {
             ..base
         },
         Case {
-            name: "Own server not a member",
-            own_is_member: false,
+            name: "User id domain mismatch",
+            user_id: "@user:not-the-origin.example.org",
             expect_error: true,
             ..base
         },
         Case {
-            name: "Origin server not a member",
-            origin_is_member: false,
+            name: "User not a member",
+            is_member: false,
             expect_error: true,
             ..base
         },
         Case {
-            name: "Own membership check transport error",
-            fail_own_membership: true,
-            expect_error: true,
-            ..base
-        },
-        Case {
-            name: "Origin membership check transport error",
-            fail_origin_membership: true,
+            name: "Membership check transport error",
+            fail_membership: true,
             expect_error: true,
             ..base
         },
@@ -3254,10 +3230,8 @@ async fn test_process_get_token_ss_request() {
         },
     ] {
         let fail_resolution = tc.fail_resolution;
-        let fail_own_membership = tc.fail_own_membership;
-        let fail_origin_membership = tc.fail_origin_membership;
-        let own_is_member = tc.own_is_member;
-        let origin_is_member = tc.origin_is_member;
+        let fail_membership = tc.fail_membership;
+        let is_member = tc.is_member;
 
         let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let create_called_clone = create_called.clone();
@@ -3270,17 +3244,11 @@ async fn test_process_get_token_ss_request() {
                     Ok(CsApiUrl("https://matrix.example.com".into()))
                 }
             })),
-            is_server_joined_fn: Some(Box::new(move |_, _, server_name| {
-                if server_name == OWN_SERVER {
-                    if fail_own_membership {
-                        Err("boom".into())
-                    } else {
-                        Ok(own_is_member)
-                    }
-                } else if fail_origin_membership {
+            is_user_joined_fn: Some(Box::new(move |_, _, _| {
+                if fail_membership {
                     Err("boom".into())
                 } else {
-                    Ok(origin_is_member)
+                    Ok(is_member)
                 }
             })),
             create_livekit_room_fn: Some(Box::new(move |_, _, _| {
@@ -3315,7 +3283,7 @@ async fn test_process_get_token_ss_request() {
 
         let req = GetTokenSsRequest {
             url: tc.url.into(),
-            user_id: "@user:origin.example.org".into(),
+            user_id: tc.user_id.into(),
             room_id: "!room:example.com".into(),
             slot_id: "slot".into(),
             member: MatrixRtcMemberType {
