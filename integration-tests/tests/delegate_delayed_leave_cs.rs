@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use lk_jwt_service_integration_tests::{
-    FakeHomeserver, FakeRedis, Service, ServiceConfig, expect_delayed_event_request_identity,
-    expect_job_persisted, expect_matrix_error, expect_no_delayed_event_requests, livekit_identity,
-    livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request, wait_for_job_removed,
+    DEFAULT_LK_URL, FakeHomeserver, FakeRedis, Service, ServiceConfig,
+    expect_delayed_event_request_identity, expect_job_persisted, expect_matrix_error,
+    expect_no_delayed_event_requests, livekit_identity, livekit_room_alias, send_sfu_webhook,
+    wait_for_delayed_event_request, wait_for_job_removed,
 };
 use serde_json::{Value, json};
 
@@ -32,8 +33,9 @@ fn app_service_env_with_hs_server_name(hs_server_name: &str) -> HashMap<String, 
 }
 
 /// Return a valid delegate_delayed_leave C-S request body.
-fn delegate_request() -> Value {
+fn delegate_request(lk_url: &str) -> Value {
     json!({
+        "url": lk_url,
         "room_id": "!room:example.com",
         "slot_id": "m.call#",
         "member": {
@@ -93,7 +95,7 @@ async fn missing_hs_token() {
 
     let (status, body) = post_delegate_cs_as(
         &svc,
-        delegate_request().to_string(),
+        delegate_request(DEFAULT_LK_URL).to_string(),
         Some("@alice:example.com"),
         None,
     )
@@ -117,7 +119,7 @@ async fn wrong_hs_token() {
 
     let (status, body) = post_delegate_cs_as(
         &svc,
-        delegate_request().to_string(),
+        delegate_request(DEFAULT_LK_URL).to_string(),
         Some("@alice:example.com"),
         Some("not_the_hs_token"),
     )
@@ -139,9 +141,54 @@ async fn missing_header() {
     })
     .await;
 
-    let (status, body) = post_delegate_cs(&svc, delegate_request().to_string(), None).await;
+    let (status, body) =
+        post_delegate_cs(&svc, delegate_request(DEFAULT_LK_URL).to_string(), None).await;
 
     expect_matrix_error(status, &body, 401, "M_UNAUTHORIZED");
+    expect_no_delayed_event_requests(&hs);
+}
+
+/// A url not matching the service's configured LIVEKIT_URL is rejected.
+#[tokio::test]
+async fn url_mismatch() {
+    let hs = FakeHomeserver::new().await;
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_delegate_cs(
+        &svc,
+        delegate_request("wss://not-the-configured-sfu.example.com").to_string(),
+        Some("@alice:example.com"),
+    )
+    .await;
+
+    expect_matrix_error(status, &body, 400, "M_INVALID_PARAM");
+    expect_no_delayed_event_requests(&hs);
+}
+
+/// A missing url is rejected.
+#[tokio::test]
+async fn missing_url() {
+    let hs = FakeHomeserver::new().await;
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let mut request = delegate_request(DEFAULT_LK_URL);
+    request["url"] = json!("");
+    let (status, body) =
+        post_delegate_cs(&svc, request.to_string(), Some("@alice:example.com")).await;
+
+    expect_matrix_error(status, &body, 400, "M_BAD_JSON");
     expect_no_delayed_event_requests(&hs);
 }
 
@@ -157,7 +204,7 @@ async fn missing_fields() {
     })
     .await;
 
-    let mut request = delegate_request();
+    let mut request = delegate_request(DEFAULT_LK_URL);
     request.as_object_mut().unwrap().remove("delay_id");
     let (status, body) =
         post_delegate_cs(&svc, request.to_string(), Some("@alice:example.com")).await;
@@ -223,7 +270,7 @@ async fn unresolvable_cs_api() {
 
     let (status, body) = post_delegate_cs(
         &svc,
-        delegate_request().to_string(),
+        delegate_request(DEFAULT_LK_URL).to_string(),
         Some("@alice:example.com"),
     )
     .await;
@@ -246,8 +293,12 @@ async fn success() {
     })
     .await;
 
-    let (status, body) =
-        post_delegate_cs(&svc, delegate_request().to_string(), Some(&user.user_id)).await;
+    let (status, body) = post_delegate_cs(
+        &svc,
+        delegate_request(DEFAULT_LK_URL).to_string(),
+        Some(&user.user_id),
+    )
+    .await;
 
     assert_eq!(status, 200, "body: {body}");
     let response: Value = serde_json::from_str(&body).expect("response is not JSON");
@@ -278,8 +329,12 @@ async fn restart_and_send_use_identity_assertion() {
     })
     .await;
 
-    let (status, body) =
-        post_delegate_cs(&svc, delegate_request().to_string(), Some(&user.user_id)).await;
+    let (status, body) = post_delegate_cs(
+        &svc,
+        delegate_request(DEFAULT_LK_URL).to_string(),
+        Some(&user.user_id),
+    )
+    .await;
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
@@ -343,7 +398,7 @@ async fn delay_timeout_looked_up_when_absent() {
     })
     .await;
 
-    let mut request = delegate_request();
+    let mut request = delegate_request(DEFAULT_LK_URL);
     request.as_object_mut().unwrap().remove("delay_timeout");
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
     assert_eq!(status, 200, "body: {body}");
@@ -386,8 +441,12 @@ async fn delay_timeout_not_looked_up_when_given() {
     })
     .await;
 
-    let (status, body) =
-        post_delegate_cs(&svc, delegate_request().to_string(), Some(&user.user_id)).await;
+    let (status, body) = post_delegate_cs(
+        &svc,
+        delegate_request(DEFAULT_LK_URL).to_string(),
+        Some(&user.user_id),
+    )
+    .await;
     assert_eq!(status, 200, "body: {body}");
 
     let lookups = hs.delay_lookups();
@@ -411,7 +470,7 @@ async fn looked_up_delay_drives_the_job() {
     })
     .await;
 
-    let mut request = delegate_request();
+    let mut request = delegate_request(DEFAULT_LK_URL);
     request.as_object_mut().unwrap().remove("delay_timeout");
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
     assert_eq!(status, 200, "body: {body}");
@@ -436,7 +495,7 @@ async fn unknown_delay_id_rejected() {
     })
     .await;
 
-    let mut request = delegate_request();
+    let mut request = delegate_request(DEFAULT_LK_URL);
     request.as_object_mut().unwrap().remove("delay_timeout");
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -460,7 +519,7 @@ async fn delay_id_for_another_room_rejected() {
     })
     .await;
 
-    let mut request = delegate_request();
+    let mut request = delegate_request(DEFAULT_LK_URL);
     request.as_object_mut().unwrap().remove("delay_timeout");
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -485,7 +544,7 @@ async fn delay_lookup_failure_rejected() {
     })
     .await;
 
-    let mut request = delegate_request();
+    let mut request = delegate_request(DEFAULT_LK_URL);
     request.as_object_mut().unwrap().remove("delay_timeout");
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 

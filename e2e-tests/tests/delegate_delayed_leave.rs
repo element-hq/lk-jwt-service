@@ -227,6 +227,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
         ))
         .bearer_auth(&user.access_token)
         .json(&serde_json::json!({
+            "url": LIVEKIT_A_URL,
             "room_id": room_id,
             "slot_id": SLOT_ID,
             "member": {
