@@ -1506,7 +1506,7 @@ async fn handle_delegate_delayed_leave(
 }
 
 async fn healthcheck(req: Request) -> Response {
-    info!("Handler: health check");
+    debug!("Handler: health check");
 
     if req.method() == Method::GET || req.method() == Method::HEAD {
         StatusCode::OK.into_response()
