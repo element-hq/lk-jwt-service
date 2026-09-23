@@ -83,6 +83,8 @@ services:
       - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service-a.yaml
       - LIVEKIT_HS_SERVER_NAME=synapse-a.e2e.test
       - LIVEKIT_CS_API_URL_OVERRIDES=synapse-a.e2e.test=http://synapse-a:8008,synapse-b.e2e.test=http://synapse-b:8008
+      # Short so the membership tests observe kicks quickly.
+      - LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS=2
     volumes:
       - ./app-service-a.yaml:/etc/lk-jwt-service/app-service-a.yaml:ro
     ports:
@@ -104,6 +106,7 @@ services:
       - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service-b.yaml
       - LIVEKIT_HS_SERVER_NAME=synapse-b.e2e.test
       - LIVEKIT_CS_API_URL_OVERRIDES=synapse-b.e2e.test=http://synapse-b:8008,synapse-a.e2e.test=http://synapse-a:8008
+      - LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS=2
     volumes:
       - ./app-service-b.yaml:/etc/lk-jwt-service/app-service-b.yaml:ro
     ports:

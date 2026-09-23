@@ -105,6 +105,14 @@ impl Service {
                 "YES_I_KNOW_WHAT_I_AM_DOING".into(),
             ),
             ("LIVEKIT_LOG_LEVEL".into(), "debug".into()),
+            // Membership enforcement is opt-in per test (via extra_env):
+            // most tests don't script /joined_members on the fake
+            // homeserver, and the default interval would otherwise have the
+            // service poll it in the background.
+            (
+                "LIVEKIT_MEMBERSHIP_CHECK_INTERVAL_SECONDS".into(),
+                "0".into(),
+            ),
         ]);
 
         if !cfg.cs_api_url_overrides.is_empty() {

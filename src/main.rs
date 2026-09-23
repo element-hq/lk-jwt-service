@@ -77,8 +77,9 @@ async fn main() {
             lk_url: config.lk_url.clone(),
         },
         config.full_access_homeservers.clone(),
-        config.app_service_config,
+        config.app_service_config.clone(),
         config.sanity_check_interval,
+        config.membership_check_interval,
         config.cs_api_url_overrides.clone(),
         store,
         Arc::new(RealDeps {
@@ -86,17 +87,25 @@ async fn main() {
         }),
     );
 
-    let sanity_check_interval_display = if config.sanity_check_interval.is_zero() {
-        "disabled".to_owned()
+    let interval_display = |interval: std::time::Duration| {
+        if interval.is_zero() {
+            "disabled".to_owned()
+        } else {
+            format!("{interval:?}")
+        }
+    };
+    let membership_check_interval_display = if config.app_service_config.is_set_up() {
+        interval_display(config.membership_check_interval)
     } else {
-        format!("{:?}", config.sanity_check_interval)
+        "disabled (not running as an application service)".to_owned()
     };
     info!(
         LIVEKIT_URL = %config.lk_url,
         LIVEKIT_JWT_BIND = %config.lk_jwt_bind,
         LIVEKIT_FULL_ACCESS_HOMESERVERS = ?config.full_access_homeservers,
         SkipVerifyTLS = config.skip_verify_tls,
-        SanityCheckInterval = %sanity_check_interval_display,
+        SanityCheckInterval = %interval_display(config.sanity_check_interval),
+        MembershipCheckInterval = %membership_check_interval_display,
         "Starting service"
     );
 

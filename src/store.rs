@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::delayed_event_manager::{DelayedEventJobParams, JobKey};
+use crate::helper::{LiveKitIdentity, LiveKitRoomAlias, ParticipantKey};
 
 /// A stored job.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,6 +27,33 @@ pub struct StoredJob {
     pub params: DelayedEventJobParams,
     #[serde(rename = "RestartedAt")]
     pub restarted_at: DateTime<Utc>,
+}
+
+/// An SFU participant the service issued a token for, together with the
+/// Matrix room membership that entitles them to it. Persisted so that
+/// membership enforcement picks up where it left off after a restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredParticipant {
+    /// The Matrix room the token was issued for.
+    pub matrix_room_id: String,
+    /// The Matrix user the token was issued to.
+    pub matrix_user_id: String,
+    /// The LiveKit room the token grants access to.
+    pub livekit_room: LiveKitRoomAlias,
+    /// The LiveKit identity the token was issued for.
+    pub livekit_identity: LiveKitIdentity,
+    /// When the token was issued.
+    pub registered_at: DateTime<Utc>,
+}
+
+impl StoredParticipant {
+    /// The key this participant is stored under.
+    pub fn key(&self) -> ParticipantKey {
+        ParticipantKey {
+            room: self.livekit_room.clone(),
+            identity: self.livekit_identity.clone(),
+        }
+    }
 }
 
 /// Interface for storage backends.
@@ -44,6 +72,21 @@ pub trait Store: Send + Sync {
 
     /// Retrieves all jobs in the store.
     async fn all_jobs(&self) -> Result<Vec<StoredJob>, String>;
+
+    /// Adds a participant to the store, overwriting any existing entry for
+    /// the same key.
+    async fn save_participant(
+        &self,
+        key: &ParticipantKey,
+        participant: &StoredParticipant,
+    ) -> Result<(), String>;
+
+    /// Removes the participant stored under the given key. A missing entry
+    /// is not an error.
+    async fn delete_participant(&self, key: &ParticipantKey) -> Result<(), String>;
+
+    /// Retrieves all participants in the store.
+    async fn all_participants(&self) -> Result<Vec<StoredParticipant>, String>;
 }
 
 /// A store backend using an external Redis instance.
@@ -53,6 +96,7 @@ pub struct RedisStore {
 }
 
 pub(crate) const REDIS_JOBS_HASH_KEY: &str = "lk-jwt:jobs";
+pub(crate) const REDIS_PARTICIPANTS_HASH_KEY: &str = "lk-jwt:participants";
 
 pub async fn new_redis_store(redis_url: &str) -> Result<Arc<dyn Store>, String> {
     let client = redis::Client::open(redis_url)
@@ -76,20 +120,24 @@ impl RedisStore {
         Self { conn }
     }
 
-    fn key_to_string(key: &JobKey) -> String {
+    fn key_to_string(key: &ParticipantKey) -> String {
         serde_json::to_string(&[key.room.as_str(), key.identity.as_str()])
             .expect("string slices always serialize")
     }
-}
 
-#[async_trait]
-impl Store for RedisStore {
-    async fn save_job(&self, key: &JobKey, job: &StoredJob) -> Result<(), String> {
-        let data = serde_json::to_string(job)
-            .map_err(|e| format!("store: failed marshalling job: {e}"))?;
+    /// Stores `value` under `key` in the given hash.
+    async fn hset<T: Serialize>(
+        &self,
+        hash_key: &str,
+        key: &ParticipantKey,
+        value: &T,
+        what: &str,
+    ) -> Result<(), String> {
+        let data = serde_json::to_string(value)
+            .map_err(|e| format!("store: failed marshalling {what}: {e}"))?;
         let mut conn = self.conn.clone();
         redis::cmd("HSET")
-            .arg(REDIS_JOBS_HASH_KEY)
+            .arg(hash_key)
             .arg(Self::key_to_string(key))
             .arg(data)
             .query_async::<()>(&mut conn)
@@ -97,34 +145,72 @@ impl Store for RedisStore {
             .map_err(|e| e.to_string())
     }
 
-    async fn delete_job(&self, key: &JobKey) -> Result<(), String> {
+    /// Removes `key` from the given hash.
+    async fn hdel(&self, hash_key: &str, key: &ParticipantKey) -> Result<(), String> {
         let mut conn = self.conn.clone();
         redis::cmd("HDEL")
-            .arg(REDIS_JOBS_HASH_KEY)
+            .arg(hash_key)
             .arg(Self::key_to_string(key))
             .query_async::<()>(&mut conn)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn all_jobs(&self) -> Result<Vec<StoredJob>, String> {
+    /// Loads every parseable entry of the given hash, skipping (and logging)
+    /// the rest.
+    async fn hgetall<T: for<'de> Deserialize<'de>>(
+        &self,
+        hash_key: &str,
+    ) -> Result<Vec<T>, String> {
         let mut conn = self.conn.clone();
         let fields: std::collections::HashMap<String, String> = redis::cmd("HGETALL")
-            .arg(REDIS_JOBS_HASH_KEY)
+            .arg(hash_key)
             .query_async(&mut conn)
             .await
             .map_err(|e| format!("store: failed getting all entries: {e}"))?;
 
-        let mut jobs = Vec::with_capacity(fields.len());
+        let mut entries = Vec::with_capacity(fields.len());
         for (identity, data) in fields {
-            match serde_json::from_str::<StoredJob>(&data) {
-                Ok(job) => jobs.push(job),
+            match serde_json::from_str::<T>(&data) {
+                Ok(entry) => entries.push(entry),
                 Err(err) => {
-                    warn!(identity, err = %err, "store: skipping unparseable entry");
+                    warn!(hash_key, identity, err = %err, "store: skipping unparseable entry");
                 }
             }
         }
-        Ok(jobs)
+        Ok(entries)
+    }
+}
+
+#[async_trait]
+impl Store for RedisStore {
+    async fn save_job(&self, key: &JobKey, job: &StoredJob) -> Result<(), String> {
+        self.hset(REDIS_JOBS_HASH_KEY, key, job, "job").await
+    }
+
+    async fn delete_job(&self, key: &JobKey) -> Result<(), String> {
+        self.hdel(REDIS_JOBS_HASH_KEY, key).await
+    }
+
+    async fn all_jobs(&self) -> Result<Vec<StoredJob>, String> {
+        self.hgetall(REDIS_JOBS_HASH_KEY).await
+    }
+
+    async fn save_participant(
+        &self,
+        key: &ParticipantKey,
+        participant: &StoredParticipant,
+    ) -> Result<(), String> {
+        self.hset(REDIS_PARTICIPANTS_HASH_KEY, key, participant, "participant")
+            .await
+    }
+
+    async fn delete_participant(&self, key: &ParticipantKey) -> Result<(), String> {
+        self.hdel(REDIS_PARTICIPANTS_HASH_KEY, key).await
+    }
+
+    async fn all_participants(&self) -> Result<Vec<StoredParticipant>, String> {
+        self.hgetall(REDIS_PARTICIPANTS_HASH_KEY).await
     }
 }
 
@@ -145,12 +231,14 @@ pub(crate) mod test_support {
     /// An in-memory storage backend without persistence.
     pub(crate) struct InMemoryStore {
         jobs: Mutex<HashMap<JobKey, StoredJob>>,
+        participants: Mutex<HashMap<ParticipantKey, StoredParticipant>>,
     }
 
     pub(crate) fn new_in_memory_store() -> Arc<dyn Store> {
         info!("store: created new in-memory store");
         Arc::new(InMemoryStore {
             jobs: Mutex::new(HashMap::new()),
+            participants: Mutex::new(HashMap::new()),
         })
     }
 
@@ -169,13 +257,49 @@ pub(crate) mod test_support {
         async fn all_jobs(&self) -> Result<Vec<StoredJob>, String> {
             Ok(self.jobs.lock().unwrap().values().cloned().collect())
         }
+
+        async fn save_participant(
+            &self,
+            key: &ParticipantKey,
+            participant: &StoredParticipant,
+        ) -> Result<(), String> {
+            self.participants
+                .lock()
+                .unwrap()
+                .insert(key.clone(), participant.clone());
+            Ok(())
+        }
+
+        async fn delete_participant(&self, key: &ParticipantKey) -> Result<(), String> {
+            self.participants.lock().unwrap().remove(key);
+            Ok(())
+        }
+
+        async fn all_participants(&self) -> Result<Vec<StoredParticipant>, String> {
+            Ok(self
+                .participants
+                .lock()
+                .unwrap()
+                .values()
+                .cloned()
+                .collect())
+        }
     }
 
-    /// An in-memory store that notifies about job save and deletion.
+    /// An in-memory store that notifies about job save and deletion, and
+    /// about participant save and deletion.
     pub(crate) struct NotifyingStore {
         inner: Arc<dyn Store>,
         saved_tx: mpsc::Sender<JobKey>,
         deleted_tx: mpsc::Sender<JobKey>,
+        participant_saved_tx: mpsc::Sender<ParticipantKey>,
+        participant_deleted_tx: mpsc::Sender<ParticipantKey>,
+    }
+
+    /// The receiving ends of a [`NotifyingStore`]'s participant notifications.
+    pub(crate) struct ParticipantNotifications {
+        pub saved_rx: mpsc::Receiver<ParticipantKey>,
+        pub deleted_rx: mpsc::Receiver<ParticipantKey>,
     }
 
     pub(crate) fn new_notifying_store() -> (
@@ -183,16 +307,34 @@ pub(crate) mod test_support {
         mpsc::Receiver<JobKey>,
         mpsc::Receiver<JobKey>,
     ) {
+        let (store, saved_rx, deleted_rx, _) = new_notifying_store_with_participants();
+        (store, saved_rx, deleted_rx)
+    }
+
+    pub(crate) fn new_notifying_store_with_participants() -> (
+        Arc<NotifyingStore>,
+        mpsc::Receiver<JobKey>,
+        mpsc::Receiver<JobKey>,
+        ParticipantNotifications,
+    ) {
         let (saved_tx, saved_rx) = mpsc::channel(10);
         let (deleted_tx, deleted_rx) = mpsc::channel(10);
+        let (participant_saved_tx, participant_saved_rx) = mpsc::channel(10);
+        let (participant_deleted_tx, participant_deleted_rx) = mpsc::channel(10);
         (
             Arc::new(NotifyingStore {
                 inner: new_in_memory_store(),
                 saved_tx,
                 deleted_tx,
+                participant_saved_tx,
+                participant_deleted_tx,
             }),
             saved_rx,
             deleted_rx,
+            ParticipantNotifications {
+                saved_rx: participant_saved_rx,
+                deleted_rx: participant_deleted_rx,
+            },
         )
     }
 
@@ -213,9 +355,29 @@ pub(crate) mod test_support {
         async fn all_jobs(&self) -> Result<Vec<StoredJob>, String> {
             self.inner.all_jobs().await
         }
+
+        async fn save_participant(
+            &self,
+            key: &ParticipantKey,
+            participant: &StoredParticipant,
+        ) -> Result<(), String> {
+            self.inner.save_participant(key, participant).await?;
+            let _ = self.participant_saved_tx.send(key.clone()).await;
+            Ok(())
+        }
+
+        async fn delete_participant(&self, key: &ParticipantKey) -> Result<(), String> {
+            self.inner.delete_participant(key).await?;
+            let _ = self.participant_deleted_tx.send(key.clone()).await;
+            Ok(())
+        }
+
+        async fn all_participants(&self) -> Result<Vec<StoredParticipant>, String> {
+            self.inner.all_participants().await
+        }
     }
 
-    /// A store whose saves block until the gate receives permits.
+    /// A store whose job saves block until the gate receives permits.
     pub(crate) struct GatedStore {
         inner: Arc<dyn Store>,
         gate: Arc<tokio::sync::Semaphore>,
@@ -241,6 +403,22 @@ pub(crate) mod test_support {
         async fn all_jobs(&self) -> Result<Vec<StoredJob>, String> {
             self.inner.all_jobs().await
         }
+
+        async fn save_participant(
+            &self,
+            key: &ParticipantKey,
+            participant: &StoredParticipant,
+        ) -> Result<(), String> {
+            self.inner.save_participant(key, participant).await
+        }
+
+        async fn delete_participant(&self, key: &ParticipantKey) -> Result<(), String> {
+            self.inner.delete_participant(key).await
+        }
+
+        async fn all_participants(&self) -> Result<Vec<StoredParticipant>, String> {
+            self.inner.all_participants().await
+        }
     }
 
     /// A store that fails on any operation.
@@ -257,6 +435,22 @@ pub(crate) mod test_support {
         }
 
         async fn all_jobs(&self) -> Result<Vec<StoredJob>, String> {
+            Err("failed".into())
+        }
+
+        async fn save_participant(
+            &self,
+            _key: &ParticipantKey,
+            _participant: &StoredParticipant,
+        ) -> Result<(), String> {
+            Err("failed".into())
+        }
+
+        async fn delete_participant(&self, _key: &ParticipantKey) -> Result<(), String> {
+            Err("failed".into())
+        }
+
+        async fn all_participants(&self) -> Result<Vec<StoredParticipant>, String> {
             Err("failed".into())
         }
     }
@@ -518,6 +712,109 @@ mod tests {
                 .delete_job(&key)
                 .await
                 .expect("deleting missing job failed");
+        }
+
+        // ── participants ─────────────────────────────────────────────────────
+
+        let participant = StoredParticipant {
+            matrix_room_id: "!room:example.com".into(),
+            matrix_user_id: "@user:example.com".into(),
+            livekit_room: room.clone(),
+            livekit_identity: identity.clone(),
+            registered_at: Utc::now().trunc_subsecs(3),
+        };
+        let participant_key = participant.key();
+
+        // Participants and jobs live side by side without interfering.
+        {
+            let store = new_store().await;
+            store.save_job(&key, &job).await.expect("saving job failed");
+
+            assert!(
+                store
+                    .all_participants()
+                    .await
+                    .expect("getting all participants failed")
+                    .is_empty(),
+                "expected no participants on a store holding only a job"
+            );
+
+            store
+                .save_participant(&participant_key, &participant)
+                .await
+                .expect("saving participant failed");
+            let participants = store
+                .all_participants()
+                .await
+                .expect("getting all participants failed");
+            assert_eq!(participants, vec![participant.clone()]);
+            assert_eq!(
+                store.all_jobs().await.expect("getting all jobs failed"),
+                vec![job.clone()],
+                "expected the job to be untouched by participant writes"
+            );
+        }
+
+        // Saving a participant under an existing key overwrites it.
+        {
+            let store = new_store().await;
+            store
+                .save_participant(&participant_key, &participant)
+                .await
+                .expect("saving first participant failed");
+
+            let mut updated = participant.clone();
+            updated.matrix_room_id = "!other:example.com".into();
+            store
+                .save_participant(&participant_key, &updated)
+                .await
+                .expect("saving second participant failed");
+
+            let participants = store
+                .all_participants()
+                .await
+                .expect("getting all participants failed");
+            assert_eq!(participants, vec![updated]);
+        }
+
+        // Deleting a participant leaves the others in place; deleting a
+        // missing one is not an error.
+        {
+            let store = new_store().await;
+            store
+                .save_participant(&participant_key, &participant)
+                .await
+                .expect("saving first participant failed");
+
+            let mut other = participant.clone();
+            other.livekit_identity = LiveKitIdentity("@other:example.com".into());
+            store
+                .save_participant(&other.key(), &other)
+                .await
+                .expect("saving second participant failed");
+
+            store
+                .delete_participant(&participant_key)
+                .await
+                .expect("deleting first participant failed");
+            store
+                .delete_participant(&participant_key)
+                .await
+                .expect("deleting the participant again failed");
+
+            let participants = store
+                .all_participants()
+                .await
+                .expect("getting all participants failed");
+            assert_eq!(participants, vec![other]);
+            assert!(
+                store
+                    .all_jobs()
+                    .await
+                    .expect("getting all jobs failed")
+                    .is_empty(),
+                "expected participant writes not to create jobs"
+            );
         }
     }
 

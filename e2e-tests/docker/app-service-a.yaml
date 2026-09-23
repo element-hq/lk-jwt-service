@@ -4,8 +4,13 @@ hs_token: "e2e_hs_token_a"
 sender_localpart: "_lk_jwt_service"
 namespaces:
   users:
+    # Local users only: the service uses /joined_members to enforce room
+    # membership on the SFU, and Synapse serves that endpoint to an
+    # application service as long as any joined member matches this regex.
+    # Matching remote users too would hide the homeserver's own departure
+    # from a room.
     - exclusive: false
-      regex: ".*"
+      regex: '@.*:synapse-a\.e2e\.test'
 # Required for Synapse to call POST /_matrix/app/v1/ping on this service.
 # This will also cause event traffic to be sent to the service, so shouldn't
 # be used in production. For our tests this doesn't matter.
