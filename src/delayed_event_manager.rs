@@ -985,8 +985,8 @@ impl DelayedEventJob {
                     )
                     .await;
 
-                    // Ok(404) means MSC4140 already-sent; Ok(200/204) is
-                    // silent success.
+                    // Ok(404) and Ok(409) mean MSC4140 already sent or
+                    // cancelled; Ok(200/204) is silent success.
                     match &result {
                         Err(RetryError::Error(err)) => {
                             warn!(state = %DelayEventState::Disconnected, event = %event,
@@ -995,10 +995,10 @@ impl DelayedEventJob {
                                 "Job: ActionSend failed");
                         }
                         Err(RetryError::Cancelled) => {}
-                        Ok(404) => {
+                        Ok(status @ (404 | 409)) => {
                             info!(state = %DelayEventState::Disconnected, event = %event,
                                 room = %job.params.livekit_room, lk_id = %job.params.livekit_identity,
-                                job_id = %job.job_id,
+                                job_id = %job.job_id, status,
                                 "Job: ActionSend — delayed event already sent or cancelled");
                         }
                         Ok(_) => {}
@@ -1048,8 +1048,8 @@ impl DelayedEventJob {
     ///     cannot shrink the ActionSend window
     ///   - client-server API resolution error: CsApiUrlNotFound on the event
     ///     channel
-    ///   - delayed event gone on the homeserver (404): DelayedEventNotFound
-    ///     on the event channel
+    ///   - delayed event gone (404) or already finalised (409) on the
+    ///     homeserver: DelayedEventNotFound on the event channel
     ///   - any other failure, including an already-exhausted deadline:
     ///     DelayedEventTimedOut on the event channel
     pub(crate) async fn start_delayed_event_restart(self: &Arc<Self>) {
@@ -1121,13 +1121,13 @@ impl DelayedEventJob {
             .await;
 
             // DelayedEventNotFound is the only failure treated specially
-            // (the event is gone, not a transient blip); everything else
-            // falls into the generic timed-out bucket.
+            // (the event is gone or finalised, not a transient blip);
+            // everything else falls into the generic timed-out bucket.
             let signal = match result {
                 Err(RetryError::Error(err)) if err.is_delayed_event_not_found() => {
                     warn!(room = %job.params.livekit_room, lk_id = %job.params.livekit_identity,
-                        job_id = %job.job_id,
-                        "Job: ActionRestart not found — emitting DelayedEventNotFound");
+                        job_id = %job.job_id, status = err.status(),
+                        "Job: ActionRestart not found or already finalised — emitting DelayedEventNotFound");
                     DelayedEventSignal::DelayedEventNotFound
                 }
                 Err(RetryError::Error(err)) => {
@@ -1939,6 +1939,43 @@ mod tests {
             DelayEventState::Aborted,
             Duration::from_secs(5),
             "Aborted after ActionRestart 404",
+        )
+        .await;
+        job.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn test_delayed_event_job_action_restart_409() {
+        let deps = Arc::new(TestJobDeps {
+            exec: Box::new(|cs_api_url, _, action| {
+                assert_eq!(
+                    cs_api_url.as_str(),
+                    "https://matrix-client.example.com",
+                    "got unexpected client-server API URL"
+                );
+                if action == DelayEventAction::Restart {
+                    return Err(ActionError::DelayedEventNotFound { status: 409 });
+                }
+                Ok(200)
+            }),
+            ..TestJobDeps::default()
+        });
+        let (job, mut done_rx) = new_job_with_done_ch(deps, Duration::from_secs(10));
+        job.spawn_loop();
+
+        // Connected triggers an immediate DelayedEventReset.
+        // The reset task gets 409 (already finalised) → DelayedEventNotFound
+        // → Aborted, well before the 10 s restart deadline.
+        job.event_tx
+            .send(DelayedEventSignal::ParticipantConnected)
+            .await
+            .unwrap();
+
+        expect_done_state(
+            &mut done_rx,
+            DelayEventState::Aborted,
+            Duration::from_secs(5),
+            "Aborted after ActionRestart 409",
         )
         .await;
         job.close().await.expect("close");

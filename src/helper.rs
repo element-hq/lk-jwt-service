@@ -430,7 +430,9 @@ impl RoomServiceClient for LiveKitRoomServiceClient {
 #[derive(Debug, thiserror::Error)]
 pub enum ActionError {
     /// 404 on ActionRestart: the delayed event no longer exists on the
-    /// homeserver. Permanent — retrying is pointless.
+    /// homeserver. 409 on ActionRestart: the delayed event was already
+    /// finalised (sent or cancelled). Either way it can no longer be
+    /// restarted. Permanent — retrying is pointless.
     #[error("CS API: delayed event not found")]
     DelayedEventNotFound { status: u16 },
     /// 429 with a usable retry hint (Retry-After header or retry_after_ms).
@@ -828,8 +830,10 @@ pub trait Deps: Send + Sync {
     /// When `identity` is `None`, the request is sent unauthenticated.
     ///
     /// Return contract:
-    ///   - 2xx, and 404 on send (MSC4140 already-sent)  → `Ok(status)`
-    ///   - 404 on restart                               → permanent [`ActionError::DelayedEventNotFound`]
+    ///   - 2xx, 404 on send (MSC4140 already sent or
+    ///     cancelled) and 409 on send (MSC4140 already
+    ///     cancelled)                                   → `Ok(status)`
+    ///   - 404 or 409 on restart                        → permanent [`ActionError::DelayedEventNotFound`]
     ///   - 429 with a usable retry hint                 → [`ActionError::RetryAfter`]
     ///   - anything else (5xx, hint-less 429, transport
     ///     errors with status 0, unclassified statuses) → transient
@@ -897,6 +901,15 @@ pub trait Deps: Send + Sync {
             // 404 on restart: delayed event no longer present on the
             // homeserver. Permanent so the retry loop stops immediately.
             404 => Err(ActionError::DelayedEventNotFound { status }),
+
+            // MSC4140: 409 on send means the event was already cancelled —
+            // nothing left to send, treat as success.
+            409 if action == DelayEventAction::Send => Ok(status),
+
+            // 409 on restart: the event was already sent or cancelled and
+            // can no longer be restarted. Permanent so the retry loop stops
+            // immediately, like 404.
+            409 => Err(ActionError::DelayedEventNotFound { status }),
 
             // Any 5xx is transient (CS API restart, DB lock, load-balancer
             // hiccup, upstream timeout). Retry on the default schedule.
@@ -2011,6 +2024,39 @@ mod tests {
             "expected DelayedEventNotFound, got {err:?}"
         );
         assert_eq!(err.status(), 404);
+    }
+
+    /// Verifies that a 409 for ActionSend is treated as success (MSC4140:
+    /// delayed event already cancelled) and returns the status code without
+    /// error.
+    #[tokio::test]
+    async fn test_execute_delayed_event_action_409_on_send() {
+        let router = Router::new().route("/{*path}", any(|| async { http::StatusCode::CONFLICT }));
+        let server = spawn_http_server(router).await;
+
+        let status = exec(&server.url, "cancelled-id", DelayEventAction::Send)
+            .await
+            .expect("expected no error for ActionSend 409");
+        assert_eq!(status, 409);
+    }
+
+    /// Verifies that a 409 for ActionRestart (MSC4140: delayed event already
+    /// sent or cancelled) returns the permanent DelayedEventNotFound error so
+    /// the retry loop stops instead of retrying a conflict that never clears.
+    #[tokio::test]
+    async fn test_execute_delayed_event_action_409_on_restart() {
+        let router = Router::new().route("/{*path}", any(|| async { http::StatusCode::CONFLICT }));
+        let server = spawn_http_server(router).await;
+
+        let err = exec(&server.url, "finalised-id", DelayEventAction::Restart)
+            .await
+            .expect_err("expected DelayedEventNotFound for 409 on ActionRestart");
+        assert!(
+            err.is_delayed_event_not_found(),
+            "expected DelayedEventNotFound, got {err:?}"
+        );
+        assert_eq!(err.classify(), ErrorClass::Permanent);
+        assert_eq!(err.status(), 409);
     }
 
     /// Verifies that a 429 response with a Retry-After header (both seconds
