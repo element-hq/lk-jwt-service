@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use lk_jwt_service_integration_tests::{
     DEFAULT_LK_URL, FakeHomeserver, FakeSfu, Service, ServiceConfig, decode_livekit_jwt,
-    expect_is_joined_request, expect_matrix_error,
+    expect_is_joined_request, expect_matrix_error, livekit_identity,
 };
 use serde_json::{Value, json};
 
@@ -37,10 +37,7 @@ fn get_token_ss_request(user_id: &str, lk_url: &str) -> Value {
         "user_id": user_id,
         "room_id": "!room:example.com",
         "slot_id": "m.call#",
-        "member": {
-            "id": "member-1",
-            "claimed_device_id": "DEVICE",
-        },
+        "member_id": "member-1",
     })
 }
 
@@ -218,6 +215,10 @@ async fn success() {
     let jwt = response["jwt"].as_str().unwrap_or_default();
 
     let claims = decode_livekit_jwt(jwt);
+    assert_eq!(
+        claims["sub"].as_str(),
+        Some(livekit_identity("@alice:origin.example.org", "member-1").as_str())
+    );
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
     assert_eq!(claims["video"]["roomCreate"].as_bool(), Some(false));
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));

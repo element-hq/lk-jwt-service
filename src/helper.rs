@@ -213,11 +213,23 @@ pub fn livekit_room_alias_for(matrix_room: &str, matrix_rtc_slot: &str) -> LiveK
     ])))
 }
 
-/// Returns the deterministic LiveKit identity for a given
+/// Returns the deterministic legacy LiveKit identity for a given
 /// (Matrix user ID, device ID, MatrixRTC member ID) tuple.
-pub fn livekit_identity_for(matrix_id: &str, device_id: &str, member_id: &str) -> LiveKitIdentity {
+pub fn legacy_livekit_identity_for(
+    matrix_id: &str,
+    device_id: &str,
+    member_id: &str,
+) -> LiveKitIdentity {
     LiveKitIdentity(sha256_unpadded_base64(&marshal_strings(&[
         matrix_id, device_id, member_id,
+    ])))
+}
+
+/// Returns the deterministic LiveKit identity for a given
+/// (Matrix user ID, MatrixRTC member ID) tuple.
+pub fn livekit_identity_for(matrix_id: &str, member_id: &str) -> LiveKitIdentity {
+    LiveKitIdentity(sha256_unpadded_base64(&marshal_strings(&[
+        matrix_id, member_id,
     ])))
 }
 
@@ -1475,29 +1487,32 @@ mod tests {
         );
     }
 
-    // ── livekit_identity_for ──────────────────────────────────────────────────
+    // ── legacy_livekit_identity_for ───────────────────────────────────────────
 
-    /// Verifies against the test vector from the spec proposal to ensure
-    /// compliance with the expected hashing and encoding scheme.
-    /// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
+    /// Verifies against the test vector from an earlier version of the spec
+    /// proposal to ensure compliance with the expected hashing and encoding
+    /// scheme.
     #[test]
-    fn test_livekit_identity_for_test_vector() {
-        let id = livekit_identity_for("@alice:example.com", "DEVICE123", "memberABC");
+    fn test_legacy_livekit_identity_for_test_vector() {
+        let id = legacy_livekit_identity_for("@alice:example.com", "DEVICE123", "memberABC");
         let want_id = "J+T45tGruxc+HrUOqJJlyQSV33m728Cme4+vt8/SWrU";
-        assert_eq!(id.0, want_id, "livekit_identity_for test vector mismatch");
+        assert_eq!(
+            id.0, want_id,
+            "legacy_livekit_identity_for test vector mismatch"
+        );
     }
 
     /// Verifies that the same inputs always produce the same identity.
     #[test]
-    fn test_livekit_identity_for_deterministic() {
-        let id1 = livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
-        let id2 = livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
+    fn test_legacy_livekit_identity_for_deterministic() {
+        let id1 = legacy_livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
+        let id2 = legacy_livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
         assert_eq!(id1, id2, "same inputs produced different identities");
     }
 
     /// Verifies that different inputs produce different identities.
     #[test]
-    fn test_livekit_identity_for_sample_inputs_distinct() {
+    fn test_legacy_livekit_identity_for_sample_inputs_distinct() {
         let cases = [
             ("@alice:example.com", "DEV1", "mem1"),
             ("@bob:example.com", "DEV1", "mem1"),
@@ -1506,7 +1521,7 @@ mod tests {
         ];
         let mut seen: HashMap<LiveKitIdentity, (&str, &str, &str)> = HashMap::new();
         for c in cases {
-            let id = livekit_identity_for(c.0, c.1, c.2);
+            let id = legacy_livekit_identity_for(c.0, c.1, c.2);
             if let Some(prev) = seen.get(&id) {
                 panic!("collision: {c:?} and {prev:?} produced the same identity {id}");
             }
@@ -1516,10 +1531,40 @@ mod tests {
 
     /// Verifies that the identity is a non-empty unpadded Base64 string.
     #[test]
-    fn test_livekit_identity_for_format() {
-        let id = livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
+    fn test_legacy_livekit_identity_for_format() {
+        let id = legacy_livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
         assert!(!id.0.is_empty(), "identity is empty");
         assert!(!id.0.contains('='), "identity contains padding '=': {id}");
+    }
+
+    // ── livekit_identity_for ──────────────────────────────────────────────────
+
+    /// Verifies against the test vector from the spec proposal to ensure
+    /// compliance with the expected hashing and encoding scheme.
+    /// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
+    #[test]
+    fn test_livekit_identity_for_test_vector() {
+        let id = livekit_identity_for("@alice:example.com", "memberABC");
+        let want_id = "M3VnsLXrkbxIDINXO64u8PZzFyD9ZYFiQULR2dshWYs";
+        assert_eq!(id.0, want_id, "livekit_identity_for test vector mismatch");
+    }
+
+    /// Verifies that different inputs produce different identities.
+    #[test]
+    fn test_livekit_identity_for_sample_inputs_distinct() {
+        let cases = [
+            ("@alice:example.com", "mem1"),
+            ("@bob:example.com", "mem1"),
+            ("@alice:example.com", "mem2"),
+        ];
+        let mut seen: HashMap<LiveKitIdentity, (&str, &str)> = HashMap::new();
+        for c in cases {
+            let id = livekit_identity_for(c.0, c.1);
+            if let Some(prev) = seen.get(&id) {
+                panic!("collision: {c:?} and {prev:?} produced the same identity {id}");
+            }
+            seen.insert(id, c);
+        }
     }
 
     // ── matrix_server_name ───────────────────────────────────────────────────
