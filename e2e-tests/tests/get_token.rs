@@ -22,16 +22,12 @@ async fn request_get_token(
     livekit_url: &str,
     room_id: &str,
     member_id: &str,
-    device_id: &str,
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let mut json = serde_json::json!({
         "room_id": room_id,
         "slot_id": "m.call#ROOM",
         "url": livekit_url,
-        "member": {
-            "id": member_id,
-            "claimed_device_id": device_id,
-        },
+        "member_id": member_id,
     });
     if let Some(server_name) = server_name {
         json["server_name"] = server_name.into();
@@ -61,7 +57,6 @@ async fn get_relayed_livekit_token(
     livekit_url: &str,
     room_id: &str,
     member_id: &str,
-    device_id: &str,
 ) -> String {
     let (status, body) = request_get_token(
         cs_api_url,
@@ -70,7 +65,6 @@ async fn get_relayed_livekit_token(
         livekit_url,
         room_id,
         member_id,
-        device_id,
     )
     .await;
     assert!(
@@ -102,7 +96,6 @@ async fn get_token_local_sfu_succeeds() {
         &room_id,
         "m.call#ROOM",
         "e2e-member",
-        "E2EDEVICE",
     )
     .await;
 
@@ -130,7 +123,6 @@ async fn get_token_remote_sfu_succeeds() {
         &room_id,
         "m.call#ROOM",
         "e2e-member-alice",
-        "E2EDEVICEALICE",
     )
     .await;
 
@@ -149,7 +141,6 @@ async fn get_token_remote_sfu_succeeds() {
         LIVEKIT_A_URL,
         &room_id,
         "e2e-member",
-        "E2EDEVICE",
     )
     .await;
 
@@ -177,7 +168,6 @@ async fn get_token_remote_sfu_cannot_publish() {
         &room_id,
         "m.call#ROOM",
         "e2e-member-alice",
-        "E2EDEVICEALICE",
     )
     .await;
 
@@ -196,7 +186,6 @@ async fn get_token_remote_sfu_cannot_publish() {
         LIVEKIT_A_URL,
         &room_id,
         "e2e-member-bob",
-        "E2EDEVICEBOB",
     )
     .await;
 
@@ -230,7 +219,6 @@ async fn get_token_rejects_non_member() {
         LIVEKIT_A_URL,
         &room_id,
         "e2e-member",
-        "E2EDEVICE",
     )
     .await;
 
@@ -260,7 +248,6 @@ async fn get_token_rejects_when_remote_server_is_not_joined() {
         LIVEKIT_A_URL,
         &room_id,
         "e2e-member",
-        "E2EDEVICE",
     )
     .await;
 

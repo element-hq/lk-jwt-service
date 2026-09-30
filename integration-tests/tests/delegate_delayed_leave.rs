@@ -11,7 +11,7 @@ use lk_jwt_service_integration_tests::{
     expect_delayed_event_request, expect_delayed_event_request_count, expect_job_not_persisted,
     expect_job_persisted, expect_matrix_error, expect_no_delayed_event_request,
     expect_no_delayed_event_requests, expect_no_user_info_lookups, expect_user_info_lookup,
-    livekit_identity, livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request,
+    legacy_livekit_identity, livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request,
     wait_for_delayed_event_request_count, wait_for_job_removed,
 };
 use serde_json::{Value, json};
@@ -317,7 +317,7 @@ async fn aborts_and_sends_when_connection_is_never_established() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // No SFU webhook ever arrives.
@@ -349,7 +349,7 @@ async fn connects_via_participant_lookup_when_already_present() {
 
     // The participant is already on the SFU before the request even arrives.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     sfu.set_participant_present(&room, &identity);
 
     // Post a valid /delegate_delayed_leave request.
@@ -411,7 +411,7 @@ async fn aborts_when_connection_is_aborted_before_being_established() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Report that the participant aborted their connection.
@@ -455,7 +455,7 @@ async fn aborts_and_sends_when_connection_is_aborted_after_being_established() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Report that the participant connected.
@@ -506,7 +506,7 @@ async fn aborts_and_sends_when_connection_is_disconnected() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Report that the participant connected.
@@ -556,7 +556,7 @@ async fn aborts_and_sends_when_participant_goes_missing_undetected() {
 
     // The participant is already on the SFU before the request arrives.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     sfu.set_participant_present(&room, &identity);
 
     // Post a valid /delegate_delayed_leave request.
@@ -614,7 +614,7 @@ async fn restarts_the_delayed_event_repeatedly() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Report that the participant connected.
@@ -675,7 +675,7 @@ async fn aborts_when_delayed_event_is_gone() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Report that the participant connected.
@@ -725,7 +725,7 @@ async fn completes_when_delayed_event_already_sent() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Report that the participant connected.
@@ -781,7 +781,7 @@ async fn job_replacement_only_affects_latest_job() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Post a second /delegate_delayed_leave request for the same room and
@@ -795,7 +795,7 @@ async fn job_replacement_only_affects_latest_job() {
 
     // The job should still be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Report that the participant connected.
@@ -853,7 +853,7 @@ async fn independent_jobs_do_not_cross_talk() {
 
     // The job should be persisted.
     let alice_room = livekit_room_alias("!room-a:example.com", "m.call#");
-    let alice_identity = livekit_identity(&alice.user_id, "DEVICE", "member-1");
+    let alice_identity = legacy_livekit_identity(&alice.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &alice_room, &alice_identity);
 
     // Post a /delegate_delayed_leave request for Bob, in a different room.
@@ -867,7 +867,7 @@ async fn independent_jobs_do_not_cross_talk() {
 
     // The job should be persisted.
     let bob_room = livekit_room_alias("!room-b:example.com", "m.call#");
-    let bob_identity = livekit_identity(&bob.user_id, "DEVICE", "member-1");
+    let bob_identity = legacy_livekit_identity(&bob.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &bob_room, &bob_identity);
 
     // Report that both participants connected.
@@ -944,7 +944,7 @@ async fn job_survives_a_service_restart() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Kill and restart the service.
@@ -1011,7 +1011,7 @@ async fn expired_jobs_are_purged_on_restart() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = legacy_livekit_identity(&user.user_id, "DEVICE", "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Kill the service.

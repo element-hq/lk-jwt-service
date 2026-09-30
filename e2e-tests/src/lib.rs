@@ -432,7 +432,7 @@ pub async fn attempt_publish_track(sfu_addr: &str, access_token: &str) -> bool {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-/// Requests a LiveKit access token for `member_id` / `device_id` in
+/// Requests a LiveKit access token for `member_id` in
 /// `room_id` / `slot_id` through the homeserver's C-S API.
 pub async fn get_livekit_token(
     cs_api_url: &str,
@@ -441,7 +441,6 @@ pub async fn get_livekit_token(
     room_id: &str,
     slot_id: &str,
     member_id: &str,
-    device_id: &str,
 ) -> String {
     let resp = reqwest::Client::new()
         .post(format!(
@@ -452,10 +451,7 @@ pub async fn get_livekit_token(
             "room_id": room_id,
             "slot_id": slot_id,
             "url": livekit_url,
-            "member": {
-                "id": member_id,
-                "claimed_device_id": device_id,
-            },
+            "member_id": member_id,
         }))
         .send()
         .await

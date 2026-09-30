@@ -380,11 +380,7 @@ fn valid_get_token_cs_request() -> GetTokenCsRequest {
         slot_id: "m.call#ROOM".into(),
         url: LIVEKIT_URL.into(),
         server_name: String::new(),
-        member: MatrixRtcMemberType {
-            id: "member-id".into(),
-            claimed_user_id: GET_TOKEN_CS_MXID.into(),
-            claimed_device_id: "device-id".into(),
-        },
+        member_id: "member-id".into(),
     }
 }
 
@@ -416,11 +412,7 @@ fn valid_get_token_ss_request() -> GetTokenSsRequest {
         user_id: "@user:origin.example.org".into(),
         room_id: "!testRoom:example.com".into(),
         slot_id: "m.call#ROOM".into(),
-        member: MatrixRtcMemberType {
-            id: "member-id".into(),
-            claimed_user_id: String::new(),
-            claimed_device_id: "device-id".into(),
-        },
+        member_id: "member-id".into(),
     }
 }
 
@@ -500,11 +492,7 @@ fn valid_delegate_delayed_leave_cs_request() -> DelegateDelayedLeaveCsRequest {
         url: default_auth().lk_url,
         room_id: "!testRoom:example.com".into(),
         slot_id: "m.call#ROOM".into(),
-        member: MatrixRtcMemberType {
-            id: "member-id".into(),
-            claimed_user_id: DELEGATE_DELAYED_LEAVE_CS_MXID.into(),
-            claimed_device_id: "device-id".into(),
-        },
+        member_id: "member-id".into(),
         delay_id: "syd_delay123".into(),
         delay_timeout: Some(30000), // 30 s in ms
     }
@@ -2261,10 +2249,10 @@ async fn test_handle_get_token_cs_success() {
     handler.close().await;
 }
 
-/// A mismatch between the X-Matrix-User-Identifier header and
-/// the claimed_user_id in the body does not affect the outcome.
+/// The LiveKit identity is derived from the X-Matrix-User-Identifier header
+/// and the `member_id` in the body only.
 #[tokio::test]
-async fn test_handle_get_token_cs_ignores_claimed_user_id_mismatch() {
+async fn test_handle_get_token_cs_identity_from_header_and_member_id() {
     const HEADER_MXID: &str = "@real:example.com";
     let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_called_clone = create_called.clone();
@@ -2273,26 +2261,25 @@ async fn test_handle_get_token_cs_ignores_claimed_user_id_mismatch() {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
         is_user_joined_fn: is_joined_ok(true),
-        create_livekit_room_fn: Some(Box::new(move |_, matrix_user, _| {
+        create_livekit_room_fn: Some(Box::new(move |_, matrix_user, identity| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
                 matrix_user, HEADER_MXID,
-                "expected identity derived from the header, not the body"
+                "expected user derived from the header"
+            );
+            assert_eq!(
+                *identity,
+                livekit_identity_for(HEADER_MXID, "member-id"),
+                "expected identity derived from the header and member_id"
             );
             Ok(())
         })),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
-    let body = marshal_get_token_cs_request(|r| {
-        r.member.claimed_user_id = "@attacker:example.com".into();
-    });
+    let body = marshal_get_token_cs_request(|_| {});
     let resp = send_request(&handler, post_get_token_cs_request(body, HEADER_MXID)).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "expected the claimed_user_id mismatch to be ignored"
-    );
+    assert_eq!(resp.status(), StatusCode::OK, "expected 200");
     assert!(
         create_called.load(std::sync::atomic::Ordering::SeqCst),
         "expected create_livekit_room to be called for full-access user"
@@ -2527,9 +2514,7 @@ async fn test_handle_get_token_cs_missing_header() {
 async fn test_handle_get_token_cs_malformed_header() {
     const MALFORMED: &str = "not-an-mxid";
     let handler = new_get_token_cs_handler(HandlerTestDeps::default());
-    let body = marshal_get_token_cs_request(|r| {
-        r.member.claimed_user_id = MALFORMED.into();
-    });
+    let body = marshal_get_token_cs_request(|_| {});
     let resp = send_request(&handler, post_get_token_cs_request(body, MALFORMED)).await;
     assert_eq!(
         resp.status(),
@@ -2641,7 +2626,6 @@ async fn test_process_get_token_cs_request() {
     struct Case {
         name: &'static str,
         header_mxid: &'static str,
-        claimed_user_id: &'static str,
         url: &'static str,
         server_name: &'static str,
         fail_resolution: bool,
@@ -2656,7 +2640,6 @@ async fn test_process_get_token_cs_request() {
     let base = Case {
         name: "",
         header_mxid: "@user:example.com",
-        claimed_user_id: "@user:example.com",
         url: LK_URL,
         server_name: "",
         fail_resolution: false,
@@ -2678,12 +2661,6 @@ async fn test_process_get_token_cs_request() {
             name: "URL mismatch",
             url: "wss://wrong.local",
             expect_error: true,
-            ..base
-        },
-        Case {
-            name: "claimed_user_id mismatch is ignored — identity comes from header",
-            claimed_user_id: "@user:faked.com",
-            expect_create_room: true,
             ..base
         },
         Case {
@@ -2819,11 +2796,7 @@ async fn test_process_get_token_cs_request() {
             slot_id: "slot".into(),
             url: tc.url.into(),
             server_name: tc.server_name.into(),
-            member: MatrixRtcMemberType {
-                id: "device".into(),
-                claimed_user_id: tc.claimed_user_id.into(),
-                claimed_device_id: "dev".into(),
-            },
+            member_id: "member".into(),
         };
         let result = handler
             .process_get_token_cs_request(req, tc.header_mxid)
@@ -3287,11 +3260,7 @@ async fn test_process_get_token_ss_request() {
             user_id: tc.user_id.into(),
             room_id: "!room:example.com".into(),
             slot_id: "slot".into(),
-            member: MatrixRtcMemberType {
-                id: "device".into(),
-                claimed_user_id: String::new(),
-                claimed_device_id: "dev".into(),
-            },
+            member_id: "member".into(),
         };
         let result = handler.process_get_token_ss_request(&req, tc.origin).await;
         if tc.expect_error {

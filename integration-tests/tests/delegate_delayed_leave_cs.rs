@@ -38,10 +38,7 @@ fn delegate_request(lk_url: &str) -> Value {
         "url": lk_url,
         "room_id": "!room:example.com",
         "slot_id": "m.call#",
-        "member": {
-            "id": "member-1",
-            "claimed_device_id": "DEVICE",
-        },
+        "member_id": "member-1",
         "delay_id": "syd_cs_integration_1",
         "delay_timeout": 8000,
     })
@@ -339,7 +336,7 @@ async fn restart_and_send_use_identity_assertion() {
 
     // The job should be persisted.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = livekit_identity(&user.user_id, "member-1");
     expect_job_persisted(&redis, &room, &identity);
 
     // Report that the participant connected.
@@ -422,7 +419,7 @@ async fn delay_timeout_looked_up_when_absent() {
 
     // The job is scheduled off the looked-up delay.
     let room = livekit_room_alias("!room:example.com", "m.call#");
-    let identity = livekit_identity(&user.user_id, "DEVICE", "member-1");
+    let identity = livekit_identity(&user.user_id, "member-1");
     expect_job_persisted(&redis, &room, &identity);
 }
 

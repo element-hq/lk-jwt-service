@@ -34,8 +34,8 @@ use crate::delayed_event_manager::{
 use crate::helper::new_unique_id;
 use crate::helper::{
     CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_SS_PATH, LiveKitAuth,
-    LiveKitIdentity, LiveKitRoomAlias, UniqueId, livekit_identity_for, livekit_room_alias_for,
-    matrix_server_name,
+    LiveKitIdentity, LiveKitRoomAlias, UniqueId, legacy_livekit_identity_for, livekit_identity_for,
+    livekit_room_alias_for, matrix_server_name,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::requests::AppservicePingTriggerRequest;
@@ -922,7 +922,7 @@ impl Handler {
             "Handler: got Matrix user info");
 
         let lk_identity =
-            livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
+            legacy_livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
         let token = self.get_join_token_or_internal_error(
@@ -1038,8 +1038,7 @@ impl Handler {
         }
 
         if is_local {
-            let lk_identity =
-                livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
+            let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
             let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
             let token = self.get_join_token_or_internal_error(
@@ -1052,7 +1051,7 @@ impl Handler {
             self.create_livekit_room_or_internal_error(&lk_room_alias, mxid_header, &lk_identity)
                 .await?;
 
-            info!(matrix_id = %mxid_header, claimed_device_id = %req.member.claimed_device_id,
+            info!(matrix_id = %mxid_header, member_id = %req.member_id,
                 access = if is_local { "full" } else { "restricted" },
                 matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
                 lk_id = %lk_identity, room = %lk_room_alias,
@@ -1065,7 +1064,7 @@ impl Handler {
                 url: req.url,
                 room_id: req.room_id,
                 slot_id: req.slot_id,
-                member: req.member,
+                member_id: req.member_id,
             };
             let resp = self
                 .deps
@@ -1144,8 +1143,7 @@ impl Handler {
 
         self.require_matching_lk_url(&req.url, "get_token_ss")?;
 
-        let lk_identity =
-            livekit_identity_for(&req.user_id, &req.member.claimed_device_id, &req.member.id);
+        let lk_identity = livekit_identity_for(&req.user_id, &req.member_id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
         // Federated participants relayed via the S-S API never get publish
@@ -1160,7 +1158,7 @@ impl Handler {
         self.create_livekit_room_or_internal_error(&lk_room_alias, &req.user_id, &lk_identity)
             .await?;
 
-        info!(user_id = %req.user_id, claimed_device_id = %req.member.claimed_device_id,
+        info!(user_id = %req.user_id, member_id = %req.member_id,
             origin = %origin_header, matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
             lk_id = %lk_identity, room = %lk_room_alias,
             "Handler: generated SFU access token (app-service S-S)");
@@ -1191,7 +1189,7 @@ impl Handler {
         }
 
         let lk_identity =
-            livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
+            legacy_livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
         // Verify that the Client-Server API can be resolved and prime the
@@ -1227,8 +1225,7 @@ impl Handler {
 
         self.require_matching_lk_url(&req.url, "delegate_delayed_leave_cs")?;
 
-        let lk_identity =
-            livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
+        let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
         // Verify that the Client-Server API can be resolved and prime the
