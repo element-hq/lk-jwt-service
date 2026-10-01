@@ -6,9 +6,10 @@
 use std::time::{Duration, Instant};
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LiveKitParticipant, M_CALL_ROOM_SLOT_ID_UNSTABLE,
-    SYNAPSE_A_CS_API_URL, assert_stack_is_up, create_and_join_room, get_livekit_token,
-    register_user,
+    APPSERVICE_A_AS_TOKEN, LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LiveKitParticipant,
+    M_CALL_ROOM_SLOT_ID_UNSTABLE, MatrixUser, SYNAPSE_A_CS_API_URL, SYNAPSE_A_SERVER_NAME,
+    assert_stack_is_up, create_and_join_room, create_and_join_room_with_guest_access,
+    get_livekit_token, join_room_via, register_guest, register_user,
 };
 
 /// Schedules a delayed `m.room.message` in `room_id` (MSC4140) and returns
@@ -125,14 +126,16 @@ struct DelayedEvent {
     delayed_since_ts: u64,
 }
 
-/// Looks up a delayed event by ID, returning `None` once it is no longer
-/// pending: Synapse serves a 404 for a `delay_id` that has already fired or
-/// been cancelled.
+/// Looks up `user_id`'s delayed event by ID, returning `None` once it is no
+/// longer pending: Synapse serves a 404 for a `delay_id` that has already
+/// fired or been cancelled.
 async fn get_delayed_event(
     cs_api_url: &str,
-    access_token: &str,
+    user_id: &str,
     delay_id: &str,
 ) -> Option<DelayedEvent> {
+    // Do the look-up via the application service token. This doesn't matter for
+    // the test. We just do the look-up to be able to build our assertion.
     let mut url = reqwest::Url::parse(cs_api_url).expect("invalid CS API URL");
     url.path_segments_mut()
         .expect("cs_api_url cannot be a base")
@@ -144,10 +147,11 @@ async fn get_delayed_event(
             "delayed_events",
             delay_id,
         ]);
+    url.query_pairs_mut().append_pair("user_id", user_id);
 
     let resp = reqwest::Client::new()
         .get(url)
-        .bearer_auth(access_token)
+        .bearer_auth(APPSERVICE_A_AS_TOKEN)
         .send()
         .await
         .expect("request to look up the delayed event failed");
@@ -175,14 +179,14 @@ async fn get_delayed_event(
 /// value. Panics if the event stops being pending or `timeout` elapses first.
 async fn wait_for_restart(
     cs_api_url: &str,
-    access_token: &str,
+    user_id: &str,
     delay_id: &str,
     since: u64,
     timeout: Duration,
 ) -> u64 {
     let deadline = Instant::now() + timeout;
     loop {
-        let delayed_since_ts = get_delayed_event(cs_api_url, access_token, delay_id)
+        let delayed_since_ts = get_delayed_event(cs_api_url, user_id, delay_id)
             .await
             .expect("the delayed event was sent or cancelled while waiting for a restart")
             .delayed_since_ts;
@@ -203,14 +207,9 @@ async fn wait_for_restart(
 /// The service takes over a delegated delayed event: it keeps it alive on the
 /// homeserver while the participant is connected to the SFU, and sends it once
 /// the participant leaves.
-#[tokio::test]
-async fn delegate_delayed_leave_cs_succeeds() {
-    assert_stack_is_up();
-
-    // Register a user and have them create (and thus join) a room.
-    let user = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
-    let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &user).await;
-
+///
+/// `user` must already be joined to `room_id`.
+async fn assert_delegated_delayed_leave_is_managed(user: &MatrixUser, room_id: &str) {
     // Long enough that the service's send after the hang-up (below) has a
     // comfortable budget before the homeserver's own countdown would fire.
     const DELAY_MS: u64 = 10_000;
@@ -221,13 +220,13 @@ async fn delegate_delayed_leave_cs_succeeds() {
     let delay_id = schedule_delayed_message(
         SYNAPSE_A_CS_API_URL,
         &user.access_token,
-        &room_id,
+        room_id,
         "e2e-delayed-leave-txn",
         MESSAGE_BODY,
         DELAY_MS,
     )
     .await;
-    let delayed_since_ts = get_delayed_event(SYNAPSE_A_CS_API_URL, &user.access_token, &delay_id)
+    let delayed_since_ts = get_delayed_event(SYNAPSE_A_CS_API_URL, &user.user_id, &delay_id)
         .await
         .expect("the delayed event should still be pending right after scheduling")
         .delayed_since_ts;
@@ -237,9 +236,9 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // identity the service will watch.
     let jwt = get_livekit_token(
         SYNAPSE_A_CS_API_URL,
-        &user,
+        user,
         LIVEKIT_A_URL,
-        &room_id,
+        room_id,
         M_CALL_ROOM_SLOT_ID_UNSTABLE,
         MEMBER_ID,
     )
@@ -285,7 +284,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // long enough that, left alone, the homeserver would already have fired
     // it — then look it up again.
     tokio::time::sleep(Duration::from_millis(DELAY_MS * 2)).await;
-    let restarted_since_ts = get_delayed_event(SYNAPSE_A_CS_API_URL, &user.access_token, &delay_id)
+    let restarted_since_ts = get_delayed_event(SYNAPSE_A_CS_API_URL, &user.user_id, &delay_id)
         .await
         .expect(
             "the delegated delayed event was sent or cancelled while the participant was \
@@ -309,7 +308,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // event on its own.
     let restarted_since_ts = wait_for_restart(
         SYNAPSE_A_CS_API_URL,
-        &user.access_token,
+        &user.user_id,
         &delay_id,
         restarted_since_ts,
         Duration::from_millis(DELAY_MS + 2_000),
@@ -324,7 +323,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     let sent_at = wait_for_message(
         SYNAPSE_A_CS_API_URL,
         &user.access_token,
-        &room_id,
+        room_id,
         MESSAGE_BODY,
         Duration::from_millis(DELAY_MS + 5_000),
     )
@@ -339,4 +338,38 @@ async fn delegate_delayed_leave_cs_succeeds() {
          origin_server_ts {sent_at} is within {SEND_BUFFER_MS}ms of (or after) the homeserver's \
          own countdown firing at {homeserver_would_fire_at}"
     );
+}
+
+/// A regular user delegates their delayed leave event to the service.
+#[tokio::test]
+async fn delegate_delayed_leave_cs_succeeds() {
+    assert_stack_is_up();
+
+    // Register a user and have them create (and thus join) a room.
+    let user = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &user).await;
+
+    assert_delegated_delayed_leave_is_managed(&user, &room_id).await;
+}
+
+/// A local guest delegates their delayed leave event to the service, just
+/// like a regular user.
+#[tokio::test]
+async fn delegate_delayed_leave_cs_succeeds_for_guest() {
+    assert_stack_is_up();
+
+    // Alice creates (and thus joins) a room guests may join, and a guest
+    // joins it.
+    let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room_with_guest_access(SYNAPSE_A_CS_API_URL, &alice).await;
+    let guest = register_guest(SYNAPSE_A_CS_API_URL).await;
+    join_room_via(
+        SYNAPSE_A_CS_API_URL,
+        &guest,
+        &room_id,
+        SYNAPSE_A_SERVER_NAME,
+    )
+    .await;
+
+    assert_delegated_delayed_leave_is_managed(&guest, &room_id).await;
 }

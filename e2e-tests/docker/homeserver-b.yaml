@@ -59,6 +59,8 @@ enable_registration_without_verification: true
 rc_registration:
   per_second: 1000
   burst_count: 1000
+# Let the test suite register guest users via /register?kind=guest.
+allow_guest_access: true
 
 experimental_features:
   # Enable membership look-up via /is_joined.
