@@ -60,6 +60,7 @@ pub fn get_join_token(
         can_publish,
         can_subscribe: true,
         can_update_own_metadata: true,
+        hidden: false,
         room: room.0.clone(),
         ..Default::default()
     };

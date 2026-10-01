@@ -611,6 +611,11 @@ async fn test_get_join_token() {
         serde_json::Value::Bool(true),
         "canPublish must reflect the passed-in flag"
     );
+    assert_eq!(
+        claims["video"]["hidden"],
+        serde_json::Value::Bool(false),
+        "hidden must be false"
+    );
 }
 
 #[tokio::test]
@@ -2246,6 +2251,13 @@ async fn test_handle_get_token_cs_success() {
     let response: GetTokenCsResponse =
         serde_json::from_slice(&body).expect("failed to decode response body");
     assert!(!response.jwt.is_empty(), "expected JWT to be non-empty");
+
+    let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
+    assert_eq!(
+        claims["video"]["hidden"],
+        serde_json::Value::Bool(false),
+        "hidden must be false"
+    );
     handler.close().await;
 }
 
