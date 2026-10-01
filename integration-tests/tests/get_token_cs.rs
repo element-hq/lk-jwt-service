@@ -350,6 +350,7 @@ async fn no_server_name_success() {
         claims["video"]["canUpdateOwnMetadata"].as_bool(),
         Some(true)
     );
+    assert_eq!(claims["video"]["hidden"].as_bool(), Some(false));
 
     expect_is_joined_request(&hs, "!room:example.com", &user.user_id, AS_TOKEN);
 
