@@ -295,7 +295,11 @@ fn new_delegate_delayed_leave_handler(deps: HandlerTestDeps) -> Arc<Handler> {
 }
 
 /// Creates a Handler configured for testing delegate_delayed_leave C-S requests.
-fn new_delegate_delayed_leave_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+fn new_delegate_delayed_leave_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handler> {
+    if deps.get_delayed_event_delay_fn.is_none() {
+        deps.get_delayed_event_delay_fn =
+            Some(Box::new(|_, _, _, _, _| Ok(Duration::from_secs(30))));
+    }
     Handler::new(
         default_auth(),
         vec!["example.com".into()],
@@ -494,7 +498,6 @@ fn valid_delegate_delayed_leave_cs_request() -> DelegateDelayedLeaveCsRequest {
         slot_id: "m.call#ROOM".into(),
         member_id: "member-id".into(),
         delay_id: "syd_delay123".into(),
-        delay_timeout: Some(30000), // 30 s in ms
     }
 }
 
@@ -4114,9 +4117,12 @@ async fn test_process_delegate_delayed_leave_cs_resolves_local_homeserver() {
 /// as 400 M_BAD_JSON carrying the creation error.
 #[tokio::test]
 async fn test_process_delegate_delayed_leave_cs_invalid_delay_timeout() {
-    let handler = new_delegate_delayed_leave_cs_handler(HandlerTestDeps::default());
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = Some(0); // invalid — would be rejected by request parsing, too
+    let deps = HandlerTestDeps {
+        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| Ok(Duration::ZERO))),
+        ..Default::default()
+    };
+    let handler = new_delegate_delayed_leave_cs_handler(deps);
+    let req = valid_delegate_delayed_leave_cs_request();
 
     let err = handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
@@ -4185,11 +4191,10 @@ async fn test_process_delegate_delayed_leave_cs_restart_uses_identity_assertion(
     handler.close().await;
 }
 
-/// A request without a delay timeout makes the service look the delay up on
-/// the homeserver, asserting the caller's identity and the request's
+/// The service looks the delay up on the homeserver, asserting the caller's identity and the request's
 /// `room_id` as it does so.
 #[tokio::test]
-async fn test_process_delegate_delayed_leave_cs_looks_up_missing_delay_timeout() {
+async fn test_process_delegate_delayed_leave_cs_looks_up_delay_timeout() {
     /// (CS API URL, delay ID, room ID, as_token, user_id) of the recorded lookup.
     type Lookup = (String, String, String, String, String);
     let looked_up: Arc<Mutex<Option<Lookup>>> = Arc::new(Mutex::new(None));
@@ -4214,8 +4219,7 @@ async fn test_process_delegate_delayed_leave_cs_looks_up_missing_delay_timeout()
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = None;
+    let req = valid_delegate_delayed_leave_cs_request();
 
     handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
@@ -4262,8 +4266,7 @@ async fn test_process_delegate_delayed_leave_cs_looked_up_delay_drives_the_job()
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = None;
+    let req = valid_delegate_delayed_leave_cs_request();
 
     handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
@@ -4280,31 +4283,6 @@ async fn test_process_delegate_delayed_leave_cs_looked_up_delay_drives_the_job()
     handler.close().await;
 }
 
-/// A delay timeout in the request is used as-is — no lookup is attempted.
-/// The mock panics if called.
-#[tokio::test]
-async fn test_process_delegate_delayed_leave_cs_skips_lookup_when_delay_timeout_given() {
-    let deps = HandlerTestDeps {
-        resolve_cs_api_url_fn: Some(Box::new(|_| {
-            Ok(CsApiUrl("https://matrix-client.example.com".into()))
-        })),
-        participant_exists_fn: participant_exists_block_until_cancelled(),
-        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| {
-            panic!("the delay must not be looked up when the request carries one")
-        })),
-        ..Default::default()
-    };
-    let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let req = valid_delegate_delayed_leave_cs_request();
-    assert!(req.delay_timeout.is_some());
-
-    handler
-        .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
-        .await
-        .expect("unexpected error");
-    handler.close().await;
-}
-
 /// An unknown delay_id is rejected as HTTP 400 / M_INVALID_PARAM.
 #[tokio::test]
 async fn test_process_delegate_delayed_leave_cs_delay_lookup_not_found() {
@@ -4318,8 +4296,7 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_not_found() {
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = None;
+    let req = valid_delegate_delayed_leave_cs_request();
 
     let err = handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
@@ -4347,8 +4324,7 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_unavailable() {
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = None;
+    let req = valid_delegate_delayed_leave_cs_request();
 
     let err = handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
