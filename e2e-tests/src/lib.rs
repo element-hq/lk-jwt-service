@@ -34,6 +34,11 @@ pub const SYNAPSE_A_CS_API_URL: &str = "http://127.0.0.1:18008";
 /// docker/homeserver-a.yaml.
 pub const SYNAPSE_A_SERVER_NAME: &str = "synapse-a.e2e.test";
 
+/// The as_token stack A's service is registered with in
+/// docker/app-service-a.yaml. Lets tests make C-S requests as any user the
+/// service could assert the identity of, the same way the service does.
+pub const APPSERVICE_A_AS_TOKEN: &str = "e2e_as_token_a";
+
 /// Stack A's service under test, published to the host.
 pub const AUTH_SERVICE_A_URL: &str = "http://127.0.0.1:18080";
 
@@ -160,13 +165,74 @@ pub async fn register_user(cs_api_url: &str, name: &str, password: &str) -> Matr
     }
 }
 
+/// Registers a new guest user against the homeserver behind `cs_api_url`.
+pub async fn register_guest(cs_api_url: &str) -> MatrixUser {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{cs_api_url}/_matrix/client/v3/register?kind=guest"
+        ))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("guest registration request failed");
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .expect("guest registration response was not JSON");
+    assert!(
+        status.is_success(),
+        "guest registration failed: {status}: {body}"
+    );
+
+    MatrixUser {
+        user_id: body["user_id"]
+            .as_str()
+            .expect("guest registration response is missing `user_id`")
+            .to_owned(),
+        access_token: body["access_token"]
+            .as_str()
+            .expect("guest registration response is missing `access_token`")
+            .to_owned(),
+    }
+}
+
 /// Creates a room as the given user against the homeserver behind
 /// `cs_api_url` and returns its room ID.
 pub async fn create_and_join_room(cs_api_url: &str, user: &MatrixUser) -> String {
+    create_room(
+        cs_api_url,
+        user,
+        serde_json::json!({"preset": "public_chat"}),
+    )
+    .await
+}
+
+/// Like [`create_and_join_room`], but also lets guests join the room. The
+/// `public_chat` preset forbids guest access, so it's explicitly granted.
+pub async fn create_and_join_room_with_guest_access(cs_api_url: &str, user: &MatrixUser) -> String {
+    create_room(
+        cs_api_url,
+        user,
+        serde_json::json!({
+            "preset": "public_chat",
+            "initial_state": [{
+                "type": "m.room.guest_access",
+                "state_key": "",
+                "content": {"guest_access": "can_join"},
+            }],
+        }),
+    )
+    .await
+}
+
+/// Creates a room with the given `createRoom` request body as the given user
+/// against the homeserver behind `cs_api_url` and returns its room ID.
+async fn create_room(cs_api_url: &str, user: &MatrixUser, body: serde_json::Value) -> String {
     let resp = reqwest::Client::new()
         .post(format!("{cs_api_url}/_matrix/client/v3/createRoom"))
         .bearer_auth(&user.access_token)
-        .json(&serde_json::json!({"preset": "public_chat"}))
+        .json(&body)
         .send()
         .await
         .expect("createRoom request failed");
