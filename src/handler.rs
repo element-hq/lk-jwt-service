@@ -718,9 +718,7 @@ impl Handler {
             })
     }
 
-    /// Looks up the delay of `delay_id` on the homeserver, for delegation
-    /// requests that do not carry one. Also verifies that the delayed event
-    /// was scheduled in `room_id`.
+    /// Looks up the delay of `delay_id` on the homeserver.
     async fn look_up_delay_timeout(
         &self,
         cs_api_url: &CsApiUrl,
@@ -1235,14 +1233,9 @@ impl Handler {
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
-        // When no timeout is specified, try to read it by looking up the event on the server.
-        let delay_timeout = match req.delay_timeout {
-            Some(timeout) => Duration::from_millis(timeout.max(0) as u64),
-            None => {
-                self.look_up_delay_timeout(&cs_api_url, &req.delay_id, &req.room_id, mxid_header)
-                    .await?
-            }
-        };
+        let delay_timeout = self
+            .look_up_delay_timeout(&cs_api_url, &req.delay_id, &req.room_id, mxid_header)
+            .await?;
 
         info!(room = %lk_room_alias, lk_id = %lk_identity, delay_id = %req.delay_id,
             matrix_id = %mxid_header, delay_timeout = ?delay_timeout,

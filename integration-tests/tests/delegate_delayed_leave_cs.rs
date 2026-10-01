@@ -40,7 +40,6 @@ fn delegate_request(lk_url: &str) -> Value {
         "slot_id": "m.call#",
         "member_id": "member-1",
         "delay_id": "syd_cs_integration_1",
-        "delay_timeout": 8000,
     })
 }
 
@@ -281,6 +280,7 @@ async fn unresolvable_cs_api() {
 async fn success() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
+    hs.set_delay("syd_cs_integration_1", 8000, "!room:example.com");
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec!["*".to_owned()],
@@ -314,6 +314,7 @@ async fn success() {
 async fn restart_and_send_use_identity_assertion() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
+    hs.set_delay("syd_cs_integration_1", 8000, "!room:example.com");
 
     let redis = FakeRedis::new().await;
 
@@ -376,10 +377,9 @@ async fn restart_and_send_use_identity_assertion() {
 
 // ── delay look-up (MSC4140) ───────────────────────────────────────────────────
 
-/// A request may omit the delay timeout. The service then reads the delay off
-/// the delayed event itself, asserting the caller's identity as it does so.
+/// The service reads the delay off the delayed event itself.
 #[tokio::test]
-async fn delay_timeout_looked_up_when_absent() {
+async fn delay_timeout_looked_up() {
     let hs = FakeHomeserver::new().await;
     let user = hs.new_user("alice");
     hs.set_delay("syd_cs_integration_1", 8000, "!room:example.com");
@@ -395,8 +395,7 @@ async fn delay_timeout_looked_up_when_absent() {
     })
     .await;
 
-    let mut request = delegate_request(DEFAULT_LK_URL);
-    request.as_object_mut().unwrap().remove("delay_timeout");
+    let request = delegate_request(DEFAULT_LK_URL);
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
     assert_eq!(status, 200, "body: {body}");
 
@@ -423,33 +422,6 @@ async fn delay_timeout_looked_up_when_absent() {
     expect_job_persisted(&redis, &room, &identity);
 }
 
-/// A request that carries a delay timeout is taken at its word — the service
-/// does not look the delay up.
-#[tokio::test]
-async fn delay_timeout_not_looked_up_when_given() {
-    let hs = FakeHomeserver::new().await;
-    let user = hs.new_user("alice");
-
-    let svc = Service::start(ServiceConfig {
-        full_access_homeservers: vec!["*".to_owned()],
-        cs_api_url_overrides: hs.cs_api_url_override(),
-        extra_env: app_service_env_with_hs_server_name(hs.server_name()),
-        ..Default::default()
-    })
-    .await;
-
-    let (status, body) = post_delegate_cs(
-        &svc,
-        delegate_request(DEFAULT_LK_URL).to_string(),
-        Some(&user.user_id),
-    )
-    .await;
-    assert_eq!(status, 200, "body: {body}");
-
-    let lookups = hs.delay_lookups();
-    assert!(lookups.is_empty(), "expected no lookups, got {lookups:?}");
-}
-
 /// The looked-up delay becomes the job's timeout: with a short delay and no
 /// participant ever showing up on the SFU, the waiting-state timeout fires and
 /// the leave event is sent.
@@ -467,8 +439,7 @@ async fn looked_up_delay_drives_the_job() {
     })
     .await;
 
-    let mut request = delegate_request(DEFAULT_LK_URL);
-    request.as_object_mut().unwrap().remove("delay_timeout");
+    let request = delegate_request(DEFAULT_LK_URL);
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
     assert_eq!(status, 200, "body: {body}");
 
@@ -492,8 +463,7 @@ async fn unknown_delay_id_rejected() {
     })
     .await;
 
-    let mut request = delegate_request(DEFAULT_LK_URL);
-    request.as_object_mut().unwrap().remove("delay_timeout");
+    let request = delegate_request(DEFAULT_LK_URL);
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
     expect_matrix_error(status, &body, 400, "M_INVALID_PARAM");
@@ -516,8 +486,7 @@ async fn delay_id_for_another_room_rejected() {
     })
     .await;
 
-    let mut request = delegate_request(DEFAULT_LK_URL);
-    request.as_object_mut().unwrap().remove("delay_timeout");
+    let request = delegate_request(DEFAULT_LK_URL);
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
     expect_matrix_error(status, &body, 400, "M_INVALID_PARAM");
@@ -541,8 +510,7 @@ async fn delay_lookup_failure_rejected() {
     })
     .await;
 
-    let mut request = delegate_request(DEFAULT_LK_URL);
-    request.as_object_mut().unwrap().remove("delay_timeout");
+    let request = delegate_request(DEFAULT_LK_URL);
     let (status, body) = post_delegate_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
     expect_matrix_error(status, &body, 503, "M_UNKNOWN");
