@@ -57,6 +57,14 @@ async fn main() {
         }
     };
 
+    if !config.app_service_config.is_set_up() {
+        warn!(
+            "Not running as an application service: delegated delayed leave events are managed \
+             through unauthenticated calls, which stop working on homeservers that require \
+             authentication for them (MSC4140)"
+        );
+    }
+
     let store: Option<Arc<dyn Store>> = if config.redis_url.is_empty() {
         warn!("LIVEKIT_REDIS_URL not set. Using in-memory store.");
         None
