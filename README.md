@@ -133,15 +133,21 @@ Set environment variables to configure the service:
 
 When set up as an application service, the integration depends on
 [MSC4502](https://github.com/matrix-org/matrix-spec-proposals/pull/4502) and
-[MSC4512](https://github.com/matrix-org/matrix-spec-proposals/pull/4512).
+[MSC4512](https://github.com/matrix-org/matrix-spec-proposals/pull/4512). On Synapse, enable both
+by setting `msc4502_enabled: true` and `msc4512_enabled: true` under `experimental_features`.
+
+None of these proposals, nor [MSC4195](https://github.com/matrix-org/matrix-spec-proposals/pull/4195),
+is part of the spec yet, so the service and Synapse use their unstable identifiers
+(`/_matrix/client/unstable/io.element.msc4195/…`, `io.element.msc4502.*` and `io.element.msc4512.*`).
 
 The service needs to cover all local users because it needs to verify room memberships
-without being joined to any rooms itself. This requires the `urn:matrix:client:rooms:is_joined`
-scope to be set. The service does not require any event traffic, however. So make sure to set
+without being joined to any rooms itself. This requires the `urn:matrix:client:io.element.msc4502:rooms:is_joined`
+scope to be set via `io.element.msc4502.scopes`. The service does not require any event traffic, however. So make sure to set
 `url` to `null`.
 
 Additionally, request proxying needs to be enabled for the `/rtc/livekit` subpath in the Client-Server
-and Server-Server API. This is done via the `proxy_prefix` and `proxy_url` properties.
+and Server-Server API. This is done via the `io.element.msc4512.proxy_prefix` and
+`io.element.msc4512.proxy_url` properties.
 
 Running as an application service is also what allows the service to manage delegated delayed leave
 events on behalf of the homeserver's users (see [LiveKit SFU Wiring](#-livekit-sfu-wiring-webhooks)).
@@ -158,12 +164,10 @@ namespaces:
     - exclusive: false
       regex: ".*" # Cover all users
 url: null # No event traffic required
-# Stable scope for membership look-up
-scopes: [ "urn:matrix:client:rooms:is_joined" ]
-# Unstable scope for membership look-up
-io.element.msc4502.scope: [ "urn:matrix:client:io.element.msc4502:rooms:is_joined" ],
-proxy_prefix: "rtc/livekit" # Proxy /rtc/livekit requests on the C-S and S-S API
-proxy_url: "http://127.0.0.1:1234" # Forward proxied requests to this URL
+# Scope for membership look-up
+io.element.msc4502.scopes: [ "urn:matrix:client:io.element.msc4502:rooms:is_joined" ]
+io.element.msc4512.proxy_prefix: "rtc/livekit" # Proxy /rtc/livekit requests on the C-S and S-S API
+io.element.msc4512.proxy_url: "http://127.0.0.1:1234" # Forward proxied requests to this URL
 ```
 
 ## 🔌 LiveKit SFU Wiring (Webhooks)
