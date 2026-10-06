@@ -254,7 +254,7 @@ async fn get_token_rejects_when_remote_server_is_not_joined() {
     assert_eq!(
         status.as_u16(),
         403,
-        "expected the remote homeserver's 403 to be relayed, got {status}: {body}"
+        "expected the local homeserver to reject the request, got {status}: {body}"
     );
     assert_eq!(body["errcode"].as_str(), Some("M_FORBIDDEN"));
 }

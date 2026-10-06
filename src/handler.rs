@@ -33,9 +33,9 @@ use crate::delayed_event_manager::{
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::helper::new_unique_id;
 use crate::helper::{
-    CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_SS_PATH, LiveKitAuth,
-    LiveKitIdentity, LiveKitRoomAlias, UniqueId, legacy_livekit_identity_for, livekit_identity_for,
-    livekit_room_alias_for, matrix_server_name,
+    CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_SS_PATH, JoinedSubject,
+    LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId, legacy_livekit_identity_for,
+    livekit_identity_for, livekit_room_alias_for, matrix_server_name,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::requests::AppservicePingTriggerRequest;
@@ -821,6 +821,43 @@ impl Handler {
         Ok(())
     }
 
+    /// Returns 403 M_FORBIDDEN with `forbidden_msg` if `subject` isn't joined
+    /// to `room_id`, or 502 M_UNKNOWN if membership can't be verified.
+    async fn require_joined(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        subject: JoinedSubject<'_>,
+        forbidden_msg: &str,
+    ) -> Result<(), MatrixErrorResponse> {
+        let is_joined = self
+            .deps
+            .is_joined(
+                cs_api_url,
+                room_id,
+                subject,
+                &self.app_service_config.as_token,
+            )
+            .await
+            .map_err(|err| {
+                error!(%subject, room = %room_id, err = %err,
+                    "Handler: error checking room membership");
+                MatrixErrorResponse {
+                    status: 502,
+                    errcode: "M_UNKNOWN".into(),
+                    err: "Unable to verify room membership".into(),
+                }
+            })?;
+        if !is_joined {
+            return Err(MatrixErrorResponse {
+                status: 403,
+                errcode: "M_FORBIDDEN".into(),
+                err: forbidden_msg.into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Deprecated: serves the pre-Matrix-2.0 /sfu/get endpoint. Remove once
     /// all in-the-wild clients have migrated to /get_token.
     pub(crate) async fn process_legacy_sfu_request(
@@ -1010,31 +1047,13 @@ impl Handler {
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
-        let is_member = self
-            .deps
-            .is_user_joined(
-                &cs_api_url,
-                &req.room_id,
-                mxid_header,
-                &self.app_service_config.as_token,
-            )
-            .await
-            .map_err(|err| {
-                error!(matrix_id = %mxid_header, room = %req.room_id, err = %err,
-                    "Handler: error checking room membership");
-                MatrixErrorResponse {
-                    status: 502,
-                    errcode: "M_UNKNOWN".into(),
-                    err: "Unable to verify room membership".into(),
-                }
-            })?;
-        if !is_member {
-            return Err(MatrixErrorResponse {
-                status: 403,
-                errcode: "M_FORBIDDEN".into(),
-                err: "The requesting user is not a member of the room".into(),
-            });
-        }
+        self.require_joined(
+            &cs_api_url,
+            &req.room_id,
+            JoinedSubject::User(mxid_header),
+            "The requesting user is not a member of the room",
+        )
+        .await?;
 
         if is_local {
             let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
@@ -1058,6 +1077,14 @@ impl Handler {
 
             Ok(GetTokenCsResponse { jwt: token })
         } else {
+            self.require_joined(
+                &cs_api_url,
+                &req.room_id,
+                JoinedSubject::Server(target_server_name),
+                "The target server is not joined to the room",
+            )
+            .await?;
+
             let ss_req = GetTokenSsRequest {
                 user_id: mxid_header.to_owned(),
                 url: req.url,
@@ -1114,31 +1141,21 @@ impl Handler {
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
-        let is_member = self
-            .deps
-            .is_user_joined(
-                &cs_api_url,
-                &req.room_id,
-                &req.user_id,
-                &self.app_service_config.as_token,
-            )
-            .await
-            .map_err(|err| {
-                error!(user_id = %req.user_id, room = %req.room_id, err = %err,
-                    "Handler: error checking room membership (app-service S-S)");
-                MatrixErrorResponse {
-                    status: 502,
-                    errcode: "M_UNKNOWN".into(),
-                    err: "Unable to verify room membership".into(),
-                }
-            })?;
-        if !is_member {
-            return Err(MatrixErrorResponse {
-                status: 403,
-                errcode: "M_FORBIDDEN".into(),
-                err: "The requesting user is not a member of the room".into(),
-            });
-        }
+        self.require_joined(
+            &cs_api_url,
+            &req.room_id,
+            JoinedSubject::Server(&self.app_service_config.hs_server_name),
+            "This server is not joined to the room",
+        )
+        .await?;
+
+        self.require_joined(
+            &cs_api_url,
+            &req.room_id,
+            JoinedSubject::User(&req.user_id),
+            "The requesting user is not a member of the room",
+        )
+        .await?;
 
         self.require_matching_lk_url(&req.url, "get_token_ss")?;
 
