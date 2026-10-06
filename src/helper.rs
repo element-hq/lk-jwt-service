@@ -543,6 +543,24 @@ pub enum FederationTokenError {
     Other(String),
 }
 
+/// The subject of an MSC4502 `/is_joined` membership look-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinedSubject<'a> {
+    /// A user, identified by their Matrix user ID.
+    User(&'a str),
+    /// A homeserver, identified by its server name.
+    Server(&'a str),
+}
+
+impl std::fmt::Display for JoinedSubject<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JoinedSubject::User(mxid) => f.write_str(mxid),
+            JoinedSubject::Server(server_name) => f.write_str(server_name),
+        }
+    }
+}
+
 // ── Deps: the swappable dependency surface ───────────────────────────────────
 
 /// External interactions of the service. The real logic lives in the default
@@ -941,13 +959,13 @@ pub trait Deps: Send + Sync {
         }
     }
 
-    /// Checks whether `mxid` is currently a member of `room_id`, via the
+    /// Checks whether `subject` is currently joined to `room_id`, via the
     /// `/is_joined` endpoint from MSC4502.
-    async fn is_user_joined(
+    async fn is_joined(
         &self,
         cs_api_url: &CsApiUrl,
         room_id: &str,
-        mxid: &str,
+        subject: JoinedSubject<'_>,
         as_token: &str,
     ) -> Result<bool, String> {
         const IS_JOINED_PATH_PREFIX: &str = "_matrix/client/unstable/io.element.msc4502";
@@ -966,7 +984,12 @@ pub trait Deps: Send + Sync {
             segments.push(room_id);
             segments.push("is_joined");
         }
-        endpoint.query_pairs_mut().append_pair("mxid", mxid);
+        match subject {
+            JoinedSubject::User(mxid) => endpoint.query_pairs_mut().append_pair("mxid", mxid),
+            JoinedSubject::Server(server_name) => endpoint
+                .query_pairs_mut()
+                .append_pair("server_name", server_name),
+        };
 
         let resp = http_client(self.skip_verify_tls())
             .get(endpoint.clone())
@@ -976,7 +999,7 @@ pub trait Deps: Send + Sync {
             .await
             .map_err(|e| {
                 let msg = error_chain(&e);
-                debug!(url = %endpoint, err = %msg, "is_user_joined");
+                debug!(url = %endpoint, err = %msg, "is_joined");
                 format!("failed to check room membership: {msg}")
             })?;
 
@@ -2497,7 +2520,7 @@ mod tests {
         assert_eq!(captured.user_id, None);
     }
 
-    // ── is_user_joined ───────────────────────────────────────────────────────
+    // ── is_joined ────────────────────────────────────────────────────────────
 
     /// A homeserver stub serving /is_joined at the unstable MSC4502 path.
     struct IsJoinedServer {
@@ -2527,14 +2550,14 @@ mod tests {
     /// The unstable MSC4502 endpoint is always used, regardless of what the
     /// homeserver advertises.
     #[tokio::test]
-    async fn test_is_user_joined_uses_unstable_endpoint() {
+    async fn test_is_joined_uses_unstable_endpoint() {
         let hs = spawn_is_joined_server(true).await;
 
         let joined = RealDeps::default()
-            .is_user_joined(
+            .is_joined(
                 &CsApiUrl(hs.server.url.clone()),
                 "!room:example.com",
-                "@alice:example.com",
+                JoinedSubject::User("@alice:example.com"),
                 "as_token",
             )
             .await
@@ -2554,14 +2577,14 @@ mod tests {
 
     /// `joined: false` responses propagate as Ok(false), not an error.
     #[tokio::test]
-    async fn test_is_user_joined_not_joined() {
+    async fn test_is_joined_not_joined() {
         let hs = spawn_is_joined_server(false).await;
 
         let joined = RealDeps::default()
-            .is_user_joined(
+            .is_joined(
                 &CsApiUrl(hs.server.url.clone()),
                 "!room:example.com",
-                "@alice:example.com",
+                JoinedSubject::User("@alice:example.com"),
                 "as_token",
             )
             .await
@@ -2571,7 +2594,7 @@ mod tests {
 
     /// A non-2xx response from the is_joined endpoint itself surfaces as an error.
     #[tokio::test]
-    async fn test_is_user_joined_http_error() {
+    async fn test_is_joined_http_error() {
         let router = Router::new().route(
             "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
             any(|| async { http::StatusCode::FORBIDDEN }),
@@ -2579,10 +2602,10 @@ mod tests {
         let server = spawn_http_server(router).await;
 
         let err = RealDeps::default()
-            .is_user_joined(
+            .is_joined(
                 &CsApiUrl(server.url.clone()),
                 "!room:example.com",
-                "@alice:example.com",
+                JoinedSubject::User("@alice:example.com"),
                 "as_token",
             )
             .await
@@ -2590,16 +2613,16 @@ mod tests {
         assert!(err.contains("403"), "unexpected error message: {err}");
     }
 
-    /// The request is shaped correctly: it uses `mxid`.
+    /// A user subject is shaped correctly: it uses `mxid`.
     #[tokio::test]
-    async fn test_is_user_joined_request_shape() {
+    async fn test_is_joined_user_request_shape() {
         let hs = spawn_is_joined_server(true).await;
 
         let _ = RealDeps::default()
-            .is_user_joined(
+            .is_joined(
                 &CsApiUrl(hs.server.url.clone()),
                 "!room:example.com",
-                "@alice:example.com",
+                JoinedSubject::User("@alice:example.com"),
                 "the_as_token",
             )
             .await
@@ -2621,6 +2644,35 @@ mod tests {
                 .get(http::header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok()),
             Some("Bearer the_as_token"),
+        );
+    }
+
+    /// A user subject is shaped correctly: it uses `server_name`.
+    #[tokio::test]
+    async fn test_is_joined_server_request_shape() {
+        let hs = spawn_is_joined_server(true).await;
+
+        let joined = RealDeps::default()
+            .is_joined(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                JoinedSubject::Server("other.example.org"),
+                "the_as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert!(joined);
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let (uri, _) = &requests[0];
+        assert!(
+            uri.contains("server_name=other.example.org"),
+            "expected server_name query param, got {uri:?}"
+        );
+        assert!(
+            !uri.contains("mxid="),
+            "expected no mxid query param, got {uri:?}"
         );
     }
 
