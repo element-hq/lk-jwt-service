@@ -59,9 +59,7 @@ async fn main() {
 
     if !config.app_service_config.is_set_up() {
         warn!(
-            "Not running as an application service: delegated delayed leave events are managed \
-             through unauthenticated calls, which stop working on homeservers that require \
-             authentication for them (MSC4140)"
+            "Not running as an application service is deprecated and might not work on recent servers"
         );
     }
 
