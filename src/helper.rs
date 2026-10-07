@@ -213,11 +213,23 @@ pub fn livekit_room_alias_for(matrix_room: &str, matrix_rtc_slot: &str) -> LiveK
     ])))
 }
 
-/// Returns the deterministic LiveKit identity for a given
+/// Returns the deterministic legacy LiveKit identity for a given
 /// (Matrix user ID, device ID, MatrixRTC member ID) tuple.
-pub fn livekit_identity_for(matrix_id: &str, device_id: &str, member_id: &str) -> LiveKitIdentity {
+pub fn legacy_livekit_identity_for(
+    matrix_id: &str,
+    device_id: &str,
+    member_id: &str,
+) -> LiveKitIdentity {
     LiveKitIdentity(sha256_unpadded_base64(&marshal_strings(&[
         matrix_id, device_id, member_id,
+    ])))
+}
+
+/// Returns the deterministic LiveKit identity for a given
+/// (Matrix user ID, MatrixRTC member ID) tuple.
+pub fn livekit_identity_for(matrix_id: &str, member_id: &str) -> LiveKitIdentity {
+    LiveKitIdentity(sha256_unpadded_base64(&marshal_strings(&[
+        matrix_id, member_id,
     ])))
 }
 
@@ -430,7 +442,9 @@ impl RoomServiceClient for LiveKitRoomServiceClient {
 #[derive(Debug, thiserror::Error)]
 pub enum ActionError {
     /// 404 on ActionRestart: the delayed event no longer exists on the
-    /// homeserver. Permanent — retrying is pointless.
+    /// homeserver. 409 on ActionRestart: the delayed event was already
+    /// finalised (sent or cancelled). Either way it can no longer be
+    /// restarted. Permanent — retrying is pointless.
     #[error("CS API: delayed event not found")]
     DelayedEventNotFound { status: u16 },
     /// 429 with a usable retry hint (Retry-After header or retry_after_ms).
@@ -527,6 +541,24 @@ pub enum FederationTokenError {
     Destination { status: u16, errcode: String },
     #[error("{0}")]
     Other(String),
+}
+
+/// The subject of an MSC4502 `/is_joined` membership look-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinedSubject<'a> {
+    /// A user, identified by their Matrix user ID.
+    User(&'a str),
+    /// A homeserver, identified by its server name.
+    Server(&'a str),
+}
+
+impl std::fmt::Display for JoinedSubject<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JoinedSubject::User(mxid) => f.write_str(mxid),
+            JoinedSubject::Server(server_name) => f.write_str(server_name),
+        }
+    }
 }
 
 // ── Deps: the swappable dependency surface ───────────────────────────────────
@@ -828,8 +860,10 @@ pub trait Deps: Send + Sync {
     /// When `identity` is `None`, the request is sent unauthenticated.
     ///
     /// Return contract:
-    ///   - 2xx, and 404 on send (MSC4140 already-sent)  → `Ok(status)`
-    ///   - 404 on restart                               → permanent [`ActionError::DelayedEventNotFound`]
+    ///   - 2xx, 404 on send (MSC4140 already sent or
+    ///     cancelled) and 409 on send (MSC4140 already
+    ///     cancelled)                                   → `Ok(status)`
+    ///   - 404 or 409 on restart                        → permanent [`ActionError::DelayedEventNotFound`]
     ///   - 429 with a usable retry hint                 → [`ActionError::RetryAfter`]
     ///   - anything else (5xx, hint-less 429, transport
     ///     errors with status 0, unclassified statuses) → transient
@@ -898,6 +932,15 @@ pub trait Deps: Send + Sync {
             // homeserver. Permanent so the retry loop stops immediately.
             404 => Err(ActionError::DelayedEventNotFound { status }),
 
+            // MSC4140: 409 on send means the event was already cancelled —
+            // nothing left to send, treat as success.
+            409 if action == DelayEventAction::Send => Ok(status),
+
+            // 409 on restart: the event was already sent or cancelled and
+            // can no longer be restarted. Permanent so the retry loop stops
+            // immediately, like 404.
+            409 => Err(ActionError::DelayedEventNotFound { status }),
+
             // Any 5xx is transient (CS API restart, DB lock, load-balancer
             // hiccup, upstream timeout). Retry on the default schedule.
             500..=599 => Err(ActionError::Transient {
@@ -916,13 +959,13 @@ pub trait Deps: Send + Sync {
         }
     }
 
-    /// Checks whether `mxid` is currently a member of `room_id`, via the
+    /// Checks whether `subject` is currently joined to `room_id`, via the
     /// `/is_joined` endpoint from MSC4502.
-    async fn is_user_joined(
+    async fn is_joined(
         &self,
         cs_api_url: &CsApiUrl,
         room_id: &str,
-        mxid: &str,
+        subject: JoinedSubject<'_>,
         as_token: &str,
     ) -> Result<bool, String> {
         const IS_JOINED_PATH_PREFIX: &str = "_matrix/client/unstable/io.element.msc4502";
@@ -941,7 +984,12 @@ pub trait Deps: Send + Sync {
             segments.push(room_id);
             segments.push("is_joined");
         }
-        endpoint.query_pairs_mut().append_pair("mxid", mxid);
+        match subject {
+            JoinedSubject::User(mxid) => endpoint.query_pairs_mut().append_pair("mxid", mxid),
+            JoinedSubject::Server(server_name) => endpoint
+                .query_pairs_mut()
+                .append_pair("server_name", server_name),
+        };
 
         let resp = http_client(self.skip_verify_tls())
             .get(endpoint.clone())
@@ -951,7 +999,7 @@ pub trait Deps: Send + Sync {
             .await
             .map_err(|e| {
                 let msg = error_chain(&e);
-                debug!(url = %endpoint, err = %msg, "is_user_joined");
+                debug!(url = %endpoint, err = %msg, "is_joined");
                 format!("failed to check room membership: {msg}")
             })?;
 
@@ -1462,29 +1510,32 @@ mod tests {
         );
     }
 
-    // ── livekit_identity_for ──────────────────────────────────────────────────
+    // ── legacy_livekit_identity_for ───────────────────────────────────────────
 
-    /// Verifies against the test vector from the spec proposal to ensure
-    /// compliance with the expected hashing and encoding scheme.
-    /// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
+    /// Verifies against the test vector from an earlier version of the spec
+    /// proposal to ensure compliance with the expected hashing and encoding
+    /// scheme.
     #[test]
-    fn test_livekit_identity_for_test_vector() {
-        let id = livekit_identity_for("@alice:example.com", "DEVICE123", "memberABC");
+    fn test_legacy_livekit_identity_for_test_vector() {
+        let id = legacy_livekit_identity_for("@alice:example.com", "DEVICE123", "memberABC");
         let want_id = "J+T45tGruxc+HrUOqJJlyQSV33m728Cme4+vt8/SWrU";
-        assert_eq!(id.0, want_id, "livekit_identity_for test vector mismatch");
+        assert_eq!(
+            id.0, want_id,
+            "legacy_livekit_identity_for test vector mismatch"
+        );
     }
 
     /// Verifies that the same inputs always produce the same identity.
     #[test]
-    fn test_livekit_identity_for_deterministic() {
-        let id1 = livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
-        let id2 = livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
+    fn test_legacy_livekit_identity_for_deterministic() {
+        let id1 = legacy_livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
+        let id2 = legacy_livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
         assert_eq!(id1, id2, "same inputs produced different identities");
     }
 
     /// Verifies that different inputs produce different identities.
     #[test]
-    fn test_livekit_identity_for_sample_inputs_distinct() {
+    fn test_legacy_livekit_identity_for_sample_inputs_distinct() {
         let cases = [
             ("@alice:example.com", "DEV1", "mem1"),
             ("@bob:example.com", "DEV1", "mem1"),
@@ -1493,7 +1544,7 @@ mod tests {
         ];
         let mut seen: HashMap<LiveKitIdentity, (&str, &str, &str)> = HashMap::new();
         for c in cases {
-            let id = livekit_identity_for(c.0, c.1, c.2);
+            let id = legacy_livekit_identity_for(c.0, c.1, c.2);
             if let Some(prev) = seen.get(&id) {
                 panic!("collision: {c:?} and {prev:?} produced the same identity {id}");
             }
@@ -1503,10 +1554,40 @@ mod tests {
 
     /// Verifies that the identity is a non-empty unpadded Base64 string.
     #[test]
-    fn test_livekit_identity_for_format() {
-        let id = livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
+    fn test_legacy_livekit_identity_for_format() {
+        let id = legacy_livekit_identity_for("@user:example.com", "DEVICEID", "memberID");
         assert!(!id.0.is_empty(), "identity is empty");
         assert!(!id.0.contains('='), "identity contains padding '=': {id}");
+    }
+
+    // ── livekit_identity_for ──────────────────────────────────────────────────
+
+    /// Verifies against the test vector from the spec proposal to ensure
+    /// compliance with the expected hashing and encoding scheme.
+    /// https://github.com/hughns/matrix-spec-proposals/blob/hughns/matrixrtc-livekit/proposals/4195-matrixrtc-livekit.md#appendix-hash-derivation-test-vectors
+    #[test]
+    fn test_livekit_identity_for_test_vector() {
+        let id = livekit_identity_for("@alice:example.com", "memberABC");
+        let want_id = "M3VnsLXrkbxIDINXO64u8PZzFyD9ZYFiQULR2dshWYs";
+        assert_eq!(id.0, want_id, "livekit_identity_for test vector mismatch");
+    }
+
+    /// Verifies that different inputs produce different identities.
+    #[test]
+    fn test_livekit_identity_for_sample_inputs_distinct() {
+        let cases = [
+            ("@alice:example.com", "mem1"),
+            ("@bob:example.com", "mem1"),
+            ("@alice:example.com", "mem2"),
+        ];
+        let mut seen: HashMap<LiveKitIdentity, (&str, &str)> = HashMap::new();
+        for c in cases {
+            let id = livekit_identity_for(c.0, c.1);
+            if let Some(prev) = seen.get(&id) {
+                panic!("collision: {c:?} and {prev:?} produced the same identity {id}");
+            }
+            seen.insert(id, c);
+        }
     }
 
     // ── matrix_server_name ───────────────────────────────────────────────────
@@ -2013,6 +2094,39 @@ mod tests {
         assert_eq!(err.status(), 404);
     }
 
+    /// Verifies that a 409 for ActionSend is treated as success (MSC4140:
+    /// delayed event already cancelled) and returns the status code without
+    /// error.
+    #[tokio::test]
+    async fn test_execute_delayed_event_action_409_on_send() {
+        let router = Router::new().route("/{*path}", any(|| async { http::StatusCode::CONFLICT }));
+        let server = spawn_http_server(router).await;
+
+        let status = exec(&server.url, "cancelled-id", DelayEventAction::Send)
+            .await
+            .expect("expected no error for ActionSend 409");
+        assert_eq!(status, 409);
+    }
+
+    /// Verifies that a 409 for ActionRestart (MSC4140: delayed event already
+    /// sent or cancelled) returns the permanent DelayedEventNotFound error so
+    /// the retry loop stops instead of retrying a conflict that never clears.
+    #[tokio::test]
+    async fn test_execute_delayed_event_action_409_on_restart() {
+        let router = Router::new().route("/{*path}", any(|| async { http::StatusCode::CONFLICT }));
+        let server = spawn_http_server(router).await;
+
+        let err = exec(&server.url, "finalised-id", DelayEventAction::Restart)
+            .await
+            .expect_err("expected DelayedEventNotFound for 409 on ActionRestart");
+        assert!(
+            err.is_delayed_event_not_found(),
+            "expected DelayedEventNotFound, got {err:?}"
+        );
+        assert_eq!(err.classify(), ErrorClass::Permanent);
+        assert_eq!(err.status(), 409);
+    }
+
     /// Verifies that a 429 response with a Retry-After header (both seconds
     /// and HTTP-date formats) is converted to a RetryAfter error with the
     /// correct duration.
@@ -2406,7 +2520,7 @@ mod tests {
         assert_eq!(captured.user_id, None);
     }
 
-    // ── is_user_joined ───────────────────────────────────────────────────────
+    // ── is_joined ────────────────────────────────────────────────────────────
 
     /// A homeserver stub serving /is_joined at the unstable MSC4502 path.
     struct IsJoinedServer {
@@ -2436,14 +2550,14 @@ mod tests {
     /// The unstable MSC4502 endpoint is always used, regardless of what the
     /// homeserver advertises.
     #[tokio::test]
-    async fn test_is_user_joined_uses_unstable_endpoint() {
+    async fn test_is_joined_uses_unstable_endpoint() {
         let hs = spawn_is_joined_server(true).await;
 
         let joined = RealDeps::default()
-            .is_user_joined(
+            .is_joined(
                 &CsApiUrl(hs.server.url.clone()),
                 "!room:example.com",
-                "@alice:example.com",
+                JoinedSubject::User("@alice:example.com"),
                 "as_token",
             )
             .await
@@ -2463,14 +2577,14 @@ mod tests {
 
     /// `joined: false` responses propagate as Ok(false), not an error.
     #[tokio::test]
-    async fn test_is_user_joined_not_joined() {
+    async fn test_is_joined_not_joined() {
         let hs = spawn_is_joined_server(false).await;
 
         let joined = RealDeps::default()
-            .is_user_joined(
+            .is_joined(
                 &CsApiUrl(hs.server.url.clone()),
                 "!room:example.com",
-                "@alice:example.com",
+                JoinedSubject::User("@alice:example.com"),
                 "as_token",
             )
             .await
@@ -2480,7 +2594,7 @@ mod tests {
 
     /// A non-2xx response from the is_joined endpoint itself surfaces as an error.
     #[tokio::test]
-    async fn test_is_user_joined_http_error() {
+    async fn test_is_joined_http_error() {
         let router = Router::new().route(
             "/_matrix/client/unstable/io.element.msc4502/rooms/{room_id}/is_joined",
             any(|| async { http::StatusCode::FORBIDDEN }),
@@ -2488,10 +2602,10 @@ mod tests {
         let server = spawn_http_server(router).await;
 
         let err = RealDeps::default()
-            .is_user_joined(
+            .is_joined(
                 &CsApiUrl(server.url.clone()),
                 "!room:example.com",
-                "@alice:example.com",
+                JoinedSubject::User("@alice:example.com"),
                 "as_token",
             )
             .await
@@ -2499,16 +2613,16 @@ mod tests {
         assert!(err.contains("403"), "unexpected error message: {err}");
     }
 
-    /// The request is shaped correctly: it uses `mxid`.
+    /// A user subject is shaped correctly: it uses `mxid`.
     #[tokio::test]
-    async fn test_is_user_joined_request_shape() {
+    async fn test_is_joined_user_request_shape() {
         let hs = spawn_is_joined_server(true).await;
 
         let _ = RealDeps::default()
-            .is_user_joined(
+            .is_joined(
                 &CsApiUrl(hs.server.url.clone()),
                 "!room:example.com",
-                "@alice:example.com",
+                JoinedSubject::User("@alice:example.com"),
                 "the_as_token",
             )
             .await
@@ -2530,6 +2644,35 @@ mod tests {
                 .get(http::header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok()),
             Some("Bearer the_as_token"),
+        );
+    }
+
+    /// A user subject is shaped correctly: it uses `server_name`.
+    #[tokio::test]
+    async fn test_is_joined_server_request_shape() {
+        let hs = spawn_is_joined_server(true).await;
+
+        let joined = RealDeps::default()
+            .is_joined(
+                &CsApiUrl(hs.server.url.clone()),
+                "!room:example.com",
+                JoinedSubject::Server("other.example.org"),
+                "the_as_token",
+            )
+            .await
+            .expect("unexpected error");
+        assert!(joined);
+
+        let requests = hs.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let (uri, _) = &requests[0];
+        assert!(
+            uri.contains("server_name=other.example.org"),
+            "expected server_name query param, got {uri:?}"
+        );
+        assert!(
+            !uri.contains("mxid="),
+            "expected no mxid query param, got {uri:?}"
         );
     }
 

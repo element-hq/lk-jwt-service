@@ -185,7 +185,6 @@ async fn delegate_delayed_leave_cs_succeeds() {
     const DELAY_MS: u64 = 5_000;
     const SLOT_ID: &str = "m.call#ROOM";
     const MEMBER_ID: &str = "e2e-member";
-    const DEVICE_ID: &str = "E2EDEVICE";
     const MESSAGE_BODY: &str = "e2e-delegate-delayed-leave-proof";
 
     // Schedule the delayed event the client will hand over.
@@ -204,7 +203,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
         .delayed_since_ts;
 
     // Connect to the SFU as the participant the delegation will name. The
-    // token is issued for the same member fields, so it carries the LiveKit
+    // token is issued for the same member ID, so it carries the LiveKit
     // identity the service will watch.
     let jwt = get_livekit_token(
         SYNAPSE_A_CS_API_URL,
@@ -213,7 +212,6 @@ async fn delegate_delayed_leave_cs_succeeds() {
         &room_id,
         SLOT_ID,
         MEMBER_ID,
-        DEVICE_ID,
     )
     .await;
     let participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &jwt).await;
@@ -230,10 +228,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
             "url": LIVEKIT_A_URL,
             "room_id": room_id,
             "slot_id": SLOT_ID,
-            "member": {
-                "id": MEMBER_ID,
-                "claimed_device_id": DEVICE_ID,
-            },
+            "member_id": MEMBER_ID,
             "delay_id": delay_id,
         }))
         .send()

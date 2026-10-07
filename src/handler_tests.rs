@@ -40,7 +40,8 @@ type ExecuteDelayedEventActionFn = Box<
 >;
 type GetDelayedEventDelayFn =
     Box<dyn Fn(&CsApiUrl, &str, &str, &str, &str) -> Result<Duration, ActionError> + Send + Sync>;
-type IsJoinedFn = Box<dyn Fn(&CsApiUrl, &str, &str) -> Result<bool, String> + Send + Sync>;
+type IsJoinedFn =
+    Box<dyn Fn(&CsApiUrl, &str, JoinedSubject<'_>) -> Result<bool, String> + Send + Sync>;
 type RequestGetTokenViaFederationFn = Box<
     dyn Fn(&CsApiUrl, &str, &GetTokenSsRequest) -> Result<GetTokenSsResponse, FederationTokenError>
         + Send
@@ -58,7 +59,7 @@ struct HandlerTestDeps {
     participant_exists_fn: Option<ParticipantExistsFn>,
     execute_delayed_event_action_fn: Option<ExecuteDelayedEventActionFn>,
     get_delayed_event_delay_fn: Option<GetDelayedEventDelayFn>,
-    is_user_joined_fn: Option<IsJoinedFn>,
+    is_joined_fn: Option<IsJoinedFn>,
     request_get_token_via_federation_fn: Option<RequestGetTokenViaFederationFn>,
 }
 
@@ -157,16 +158,16 @@ impl Deps for HandlerTestDeps {
         }
     }
 
-    async fn is_user_joined(
+    async fn is_joined(
         &self,
         cs_api_url: &CsApiUrl,
         room_id: &str,
-        mxid: &str,
+        subject: JoinedSubject<'_>,
         _as_token: &str,
     ) -> Result<bool, String> {
-        match &self.is_user_joined_fn {
-            Some(f) => f(cs_api_url, room_id, mxid),
-            None => panic!("is_user_joined not mocked in HandlerTestDeps"),
+        match &self.is_joined_fn {
+            Some(f) => f(cs_api_url, room_id, subject),
+            None => panic!("is_joined not mocked in HandlerTestDeps"),
         }
     }
 
@@ -359,7 +360,11 @@ fn new_delegation_app_service_handler(deps: HandlerTestDeps) -> Arc<Handler> {
 }
 
 /// Creates a Handler configured for testing delegate_delayed_leave C-S requests.
-fn new_delegate_delayed_leave_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+fn new_delegate_delayed_leave_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handler> {
+    if deps.get_delayed_event_delay_fn.is_none() {
+        deps.get_delayed_event_delay_fn =
+            Some(Box::new(|_, _, _, _, _| Ok(Duration::from_secs(30))));
+    }
     Handler::new(
         default_auth(),
         vec!["example.com".into()],
@@ -444,11 +449,7 @@ fn valid_get_token_cs_request() -> GetTokenCsRequest {
         slot_id: "m.call#ROOM".into(),
         url: LIVEKIT_URL.into(),
         server_name: String::new(),
-        member: MatrixRtcMemberType {
-            id: "member-id".into(),
-            claimed_user_id: GET_TOKEN_CS_MXID.into(),
-            claimed_device_id: "device-id".into(),
-        },
+        member_id: "member-id".into(),
     }
 }
 
@@ -480,11 +481,7 @@ fn valid_get_token_ss_request() -> GetTokenSsRequest {
         user_id: "@user:origin.example.org".into(),
         room_id: "!testRoom:example.com".into(),
         slot_id: "m.call#ROOM".into(),
-        member: MatrixRtcMemberType {
-            id: "member-id".into(),
-            claimed_user_id: String::new(),
-            claimed_device_id: "device-id".into(),
-        },
+        member_id: "member-id".into(),
     }
 }
 
@@ -564,13 +561,8 @@ fn valid_delegate_delayed_leave_cs_request() -> DelegateDelayedLeaveCsRequest {
         url: default_auth().lk_url,
         room_id: "!testRoom:example.com".into(),
         slot_id: "m.call#ROOM".into(),
-        member: MatrixRtcMemberType {
-            id: "member-id".into(),
-            claimed_user_id: DELEGATE_DELAYED_LEAVE_CS_MXID.into(),
-            claimed_device_id: "device-id".into(),
-        },
+        member_id: "member-id".into(),
         delay_id: "syd_delay123".into(),
-        delay_timeout: Some(30000), // 30 s in ms
     }
 }
 
@@ -686,6 +678,11 @@ async fn test_get_join_token() {
         claims["video"]["canPublish"],
         serde_json::Value::Bool(true),
         "canPublish must reflect the passed-in flag"
+    );
+    assert_eq!(
+        claims["video"]["hidden"],
+        serde_json::Value::Bool(false),
+        "hidden must be false"
     );
 }
 
@@ -2469,7 +2466,7 @@ async fn test_handle_get_token_cs_success() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -2490,13 +2487,20 @@ async fn test_handle_get_token_cs_success() {
     let response: GetTokenCsResponse =
         serde_json::from_slice(&body).expect("failed to decode response body");
     assert!(!response.jwt.is_empty(), "expected JWT to be non-empty");
+
+    let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
+    assert_eq!(
+        claims["video"]["hidden"],
+        serde_json::Value::Bool(false),
+        "hidden must be false"
+    );
     handler.close().await;
 }
 
-/// A mismatch between the X-Matrix-User-Identifier header and
-/// the claimed_user_id in the body does not affect the outcome.
+/// The LiveKit identity is derived from the X-Matrix-User-Identifier header
+/// and the `member_id` in the body only.
 #[tokio::test]
-async fn test_handle_get_token_cs_ignores_claimed_user_id_mismatch() {
+async fn test_handle_get_token_cs_identity_from_header_and_member_id() {
     const HEADER_MXID: &str = "@real:example.com";
     let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let create_called_clone = create_called.clone();
@@ -2504,27 +2508,26 @@ async fn test_handle_get_token_cs_ignores_claimed_user_id_mismatch() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
-        create_livekit_room_fn: Some(Box::new(move |_, matrix_user, _| {
+        is_joined_fn: is_joined_ok(true),
+        create_livekit_room_fn: Some(Box::new(move |_, matrix_user, identity| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
                 matrix_user, HEADER_MXID,
-                "expected identity derived from the header, not the body"
+                "expected user derived from the header"
+            );
+            assert_eq!(
+                *identity,
+                livekit_identity_for(HEADER_MXID, "member-id"),
+                "expected identity derived from the header and member_id"
             );
             Ok(())
         })),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
-    let body = marshal_get_token_cs_request(|r| {
-        r.member.claimed_user_id = "@attacker:example.com".into();
-    });
+    let body = marshal_get_token_cs_request(|_| {});
     let resp = send_request(&handler, post_get_token_cs_request(body, HEADER_MXID)).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "expected the claimed_user_id mismatch to be ignored"
-    );
+    assert_eq!(resp.status(), StatusCode::OK, "expected 200");
     assert!(
         create_called.load(std::sync::atomic::Ordering::SeqCst),
         "expected create_livekit_room to be called for full-access user"
@@ -2542,7 +2545,7 @@ async fn test_handle_get_token_cs_relays_foreign_server_name() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         request_get_token_via_federation_fn: request_get_token_via_federation_ok("remote-jwt"),
         create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2568,6 +2571,52 @@ async fn test_handle_get_token_cs_relays_foreign_server_name() {
     handler.close().await;
 }
 
+/// A `server_name` naming a homeserver that isn't joined to the room is
+/// rejected with 403 / M_FORBIDDEN without relaying the request.
+#[tokio::test]
+async fn test_handle_get_token_cs_target_server_not_joined() {
+    let fed_proxy_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fed_proxy_called_clone = fed_proxy_called.clone();
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_joined_fn: Some(Box::new(|_, _, subject| match subject {
+            JoinedSubject::User(_) => Ok(true),
+            JoinedSubject::Server(server_name) => {
+                assert_eq!(server_name, "other.example.org", "unexpected server");
+                Ok(false)
+            }
+        })),
+        request_get_token_via_federation_fn: Some(Box::new(move |_, _, _| {
+            fed_proxy_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(GetTokenSsResponse {
+                jwt: "remote-jwt".into(),
+            })
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_cs_handler(deps);
+    let body = marshal_get_token_cs_request(|r| {
+        r.server_name = "other.example.org".into();
+    });
+    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "expected 403 when the target server isn't joined to the room"
+    );
+    let body = body_bytes(resp).await;
+    let matrix_err: MatrixErrorBody =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(matrix_err.errcode, "M_FORBIDDEN", "unexpected error code");
+    assert!(
+        !fed_proxy_called.load(std::sync::atomic::Ordering::SeqCst),
+        "expected no federation relay when the target server isn't joined"
+    );
+    handler.close().await;
+}
+
 /// A transport error from the federation proxy surfaces as 502 / M_UNKNOWN.
 #[tokio::test]
 async fn test_handle_get_token_cs_federation_proxy_error() {
@@ -2575,7 +2624,7 @@ async fn test_handle_get_token_cs_federation_proxy_error() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
             Err(FederationTokenError::Other("boom".into()))
         })),
@@ -2605,7 +2654,7 @@ async fn test_handle_get_token_cs_federation_relays_forbidden() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
             Err(FederationTokenError::Destination {
                 status: 403,
@@ -2638,7 +2687,7 @@ async fn test_handle_get_token_cs_federation_relays_invalid_param() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
             Err(FederationTokenError::Destination {
                 status: 400,
@@ -2675,7 +2724,7 @@ async fn test_handle_get_token_cs_federation_403_with_unexpected_errcode() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
             Err(FederationTokenError::Destination {
                 status: 403,
@@ -2708,7 +2757,7 @@ async fn test_handle_get_token_cs_federation_other_destination_error() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         request_get_token_via_federation_fn: Some(Box::new(|_, _, _| {
             Err(FederationTokenError::Destination {
                 status: 500,
@@ -2759,9 +2808,7 @@ async fn test_handle_get_token_cs_missing_header() {
 async fn test_handle_get_token_cs_malformed_header() {
     const MALFORMED: &str = "not-an-mxid";
     let handler = new_get_token_cs_handler(HandlerTestDeps::default());
-    let body = marshal_get_token_cs_request(|r| {
-        r.member.claimed_user_id = MALFORMED.into();
-    });
+    let body = marshal_get_token_cs_request(|_| {});
     let resp = send_request(&handler, post_get_token_cs_request(body, MALFORMED)).await;
     assert_eq!(
         resp.status(),
@@ -2812,7 +2859,7 @@ async fn test_handle_get_token_cs_not_a_member() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(false),
+        is_joined_fn: is_joined_ok(false),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
@@ -2833,7 +2880,7 @@ async fn test_handle_get_token_cs_membership_check_error() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
+        is_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
         ..Default::default()
     };
     let handler = new_get_token_cs_handler(deps);
@@ -2873,12 +2920,12 @@ async fn test_process_get_token_cs_request() {
     struct Case {
         name: &'static str,
         header_mxid: &'static str,
-        claimed_user_id: &'static str,
         url: &'static str,
         server_name: &'static str,
         fail_resolution: bool,
         fail_membership: bool,
         is_member: bool,
+        is_server_joined: bool,
         fail_join_token: bool,
         fail_fed_proxy: bool,
         expect_create_room: bool,
@@ -2888,12 +2935,12 @@ async fn test_process_get_token_cs_request() {
     let base = Case {
         name: "",
         header_mxid: "@user:example.com",
-        claimed_user_id: "@user:example.com",
         url: LK_URL,
         server_name: "",
         fail_resolution: false,
         fail_membership: false,
         is_member: true,
+        is_server_joined: true,
         fail_join_token: false,
         fail_fed_proxy: false,
         expect_create_room: false,
@@ -2910,12 +2957,6 @@ async fn test_process_get_token_cs_request() {
             name: "URL mismatch",
             url: "wss://wrong.local",
             expect_error: true,
-            ..base
-        },
-        Case {
-            name: "claimed_user_id mismatch is ignored — identity comes from header",
-            claimed_user_id: "@user:faked.com",
-            expect_create_room: true,
             ..base
         },
         Case {
@@ -2970,6 +3011,20 @@ async fn test_process_get_token_cs_request() {
             ..base
         },
         Case {
+            name: "server_name naming a homeserver not joined to the room is rejected",
+            server_name: "other.example.org",
+            is_server_joined: false,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Server membership is not checked when handled locally",
+            server_name: "example.com",
+            is_server_joined: false,
+            expect_create_room: true,
+            ..base
+        },
+        Case {
             name: "Non-member is rejected even when server_name is foreign",
             server_name: "other.example.org",
             is_member: false,
@@ -2985,6 +3040,7 @@ async fn test_process_get_token_cs_request() {
         let fail_resolution = tc.fail_resolution;
         let fail_membership = tc.fail_membership;
         let is_member = tc.is_member;
+        let is_server_joined = tc.is_server_joined;
         let fail_fed_proxy = tc.fail_fed_proxy;
 
         let deps = HandlerTestDeps {
@@ -3000,11 +3056,22 @@ async fn test_process_get_token_cs_request() {
                     Ok(CsApiUrl("https://matrix.example.com".into()))
                 }
             })),
-            is_user_joined_fn: Some(Box::new(move |_, _, _| {
+            is_joined_fn: Some(Box::new(move |_, _, subject| {
                 if fail_membership {
-                    Err("boom".into())
-                } else {
-                    Ok(is_member)
+                    return Err("boom".into());
+                }
+                match subject {
+                    JoinedSubject::User(mxid) => {
+                        assert_eq!(mxid, "@user:example.com", "unexpected membership user");
+                        Ok(is_member)
+                    }
+                    JoinedSubject::Server(server_name) => {
+                        assert_eq!(
+                            server_name, "other.example.org",
+                            "unexpected membership server"
+                        );
+                        Ok(is_server_joined)
+                    }
                 }
             })),
             request_get_token_via_federation_fn: Some(Box::new(move |_, destination, _| {
@@ -3051,11 +3118,7 @@ async fn test_process_get_token_cs_request() {
             slot_id: "slot".into(),
             url: tc.url.into(),
             server_name: tc.server_name.into(),
-            member: MatrixRtcMemberType {
-                id: "device".into(),
-                claimed_user_id: tc.claimed_user_id.into(),
-                claimed_device_id: "dev".into(),
-            },
+            member_id: "member".into(),
         };
         let result = handler
             .process_get_token_cs_request(req, tc.header_mxid)
@@ -3232,7 +3295,7 @@ async fn test_handle_get_token_ss_url_mismatch() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         ..Default::default()
     };
     let handler = new_get_token_ss_handler(deps);
@@ -3261,7 +3324,7 @@ async fn test_handle_get_token_ss_success() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(true),
+        is_joined_fn: is_joined_ok(true),
         create_livekit_room_fn: Some(Box::new(move |_, _, _| {
             create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -3323,7 +3386,7 @@ async fn test_handle_get_token_ss_user_not_a_member() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: is_joined_ok(false),
+        is_joined_fn: is_joined_ok(false),
         ..Default::default()
     };
     let handler = new_get_token_ss_handler(deps);
@@ -3341,6 +3404,38 @@ async fn test_handle_get_token_ss_user_not_a_member() {
     handler.close().await;
 }
 
+/// If this server isn't joined to the room, the request is rejected even if
+/// the requesting user appears to be a member.
+#[tokio::test]
+async fn test_handle_get_token_ss_server_not_joined() {
+    let deps = HandlerTestDeps {
+        resolve_cs_api_url_fn: Some(Box::new(|_| {
+            Ok(CsApiUrl("https://matrix.example.com".into()))
+        })),
+        is_joined_fn: Some(Box::new(|_, _, subject| {
+            Ok(matches!(subject, JoinedSubject::User(_)))
+        })),
+        ..Default::default()
+    };
+    let handler = new_get_token_ss_handler(deps);
+    let body = marshal_get_token_ss_request(|_| {});
+    let resp = send_request(
+        &handler,
+        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "expected 403 when this server isn't joined to the room"
+    );
+    let body = body_bytes(resp).await;
+    let matrix_err: MatrixErrorBody =
+        serde_json::from_slice(&body).expect("failed to decode response body");
+    assert_eq!(matrix_err.errcode, "M_FORBIDDEN", "unexpected error code");
+    handler.close().await;
+}
+
 /// A transport failure while checking room membership surfaces as 502.
 #[tokio::test]
 async fn test_handle_get_token_ss_membership_check_error() {
@@ -3348,7 +3443,7 @@ async fn test_handle_get_token_ss_membership_check_error() {
         resolve_cs_api_url_fn: Some(Box::new(|_| {
             Ok(CsApiUrl("https://matrix.example.com".into()))
         })),
-        is_user_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
+        is_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
         ..Default::default()
     };
     let handler = new_get_token_ss_handler(deps);
@@ -3403,6 +3498,7 @@ async fn test_process_get_token_ss_request() {
         fail_resolution: bool,
         fail_membership: bool,
         is_member: bool,
+        is_server_joined: bool,
         fail_join_token: bool,
         expect_create_room: bool,
         expect_error: bool,
@@ -3415,6 +3511,7 @@ async fn test_process_get_token_ss_request() {
         fail_resolution: false,
         fail_membership: false,
         is_member: true,
+        is_server_joined: true,
         fail_join_token: false,
         expect_create_room: false,
         expect_error: false,
@@ -3444,6 +3541,12 @@ async fn test_process_get_token_ss_request() {
             ..base
         },
         Case {
+            name: "Own server not joined to the room",
+            is_server_joined: false,
+            expect_error: true,
+            ..base
+        },
+        Case {
             name: "Membership check transport error",
             fail_membership: true,
             expect_error: true,
@@ -3465,6 +3568,7 @@ async fn test_process_get_token_ss_request() {
         let fail_resolution = tc.fail_resolution;
         let fail_membership = tc.fail_membership;
         let is_member = tc.is_member;
+        let is_server_joined = tc.is_server_joined;
 
         let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let create_called_clone = create_called.clone();
@@ -3477,11 +3581,22 @@ async fn test_process_get_token_ss_request() {
                     Ok(CsApiUrl("https://matrix.example.com".into()))
                 }
             })),
-            is_user_joined_fn: Some(Box::new(move |_, _, _| {
+            is_joined_fn: Some(Box::new(move |_, _, subject| {
                 if fail_membership {
-                    Err("boom".into())
-                } else {
-                    Ok(is_member)
+                    return Err("boom".into());
+                }
+                match subject {
+                    JoinedSubject::User(user_id) => {
+                        assert_eq!(
+                            user_id, "@user:origin.example.org",
+                            "unexpected membership user"
+                        );
+                        Ok(is_member)
+                    }
+                    JoinedSubject::Server(server_name) => {
+                        assert_eq!(server_name, OWN_SERVER, "unexpected membership server");
+                        Ok(is_server_joined)
+                    }
                 }
             })),
             create_livekit_room_fn: Some(Box::new(move |_, _, _| {
@@ -3519,11 +3634,7 @@ async fn test_process_get_token_ss_request() {
             user_id: tc.user_id.into(),
             room_id: "!room:example.com".into(),
             slot_id: "slot".into(),
-            member: MatrixRtcMemberType {
-                id: "device".into(),
-                claimed_user_id: String::new(),
-                claimed_device_id: "dev".into(),
-            },
+            member_id: "member".into(),
         };
         let result = handler.process_get_token_ss_request(&req, tc.origin).await;
         if tc.expect_error {
@@ -4434,9 +4545,12 @@ async fn test_process_delegate_delayed_leave_cs_resolves_local_homeserver() {
 /// as 400 M_BAD_JSON carrying the creation error.
 #[tokio::test]
 async fn test_process_delegate_delayed_leave_cs_invalid_delay_timeout() {
-    let handler = new_delegate_delayed_leave_cs_handler(HandlerTestDeps::default());
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = Some(0); // invalid — would be rejected by request parsing, too
+    let deps = HandlerTestDeps {
+        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| Ok(Duration::ZERO))),
+        ..Default::default()
+    };
+    let handler = new_delegate_delayed_leave_cs_handler(deps);
+    let req = valid_delegate_delayed_leave_cs_request();
 
     let err = handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
@@ -4505,11 +4619,10 @@ async fn test_process_delegate_delayed_leave_cs_restart_uses_identity_assertion(
     handler.close().await;
 }
 
-/// A request without a delay timeout makes the service look the delay up on
-/// the homeserver, asserting the caller's identity and the request's
+/// The service looks the delay up on the homeserver, asserting the caller's identity and the request's
 /// `room_id` as it does so.
 #[tokio::test]
-async fn test_process_delegate_delayed_leave_cs_looks_up_missing_delay_timeout() {
+async fn test_process_delegate_delayed_leave_cs_looks_up_delay_timeout() {
     /// (CS API URL, delay ID, room ID, as_token, user_id) of the recorded lookup.
     type Lookup = (String, String, String, String, String);
     let looked_up: Arc<Mutex<Option<Lookup>>> = Arc::new(Mutex::new(None));
@@ -4534,8 +4647,7 @@ async fn test_process_delegate_delayed_leave_cs_looks_up_missing_delay_timeout()
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = None;
+    let req = valid_delegate_delayed_leave_cs_request();
 
     handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
@@ -4582,8 +4694,7 @@ async fn test_process_delegate_delayed_leave_cs_looked_up_delay_drives_the_job()
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = None;
+    let req = valid_delegate_delayed_leave_cs_request();
 
     handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
@@ -4600,31 +4711,6 @@ async fn test_process_delegate_delayed_leave_cs_looked_up_delay_drives_the_job()
     handler.close().await;
 }
 
-/// A delay timeout in the request is used as-is — no lookup is attempted.
-/// The mock panics if called.
-#[tokio::test]
-async fn test_process_delegate_delayed_leave_cs_skips_lookup_when_delay_timeout_given() {
-    let deps = HandlerTestDeps {
-        resolve_cs_api_url_fn: Some(Box::new(|_| {
-            Ok(CsApiUrl("https://matrix-client.example.com".into()))
-        })),
-        participant_exists_fn: participant_exists_block_until_cancelled(),
-        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| {
-            panic!("the delay must not be looked up when the request carries one")
-        })),
-        ..Default::default()
-    };
-    let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let req = valid_delegate_delayed_leave_cs_request();
-    assert!(req.delay_timeout.is_some());
-
-    handler
-        .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
-        .await
-        .expect("unexpected error");
-    handler.close().await;
-}
-
 /// An unknown delay_id is rejected as HTTP 400 / M_INVALID_PARAM.
 #[tokio::test]
 async fn test_process_delegate_delayed_leave_cs_delay_lookup_not_found() {
@@ -4638,8 +4724,7 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_not_found() {
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = None;
+    let req = valid_delegate_delayed_leave_cs_request();
 
     let err = handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
@@ -4667,8 +4752,7 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_unavailable() {
         ..Default::default()
     };
     let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let mut req = valid_delegate_delayed_leave_cs_request();
-    req.delay_timeout = None;
+    let req = valid_delegate_delayed_leave_cs_request();
 
     let err = handler
         .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)

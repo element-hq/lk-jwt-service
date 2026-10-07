@@ -298,9 +298,17 @@ pub fn livekit_room_alias(matrix_room: &str, slot_id: &str) -> String {
     STANDARD_NO_PAD.encode(Sha256::digest(marshalled))
 }
 
-pub fn livekit_identity(matrix_id: &str, device_id: &str, member_id: &str) -> String {
+/// The LiveKit identity used by the legacy endpoints.
+pub fn legacy_livekit_identity(matrix_id: &str, device_id: &str, member_id: &str) -> String {
     let marshalled = serde_json::to_vec(&[matrix_id, device_id, member_id])
         .expect("string arrays always serialize");
+    STANDARD_NO_PAD.encode(Sha256::digest(marshalled))
+}
+
+/// The LiveKit identity used by the `/rtc/livekit` endpoints.
+pub fn livekit_identity(matrix_id: &str, member_id: &str) -> String {
+    let marshalled =
+        serde_json::to_vec(&[matrix_id, member_id]).expect("string arrays always serialize");
     STANDARD_NO_PAD.encode(Sha256::digest(marshalled))
 }
 

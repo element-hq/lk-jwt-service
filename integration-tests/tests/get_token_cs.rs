@@ -9,6 +9,7 @@ use lk_jwt_service_integration_tests::{
     DEFAULT_LK_URL, FakeHomeserver, FakeSfu, Service, ServiceConfig, decode_livekit_jwt,
     expect_fed_proxy_request, expect_is_joined_request, expect_matrix_error,
     expect_no_fed_proxy_requests, expect_no_is_joined_requests, expect_no_user_info_lookups,
+    livekit_identity,
 };
 use serde_json::{Value, json};
 
@@ -30,16 +31,12 @@ fn app_service_env_with_hs_server_name(hs_server_name: &str) -> HashMap<String, 
 }
 
 /// Return a valid /rtc/livekit/get_token C-S request body.
-fn get_token_cs_request(user_id: &str, lk_url: &str) -> Value {
+fn get_token_cs_request(lk_url: &str) -> Value {
     json!({
         "url": lk_url,
         "room_id": "!room:example.com",
         "slot_id": "m.call#",
-        "member": {
-            "id": "member-1",
-            "claimed_user_id": user_id,
-            "claimed_device_id": "DEVICE",
-        },
+        "member_id": "member-1",
     })
 }
 
@@ -51,11 +48,7 @@ fn expected_relayed_body(user_id: &str, lk_url: &str) -> Value {
         "url": lk_url,
         "room_id": "!room:example.com",
         "slot_id": "m.call#",
-        "member": {
-            "id": "member-1",
-            "claimed_user_id": user_id,
-            "claimed_device_id": "DEVICE",
-        },
+        "member_id": "member-1",
     })
 }
 
@@ -106,7 +99,7 @@ async fn missing_hs_token() {
 
     let (status, body) = post_get_token_cs_as(
         &svc,
-        get_token_cs_request("@alice:example.com", DEFAULT_LK_URL).to_string(),
+        get_token_cs_request(DEFAULT_LK_URL).to_string(),
         Some("@alice:example.com"),
         None,
     )
@@ -130,7 +123,7 @@ async fn wrong_hs_token() {
 
     let (status, body) = post_get_token_cs_as(
         &svc,
-        get_token_cs_request("@alice:example.com", DEFAULT_LK_URL).to_string(),
+        get_token_cs_request(DEFAULT_LK_URL).to_string(),
         Some("@alice:example.com"),
         Some("not_the_hs_token"),
     )
@@ -152,12 +145,8 @@ async fn missing_header() {
     })
     .await;
 
-    let (status, body) = post_get_token_cs(
-        &svc,
-        get_token_cs_request("@alice:example.com", DEFAULT_LK_URL).to_string(),
-        None,
-    )
-    .await;
+    let (status, body) =
+        post_get_token_cs(&svc, get_token_cs_request(DEFAULT_LK_URL).to_string(), None).await;
 
     expect_matrix_error(status, &body, 401, "M_UNAUTHORIZED");
     expect_no_user_info_lookups(&hs);
@@ -174,17 +163,12 @@ async fn malformed_header() {
     })
     .await;
 
-    let request = json!({
-        "room_id": "!room:example.com",
-        "slot_id": "m.call#",
-        "url": DEFAULT_LK_URL,
-        "member": {
-            "id": "member-1",
-            "claimed_user_id": "not-an-mxid",
-            "claimed_device_id": "DEVICE",
-        },
-    });
-    let (status, body) = post_get_token_cs(&svc, request.to_string(), Some("not-an-mxid")).await;
+    let (status, body) = post_get_token_cs(
+        &svc,
+        get_token_cs_request(DEFAULT_LK_URL).to_string(),
+        Some("not-an-mxid"),
+    )
+    .await;
     expect_matrix_error(status, &body, 400, "M_INVALID_PARAM");
 }
 
@@ -202,11 +186,7 @@ async fn url_mismatch() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request(
-            "@alice:example.com",
-            "wss://not-the-configured-sfu.example.com",
-        )
-        .to_string(),
+        get_token_cs_request("wss://not-the-configured-sfu.example.com").to_string(),
         Some("@alice:example.com"),
     )
     .await;
@@ -227,7 +207,7 @@ async fn missing_url() {
     })
     .await;
 
-    let mut request = get_token_cs_request("@alice:example.com", DEFAULT_LK_URL);
+    let mut request = get_token_cs_request(DEFAULT_LK_URL);
     request["url"] = json!("");
     let (status, body) =
         post_get_token_cs(&svc, request.to_string(), Some("@alice:example.com")).await;
@@ -253,7 +233,7 @@ async fn not_a_room_member() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request(&user.user_id, DEFAULT_LK_URL).to_string(),
+        get_token_cs_request(DEFAULT_LK_URL).to_string(),
         Some(&user.user_id),
     )
     .await;
@@ -278,7 +258,7 @@ async fn unresolvable_cs_api() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request("@alice:example.com", DEFAULT_LK_URL).to_string(),
+        get_token_cs_request(DEFAULT_LK_URL).to_string(),
         Some("@alice:example.com"),
     )
     .await;
@@ -348,7 +328,7 @@ async fn no_server_name_success() {
 
     let (status, body) = post_get_token_cs(
         &svc,
-        get_token_cs_request(&user.user_id, sfu.url()).to_string(),
+        get_token_cs_request(sfu.url()).to_string(),
         Some(&user.user_id),
     )
     .await;
@@ -359,6 +339,10 @@ async fn no_server_name_success() {
     let jwt = response["jwt"].as_str().unwrap_or_default();
 
     let claims = decode_livekit_jwt(jwt);
+    assert_eq!(
+        claims["sub"].as_str(),
+        Some(livekit_identity(&user.user_id, "member-1").as_str())
+    );
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
@@ -366,6 +350,7 @@ async fn no_server_name_success() {
         claims["video"]["canUpdateOwnMetadata"].as_bool(),
         Some(true)
     );
+    assert_eq!(claims["video"]["hidden"].as_bool(), Some(false));
 
     expect_is_joined_request(&hs, "!room:example.com", &user.user_id, AS_TOKEN);
 
@@ -394,7 +379,7 @@ async fn server_name_matching_own_hs_server_name_success() {
     })
     .await;
 
-    let mut request = get_token_cs_request(&user.user_id, sfu.url());
+    let mut request = get_token_cs_request(sfu.url());
     request["server_name"] = json!(hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -432,8 +417,7 @@ async fn foreign_server_name_is_relayed_via_federation_proxy() {
 
     // The `url` deliberately does not match this deployment's own SFU: the
     // URL check only applies to locally-minted tokens.
-    let mut request =
-        get_token_cs_request(&user.user_id, "wss://not-our-configured-sfu.example.com");
+    let mut request = get_token_cs_request("wss://not-our-configured-sfu.example.com");
     request["server_name"] = json!(destination_hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -481,7 +465,7 @@ async fn non_member_is_rejected_even_with_foreign_server_name() {
     })
     .await;
 
-    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
+    let mut request = get_token_cs_request(DEFAULT_LK_URL);
     request["server_name"] = json!("other.example.org");
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -512,7 +496,7 @@ async fn federation_proxy_forbidden_is_relayed_to_client() {
     })
     .await;
 
-    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
+    let mut request = get_token_cs_request(DEFAULT_LK_URL);
     request["server_name"] = json!(destination_hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -548,7 +532,7 @@ async fn federation_proxy_invalid_param_is_relayed_to_client() {
     })
     .await;
 
-    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
+    let mut request = get_token_cs_request(DEFAULT_LK_URL);
     request["server_name"] = json!(destination_hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -581,7 +565,7 @@ async fn federation_proxy_other_destination_error_surfaces_as_502() {
     })
     .await;
 
-    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
+    let mut request = get_token_cs_request(DEFAULT_LK_URL);
     request["server_name"] = json!(destination_hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 
@@ -613,7 +597,7 @@ async fn federation_proxy_403_with_unexpected_errcode_surfaces_as_502() {
     })
     .await;
 
-    let mut request = get_token_cs_request(&user.user_id, DEFAULT_LK_URL);
+    let mut request = get_token_cs_request(DEFAULT_LK_URL);
     request["server_name"] = json!(destination_hs.server_name());
     let (status, body) = post_get_token_cs(&svc, request.to_string(), Some(&user.user_id)).await;
 

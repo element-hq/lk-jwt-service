@@ -33,9 +33,9 @@ use crate::delayed_event_manager::{
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::helper::new_unique_id;
 use crate::helper::{
-    CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_SS_PATH, LiveKitAuth,
-    LiveKitIdentity, LiveKitRoomAlias, UniqueId, livekit_identity_for, livekit_room_alias_for,
-    matrix_server_name,
+    CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_SS_PATH, JoinedSubject,
+    LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId, legacy_livekit_identity_for,
+    livekit_identity_for, livekit_room_alias_for, matrix_server_name,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::requests::AppservicePingTriggerRequest;
@@ -60,6 +60,7 @@ pub fn get_join_token(
         can_publish,
         can_subscribe: true,
         can_update_own_metadata: true,
+        hidden: false,
         room: room.0.clone(),
         ..Default::default()
     };
@@ -732,9 +733,7 @@ impl Handler {
             })
     }
 
-    /// Looks up the delay of `delay_id` on the homeserver, for delegation
-    /// requests that do not carry one. Also verifies that the delayed event
-    /// was scheduled in `room_id`.
+    /// Looks up the delay of `delay_id` on the homeserver.
     async fn look_up_delay_timeout(
         &self,
         cs_api_url: &CsApiUrl,
@@ -832,6 +831,43 @@ impl Handler {
                 status: 400,
                 errcode: "M_INVALID_PARAM".into(),
                 err: "The request `url` does not match this service's LiveKit URL".into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns 403 M_FORBIDDEN with `forbidden_msg` if `subject` isn't joined
+    /// to `room_id`, or 502 M_UNKNOWN if membership can't be verified.
+    async fn require_joined(
+        &self,
+        cs_api_url: &CsApiUrl,
+        room_id: &str,
+        subject: JoinedSubject<'_>,
+        forbidden_msg: &str,
+    ) -> Result<(), MatrixErrorResponse> {
+        let is_joined = self
+            .deps
+            .is_joined(
+                cs_api_url,
+                room_id,
+                subject,
+                &self.app_service_config.as_token,
+            )
+            .await
+            .map_err(|err| {
+                error!(%subject, room = %room_id, err = %err,
+                    "Handler: error checking room membership");
+                MatrixErrorResponse {
+                    status: 502,
+                    errcode: "M_UNKNOWN".into(),
+                    err: "Unable to verify room membership".into(),
+                }
+            })?;
+        if !is_joined {
+            return Err(MatrixErrorResponse {
+                status: 403,
+                errcode: "M_FORBIDDEN".into(),
+                err: forbidden_msg.into(),
             });
         }
         Ok(())
@@ -938,7 +974,7 @@ impl Handler {
             "Handler: got Matrix user info");
 
         let lk_identity =
-            livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
+            legacy_livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
         let token = self.get_join_token_or_internal_error(
@@ -1028,35 +1064,16 @@ impl Handler {
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
-        let is_member = self
-            .deps
-            .is_user_joined(
-                &cs_api_url,
-                &req.room_id,
-                mxid_header,
-                &self.app_service_config.as_token,
-            )
-            .await
-            .map_err(|err| {
-                error!(matrix_id = %mxid_header, room = %req.room_id, err = %err,
-                    "Handler: error checking room membership");
-                MatrixErrorResponse {
-                    status: 502,
-                    errcode: "M_UNKNOWN".into(),
-                    err: "Unable to verify room membership".into(),
-                }
-            })?;
-        if !is_member {
-            return Err(MatrixErrorResponse {
-                status: 403,
-                errcode: "M_FORBIDDEN".into(),
-                err: "The requesting user is not a member of the room".into(),
-            });
-        }
+        self.require_joined(
+            &cs_api_url,
+            &req.room_id,
+            JoinedSubject::User(mxid_header),
+            "The requesting user is not a member of the room",
+        )
+        .await?;
 
         if is_local {
-            let lk_identity =
-                livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
+            let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
             let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
             let token = self.get_join_token_or_internal_error(
@@ -1069,7 +1086,7 @@ impl Handler {
             self.create_livekit_room_or_internal_error(&lk_room_alias, mxid_header, &lk_identity)
                 .await?;
 
-            info!(matrix_id = %mxid_header, claimed_device_id = %req.member.claimed_device_id,
+            info!(matrix_id = %mxid_header, member_id = %req.member_id,
                 access = if is_local { "full" } else { "restricted" },
                 matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
                 lk_id = %lk_identity, room = %lk_room_alias,
@@ -1077,12 +1094,20 @@ impl Handler {
 
             Ok(GetTokenCsResponse { jwt: token })
         } else {
+            self.require_joined(
+                &cs_api_url,
+                &req.room_id,
+                JoinedSubject::Server(target_server_name),
+                "The target server is not joined to the room",
+            )
+            .await?;
+
             let ss_req = GetTokenSsRequest {
                 user_id: mxid_header.to_owned(),
                 url: req.url,
                 room_id: req.room_id,
                 slot_id: req.slot_id,
-                member: req.member,
+                member_id: req.member_id,
             };
             let resp = self
                 .deps
@@ -1133,36 +1158,25 @@ impl Handler {
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
-        let is_member = self
-            .deps
-            .is_user_joined(
-                &cs_api_url,
-                &req.room_id,
-                &req.user_id,
-                &self.app_service_config.as_token,
-            )
-            .await
-            .map_err(|err| {
-                error!(user_id = %req.user_id, room = %req.room_id, err = %err,
-                    "Handler: error checking room membership (app-service S-S)");
-                MatrixErrorResponse {
-                    status: 502,
-                    errcode: "M_UNKNOWN".into(),
-                    err: "Unable to verify room membership".into(),
-                }
-            })?;
-        if !is_member {
-            return Err(MatrixErrorResponse {
-                status: 403,
-                errcode: "M_FORBIDDEN".into(),
-                err: "The requesting user is not a member of the room".into(),
-            });
-        }
+        self.require_joined(
+            &cs_api_url,
+            &req.room_id,
+            JoinedSubject::Server(&self.app_service_config.hs_server_name),
+            "This server is not joined to the room",
+        )
+        .await?;
+
+        self.require_joined(
+            &cs_api_url,
+            &req.room_id,
+            JoinedSubject::User(&req.user_id),
+            "The requesting user is not a member of the room",
+        )
+        .await?;
 
         self.require_matching_lk_url(&req.url, "get_token_ss")?;
 
-        let lk_identity =
-            livekit_identity_for(&req.user_id, &req.member.claimed_device_id, &req.member.id);
+        let lk_identity = livekit_identity_for(&req.user_id, &req.member_id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
         // Federated participants relayed via the S-S API never get publish
@@ -1177,7 +1191,7 @@ impl Handler {
         self.create_livekit_room_or_internal_error(&lk_room_alias, &req.user_id, &lk_identity)
             .await?;
 
-        info!(user_id = %req.user_id, claimed_device_id = %req.member.claimed_device_id,
+        info!(user_id = %req.user_id, member_id = %req.member_id,
             origin = %origin_header, matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
             lk_id = %lk_identity, room = %lk_room_alias,
             "Handler: generated SFU access token (app-service S-S)");
@@ -1208,7 +1222,7 @@ impl Handler {
         }
 
         let lk_identity =
-            livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
+            legacy_livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
         // Verify that the Client-Server API can be resolved and prime the
@@ -1244,8 +1258,7 @@ impl Handler {
 
         self.require_matching_lk_url(&req.url, "delegate_delayed_leave_cs")?;
 
-        let lk_identity =
-            livekit_identity_for(mxid_header, &req.member.claimed_device_id, &req.member.id);
+        let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
         // Verify that the Client-Server API can be resolved and prime the
@@ -1254,14 +1267,9 @@ impl Handler {
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
-        // When no timeout is specified, try to read it by looking up the event on the server.
-        let delay_timeout = match req.delay_timeout {
-            Some(timeout) => Duration::from_millis(timeout.max(0) as u64),
-            None => {
-                self.look_up_delay_timeout(&cs_api_url, &req.delay_id, &req.room_id, mxid_header)
-                    .await?
-            }
-        };
+        let delay_timeout = self
+            .look_up_delay_timeout(&cs_api_url, &req.delay_id, &req.room_id, mxid_header)
+            .await?;
 
         info!(room = %lk_room_alias, lk_id = %lk_identity, delay_id = %req.delay_id,
             matrix_id = %mxid_header, delay_timeout = ?delay_timeout,
