@@ -78,6 +78,7 @@ async fn main() {
         },
         config.full_access_homeservers.clone(),
         config.app_service_config,
+        config.can_update_own_metadata,
         config.sanity_check_interval,
         config.cs_api_url_overrides.clone(),
         store,
@@ -97,6 +98,7 @@ async fn main() {
         LIVEKIT_FULL_ACCESS_HOMESERVERS = ?config.full_access_homeservers,
         SkipVerifyTLS = config.skip_verify_tls,
         SanityCheckInterval = %sanity_check_interval_display,
+        CanUpdateOwnMetadata = config.can_update_own_metadata,
         "Starting service"
     );
 

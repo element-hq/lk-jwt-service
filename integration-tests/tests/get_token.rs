@@ -287,8 +287,9 @@ async fn full_access_token() {
     assert_eq!(response["url"].as_str(), Some(sfu.url()));
     let jwt = response["jwt"].as_str().unwrap_or_default();
 
-    // The JWT should grant joining plus publishing, subscribing and
-    // updating the participant's own metadata.
+    // The JWT should grant joining plus publishing and subscribing but not
+    // updating the participant's own metadata, since
+    // LIVEKIT_CAN_UPDATE_OWN_METADATA is unset.
     let claims = decode_livekit_jwt(jwt);
     assert_eq!(claims["iss"].as_str(), Some(LIVEKIT_KEY));
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
@@ -296,7 +297,7 @@ async fn full_access_token() {
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
     assert_eq!(
         claims["video"]["canUpdateOwnMetadata"].as_bool(),
-        Some(true)
+        Some(false)
     );
     assert!(
         !claims["sub"].as_str().unwrap_or_default().is_empty(),
@@ -322,6 +323,41 @@ async fn full_access_token() {
 
     // The service should not have called /delayed_events.
     expect_no_delayed_event_requests(&hs);
+}
+
+#[tokio::test]
+async fn token_can_update_own_metadata() {
+    // Set up the homeserver and SFU.
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    let sfu = FakeSfu::new().await;
+
+    // Start the service with LIVEKIT_CAN_UPDATE_OWN_METADATA enabled.
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        extra_env: HashMap::from([(
+            "LIVEKIT_CAN_UPDATE_OWN_METADATA".to_owned(),
+            "true".to_owned(),
+        )]),
+        ..Default::default()
+    })
+    .await;
+
+    // Post a valid /get_token request.
+    let (status, body) = post_get_token(&svc, get_token_request(&hs, &user).to_string()).await;
+
+    // The request should succeed.
+    assert_eq!(status, 200, "body: {body}");
+
+    // The JWT should grant updating the participant's own metadata.
+    let response: Value = serde_json::from_str(&body).expect("response is not JSON");
+    let claims = decode_livekit_jwt(response["jwt"].as_str().unwrap_or_default());
+    assert_eq!(
+        claims["video"]["canUpdateOwnMetadata"].as_bool(),
+        Some(true)
+    );
 }
 
 #[tokio::test]
@@ -352,9 +388,10 @@ async fn remote_token() {
     assert_eq!(response["url"].as_str(), Some(sfu.url()));
     let jwt = response["jwt"].as_str().unwrap_or_default();
 
-    // The JWT should grant joining, subscribing and updating the
-    // participant's own metadata, but not publishing, since the homeserver
-    // is remote.
+    // The JWT should grant joining and subscribing, but not publishing,
+    // since the homeserver is remote. Updating the participant's own
+    // metadata isn't granted either, since LIVEKIT_CAN_UPDATE_OWN_METADATA
+    // is unset.
     let claims = decode_livekit_jwt(jwt);
     assert_eq!(claims["iss"].as_str(), Some(LIVEKIT_KEY));
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
@@ -362,7 +399,7 @@ async fn remote_token() {
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
     assert_eq!(
         claims["video"]["canUpdateOwnMetadata"].as_bool(),
-        Some(true)
+        Some(false)
     );
     assert!(
         !claims["sub"].as_str().unwrap_or_default().is_empty(),
