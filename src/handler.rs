@@ -53,14 +53,17 @@ pub fn get_join_token(
     room: &LiveKitRoomAlias,
     identity: &LiveKitIdentity,
     can_publish: bool,
+    can_update_own_metadata: bool,
+    can_publish_data: bool,
 ) -> Result<String, String> {
     let grants = VideoGrants {
         room_join: true,
         room_create: false,
         can_publish: Some(can_publish),
-        can_publish_data: Some(can_publish),
+        // Set explicitly since LiveKit falls back to canPublish when unset.
+        can_publish_data: Some(can_publish_data && can_publish),
         can_subscribe: Some(true),
-        can_update_own_metadata: Some(true),
+        can_update_own_metadata: Some(can_update_own_metadata),
         hidden: false,
         room: room.0.clone(),
         ..Default::default()
@@ -169,6 +172,11 @@ pub struct Handler {
     /// Whether the standalone endpoints verify room membership through the
     /// homeserver.
     verifies_legacy_membership: bool,
+    /// Whether issued tokens grant the canUpdateOwnMetadata permission.
+    can_update_own_metadata: bool,
+    /// Whether issued tokens grant the canPublishData permission to
+    /// participants who may publish.
+    can_publish_data: bool,
     /// The period between room-worker sanity checks. Zero disables the sanity
     /// check.
     sanity_check_interval: Duration,
@@ -188,10 +196,13 @@ pub struct Handler {
 }
 
 impl Handler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         lk_auth: LiveKitAuth,
         full_access_homeservers: Vec<String>,
         app_service_config: AppServiceConfig,
+        can_update_own_metadata: bool,
+        can_publish_data: bool,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
@@ -201,6 +212,8 @@ impl Handler {
             lk_auth,
             full_access_homeservers,
             app_service_config,
+            can_update_own_metadata,
+            can_publish_data,
             sanity_check_interval,
             cs_api_url_overrides,
             store,
@@ -213,10 +226,13 @@ impl Handler {
 
     /// Constructs a Handler without starting its actor loop, handing the
     /// loop's receiving ends to the caller.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_without_loop(
         lk_auth: LiveKitAuth,
         full_access_homeservers: Vec<String>,
         app_service_config: AppServiceConfig,
+        can_update_own_metadata: bool,
+        can_publish_data: bool,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
@@ -242,6 +258,8 @@ impl Handler {
             full_access_homeservers,
             app_service_config,
             verifies_legacy_membership,
+            can_update_own_metadata,
+            can_publish_data,
             sanity_check_interval,
             cs_api_url_overrides: Arc::new(cs_api_url_overrides),
             cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
@@ -814,6 +832,8 @@ impl Handler {
             lk_room_alias,
             lk_identity,
             can_publish,
+            self.can_update_own_metadata,
+            self.can_publish_data,
         )
         .map_err(|err| {
             error!(matrix_id, err = %err, "Handler: error getting LiveKit token");
