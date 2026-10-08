@@ -1966,6 +1966,49 @@ async fn test_handle_get_token_unauthorized_user() {
     handler.close().await;
 }
 
+/// Verifies that a userinfo response whose sub is on a different server than
+/// the one the token claims to be from (matrix_server_name) returns 401.
+#[tokio::test]
+async fn test_handle_get_token_sub_on_other_server() {
+    let deps = HandlerTestDeps {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@alice:example.com"),
+        ..Default::default()
+    };
+    let handler = new_get_token_handler(deps);
+    let body = marshal_sfu_request(|r| {
+        r.openid_token.matrix_server_name = "evil.com".into(); // != sub's server
+        r.member.claimed_user_id = "@alice:example.com".into(); // matches sub
+    });
+    let resp = send_request(&handler, post_json("/get_token", body)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 when the token subject is not on matrix_server_name"
+    );
+    handler.close().await;
+}
+
+/// Verifies that a userinfo response with a malformed sub (no server part)
+/// returns 401 rather than being accepted.
+#[tokio::test]
+async fn test_handle_get_token_malformed_sub() {
+    let deps = HandlerTestDeps {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("alice"),
+        ..Default::default()
+    };
+    let handler = new_get_token_handler(deps);
+    let body = marshal_sfu_request(|r| {
+        r.member.claimed_user_id = "alice".into(); // matches sub
+    });
+    let resp = send_request(&handler, post_json("/get_token", body)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 for a malformed token subject"
+    );
+    handler.close().await;
+}
+
 /// Verifies that a request from a homeserver that is not on the full-access
 /// list, with delayed-event delegation params, returns 400 / M_BAD_JSON.
 /// Delegation is gated on full-access; restricted users may join existing
@@ -3784,6 +3827,7 @@ async fn test_process_legacy_sfu_request() {
     struct Case {
         name: &'static str,
         matrix_id: &'static str,
+        matrix_server_name: &'static str,
         delay_id: &'static str,
         delay_timeout: i64,
         expect_join_token_error: bool,
@@ -3795,6 +3839,7 @@ async fn test_process_legacy_sfu_request() {
     let base = Case {
         name: "",
         matrix_id: "@user:example.com",
+        matrix_server_name: "example.com",
         delay_id: "",
         delay_timeout: 0,
         expect_join_token_error: false,
@@ -3812,6 +3857,7 @@ async fn test_process_legacy_sfu_request() {
         Case {
             name: "Restricted — all OK",
             matrix_id: "@user:other.com",
+            matrix_server_name: "other.com",
             ..base
         },
         Case {
@@ -3823,6 +3869,12 @@ async fn test_process_legacy_sfu_request() {
         Case {
             name: "Token key empty",
             expect_join_token_error: true,
+            expect_error: true,
+            ..base
+        },
+        Case {
+            name: "Sub on other server than token",
+            matrix_server_name: "other.com",
             expect_error: true,
             ..base
         },
@@ -3848,6 +3900,7 @@ async fn test_process_legacy_sfu_request() {
 
         let fail_exchange = tc.expect_exchange_error;
         let fail_resolution = tc.expect_resolution_error;
+        let sub = tc.matrix_id.to_owned();
 
         let deps = HandlerTestDeps {
             create_livekit_room_fn: Some(Box::new(move |room, _, _| {
@@ -3859,9 +3912,7 @@ async fn test_process_legacy_sfu_request() {
                 if fail_exchange {
                     Err("M_UNAUTHORIZED: unauthorised".into())
                 } else {
-                    Ok(UserInfo {
-                        sub: "@mock:example.com".into(),
-                    })
+                    Ok(UserInfo { sub: sub.clone() })
                 }
             })),
             resolve_cs_api_url_fn: Some(Box::new(move |_| {
@@ -3897,7 +3948,7 @@ async fn test_process_legacy_sfu_request() {
             room: "!room:example.com".into(),
             openid_token: OpenIdTokenType {
                 access_token: "token".into(),
-                matrix_server_name: tc.matrix_id.split(':').nth(1).unwrap().to_owned(),
+                matrix_server_name: tc.matrix_server_name.into(),
                 ..Default::default()
             },
             device_id: "dev".into(),

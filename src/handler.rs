@@ -704,6 +704,15 @@ impl Handler {
             .await
             .map_err(|_| unauthorized())?;
 
+        match matrix_server_name(&user_info.sub) {
+            Some(sub_server_name) if sub_server_name == token.matrix_server_name => {}
+            _ => {
+                warn!(matrix_id = %user_info.sub, matrix_server_name = %token.matrix_server_name,
+                    "Handler: token subject is not on the server that issued the token");
+                return Err(unauthorized());
+            }
+        }
+
         if !claimed_user_id.is_empty() && claimed_user_id != user_info.sub {
             warn!(claimed_user_id, matrix_id = %user_info.sub,
                 "Handler: ClaimedUserID does not match token subject");
