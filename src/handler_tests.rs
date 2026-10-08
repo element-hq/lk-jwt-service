@@ -200,6 +200,42 @@ fn execute_delayed_event_action_ok() -> Option<ExecuteDelayedEventActionFn> {
     Some(Box::new(|_, _, _, _, _| Ok(200)))
 }
 
+/// The (as_token, user_id) of the first delayed-event management call, both
+/// empty for an unauthenticated call.
+type CapturedAuth = Arc<Mutex<Option<(String, String)>>>;
+
+/// An execute_delayed_event_action mock that records the authentication of
+/// the first call.
+fn execute_delayed_event_action_capturing_auth()
+-> (CapturedAuth, Option<ExecuteDelayedEventActionFn>) {
+    let captured: CapturedAuth = Arc::new(Mutex::new(None));
+    let captured_clone = captured.clone();
+    let exec: ExecuteDelayedEventActionFn = Box::new(move |_, _, _, as_token, user_id| {
+        captured_clone
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| (as_token.to_owned(), user_id.to_owned()));
+        Ok(200)
+    });
+    (captured, Some(exec))
+}
+
+/// Waits for the first delayed-event management call and returns its
+/// (as_token, user_id).
+async fn wait_for_captured_auth(captured: &CapturedAuth) -> (String, String) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let auth = captured.lock().unwrap().clone();
+            if let Some(auth) = auth {
+                return auth;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the delayed-event restart call")
+}
+
 fn is_joined_ok(joined: bool) -> Option<IsJoinedFn> {
     Some(Box::new(move |_, _, _| Ok(joined)))
 }
@@ -290,6 +326,34 @@ fn new_delegate_delayed_leave_handler(deps: HandlerTestDeps) -> Arc<Handler> {
             "example.com".to_owned(),
             CsApiUrl("https://matrix.example.com".into()),
         )]),
+        None,
+        Arc::new(deps),
+    )
+}
+
+/// Creates a Handler configured for testing delayed leave delegation while
+/// running as the application service of example.com, with other.com as a
+/// further full-access homeserver.
+fn new_delegation_app_service_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+    Handler::new(
+        default_auth(),
+        vec!["example.com".into(), "other.com".into()],
+        crate::config::AppServiceConfig {
+            as_token: "as_token".into(),
+            hs_token: HS_TOKEN.into(),
+            hs_server_name: "example.com".into(),
+        },
+        Duration::ZERO,
+        HashMap::from([
+            (
+                "example.com".to_owned(),
+                CsApiUrl("https://matrix.example.com".into()),
+            ),
+            (
+                "other.com".to_owned(),
+                CsApiUrl("https://matrix.other.com".into()),
+            ),
+        ]),
         None,
         Arc::new(deps),
     )
@@ -2131,6 +2195,174 @@ async fn test_process_sfu_request() {
     }
 }
 
+/// Deps for a /get_token or /sfu/get delegation by `matrix_id` whose
+/// participant is already on the SFU.
+fn delegation_deps(
+    matrix_id: &str,
+    execute_delayed_event_action_fn: Option<ExecuteDelayedEventActionFn>,
+) -> HandlerTestDeps {
+    HandlerTestDeps {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok(matrix_id),
+        resolve_cs_api_url_fn: Some(Box::new(|server_name| {
+            Ok(CsApiUrl(format!("https://matrix.{server_name}")))
+        })),
+        create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+        participant_exists_fn: Some(Box::new(|_, _| Box::pin(async { Ok(true) }))),
+        execute_delayed_event_action_fn,
+        ..Default::default()
+    }
+}
+
+/// When running as the application service of the requesting user's
+/// homeserver, a /get_token delegation asserts the OpenID-verified user's
+/// identity on the job's delayed-event management calls.
+#[tokio::test]
+async fn test_process_sfu_request_delegation_asserts_identity_for_local_user() {
+    let (captured, execute_delayed_event_action_fn) = execute_delayed_event_action_capturing_auth();
+    // Runs as the application service of example.com.
+    let handler = new_get_token_cs_handler(delegation_deps(
+        "@user:example.com",
+        execute_delayed_event_action_fn,
+    ));
+    let req = SfuRequest {
+        room_id: "!room:example.com".into(),
+        slot_id: "m.call#ROOM".into(),
+        openid_token: OpenIdTokenType {
+            access_token: "token".into(),
+            matrix_server_name: "example.com".into(),
+            ..Default::default()
+        },
+        member: MatrixRtcMemberType {
+            id: "member-id".into(),
+            claimed_user_id: "@user:example.com".into(),
+            claimed_device_id: "device-id".into(),
+        },
+        delay_id: "syd_delay123".into(),
+        delay_timeout: 30000,
+        ..Default::default()
+    };
+
+    handler
+        .process_sfu_request(&req)
+        .await
+        .expect("unexpected error");
+
+    let (as_token, user_id) = wait_for_captured_auth(&captured).await;
+    assert_eq!(as_token, "as_token", "expected the configured as_token");
+    assert_eq!(
+        user_id, "@user:example.com",
+        "expected the OpenID-verified user as user_id"
+    );
+    handler.close().await;
+}
+
+/// Same as above for the deprecated /sfu/get endpoint.
+#[tokio::test]
+async fn test_process_legacy_sfu_request_delegation_asserts_identity_for_local_user() {
+    let (captured, execute_delayed_event_action_fn) = execute_delayed_event_action_capturing_auth();
+    // Runs as the application service of example.com.
+    let handler = new_get_token_cs_handler(delegation_deps(
+        "@user:example.com",
+        execute_delayed_event_action_fn,
+    ));
+    let req = LegacySfuRequest {
+        room: "!room:example.com".into(),
+        openid_token: OpenIdTokenType {
+            access_token: "token".into(),
+            matrix_server_name: "example.com".into(),
+            ..Default::default()
+        },
+        device_id: "device-id".into(),
+        delay_id: "syd_delay123".into(),
+        delay_timeout: 30000,
+        ..Default::default()
+    };
+
+    handler
+        .process_legacy_sfu_request(&req)
+        .await
+        .expect("unexpected error");
+
+    let (as_token, user_id) = wait_for_captured_auth(&captured).await;
+    assert_eq!(as_token, "as_token", "expected the configured as_token");
+    assert_eq!(
+        user_id, "@user:example.com",
+        "expected the OpenID-verified user as user_id"
+    );
+    handler.close().await;
+}
+
+/// The application service holds no credential for other homeservers, so a
+/// /get_token delegation by a user of another full-access homeserver keeps
+/// its management calls unauthenticated: the as_token never goes there.
+#[tokio::test]
+async fn test_process_sfu_request_delegation_remote_user_stays_unauthenticated() {
+    let (captured, execute_delayed_event_action_fn) = execute_delayed_event_action_capturing_auth();
+    let handler = new_delegation_app_service_handler(delegation_deps(
+        "@user:other.com",
+        execute_delayed_event_action_fn,
+    ));
+    let req = SfuRequest {
+        room_id: "!room:example.com".into(),
+        slot_id: "m.call#ROOM".into(),
+        openid_token: OpenIdTokenType {
+            access_token: "token".into(),
+            matrix_server_name: "other.com".into(),
+            ..Default::default()
+        },
+        member: MatrixRtcMemberType {
+            id: "member-id".into(),
+            claimed_user_id: "@user:other.com".into(),
+            claimed_device_id: "device-id".into(),
+        },
+        delay_id: "syd_delay123".into(),
+        delay_timeout: 30000,
+        ..Default::default()
+    };
+
+    handler
+        .process_sfu_request(&req)
+        .await
+        .expect("unexpected error");
+
+    let (as_token, user_id) = wait_for_captured_auth(&captured).await;
+    assert_eq!(as_token, "", "expected no as_token");
+    assert_eq!(user_id, "", "expected no user_id");
+    handler.close().await;
+}
+
+/// Same as above for the deprecated /sfu/get endpoint.
+#[tokio::test]
+async fn test_process_legacy_sfu_request_delegation_remote_user_stays_unauthenticated() {
+    let (captured, execute_delayed_event_action_fn) = execute_delayed_event_action_capturing_auth();
+    let handler = new_delegation_app_service_handler(delegation_deps(
+        "@user:other.com",
+        execute_delayed_event_action_fn,
+    ));
+    let req = LegacySfuRequest {
+        room: "!room:example.com".into(),
+        openid_token: OpenIdTokenType {
+            access_token: "token".into(),
+            matrix_server_name: "other.com".into(),
+            ..Default::default()
+        },
+        device_id: "device-id".into(),
+        delay_id: "syd_delay123".into(),
+        delay_timeout: 30000,
+        ..Default::default()
+    };
+
+    handler
+        .process_legacy_sfu_request(&req)
+        .await
+        .expect("unexpected error");
+
+    let (as_token, user_id) = wait_for_captured_auth(&captured).await;
+    assert_eq!(as_token, "", "expected no as_token");
+    assert_eq!(user_id, "", "expected no user_id");
+    handler.close().await;
+}
+
 // ── /rtc/livekit/get_token C-S endpoint ─────────────────────────────
 
 /// Non-POST/OPTIONS requests return 405.
@@ -3960,6 +4192,63 @@ async fn test_process_delegate_delayed_leave_after_shutdown() {
         .expect_err("expected MatrixErrorResponse");
     assert_eq!(err.status, 503, "expected 503");
     assert_eq!(err.errcode, "M_UNKNOWN", "expected M_UNKNOWN");
+}
+
+/// When running as the application service of the requesting user's
+/// homeserver, the scheduled job asserts the OpenID-verified user's identity
+/// on its delayed-event management calls.
+#[tokio::test]
+async fn test_process_delegate_delayed_leave_asserts_identity_for_local_user() {
+    let (captured, execute_delayed_event_action_fn) = execute_delayed_event_action_capturing_auth();
+    let deps = HandlerTestDeps {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:example.com"),
+        participant_exists_fn: Some(Box::new(|_, _| Box::pin(async { Ok(true) }))),
+        execute_delayed_event_action_fn,
+        ..Default::default()
+    };
+    let handler = new_delegation_app_service_handler(deps);
+    let req = valid_delegate_delayed_leave_request();
+
+    handler
+        .process_delegate_delayed_leave(&req)
+        .await
+        .expect("unexpected error");
+
+    let (as_token, user_id) = wait_for_captured_auth(&captured).await;
+    assert_eq!(as_token, "as_token", "expected the configured as_token");
+    assert_eq!(
+        user_id, "@user:example.com",
+        "expected the OpenID-verified user as user_id"
+    );
+    handler.close().await;
+}
+
+/// The application service holds no credential for other homeservers, so a
+/// delegation for one of their users keeps its management calls
+/// unauthenticated.
+#[tokio::test]
+async fn test_process_delegate_delayed_leave_remote_user_stays_unauthenticated() {
+    let (captured, execute_delayed_event_action_fn) = execute_delayed_event_action_capturing_auth();
+    let deps = HandlerTestDeps {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok("@user:other.com"),
+        participant_exists_fn: Some(Box::new(|_, _| Box::pin(async { Ok(true) }))),
+        execute_delayed_event_action_fn,
+        ..Default::default()
+    };
+    let handler = new_delegation_app_service_handler(deps);
+    let mut req = valid_delegate_delayed_leave_request();
+    req.openid_token.matrix_server_name = "other.com".into();
+    req.member.claimed_user_id = "@user:other.com".into();
+
+    handler
+        .process_delegate_delayed_leave(&req)
+        .await
+        .expect("unexpected error");
+
+    let (as_token, user_id) = wait_for_captured_auth(&captured).await;
+    assert_eq!(as_token, "", "expected no as_token");
+    assert_eq!(user_id, "", "expected no user_id");
+    handler.close().await;
 }
 
 // ── /rtc/livekit/delegate_delayed_leave C-S endpoint ──────────────────────────

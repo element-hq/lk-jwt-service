@@ -57,6 +57,12 @@ async fn main() {
         }
     };
 
+    if !config.app_service_config.is_set_up() {
+        warn!(
+            "Not running as an application service is deprecated and might not work on recent servers"
+        );
+    }
+
     let store: Option<Arc<dyn Store>> = if config.redis_url.is_empty() {
         warn!("LIVEKIT_REDIS_URL not set. Using in-memory store.");
         None
