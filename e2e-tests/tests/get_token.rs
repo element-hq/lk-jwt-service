@@ -6,7 +6,8 @@
 use lk_jwt_service_e2e_tests::{
     LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, MatrixUser, SYNAPSE_A_CS_API_URL, SYNAPSE_A_SERVER_NAME,
     SYNAPSE_B_CS_API_URL, assert_stack_is_up, attempt_publish_track, create_and_join_room,
-    get_livekit_token, join_room_via, register_user, verify_livekit_token_is_usable,
+    create_and_join_room_with_guest_access, get_livekit_token, join_room_via, register_guest,
+    register_user, verify_livekit_token_is_usable,
 };
 
 /// Low-level POST to `/rtc/livekit/get_token` through `cs_api_url` as `user`,
@@ -102,6 +103,46 @@ async fn get_token_local_sfu_succeeds() {
     // The proof that matters: a real LiveKit SFU actually accepts the
     // issued token and admits the participant into the room.
     verify_livekit_token_is_usable(LIVEKIT_A_SFU_ADDR, &jwt).await;
+}
+
+/// A joined local guest succeeds in getting a token for the local SFU, with
+/// the same access as a regular user.
+#[tokio::test]
+async fn get_token_local_sfu_succeeds_for_guest() {
+    assert_stack_is_up();
+
+    // Alice creates (and thus joins) a room guests may join, and a guest
+    // joins it.
+    let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room_with_guest_access(SYNAPSE_A_CS_API_URL, &alice).await;
+    let guest = register_guest(SYNAPSE_A_CS_API_URL).await;
+    join_room_via(
+        SYNAPSE_A_CS_API_URL,
+        &guest,
+        &room_id,
+        SYNAPSE_A_SERVER_NAME,
+    )
+    .await;
+
+    // The guest requests a LiveKit token through Synapse's C-S API, which
+    // proxies guest requests under `rtc/livekit` to its lk-jwt-service
+    // running as an application service, too.
+    let jwt = get_livekit_token(
+        SYNAPSE_A_CS_API_URL,
+        &guest,
+        LIVEKIT_A_URL,
+        &room_id,
+        "m.call#ROOM",
+        "e2e-member-guest",
+    )
+    .await;
+
+    // The proof that matters: a real LiveKit SFU actually accepts the
+    // issued token and lets the guest publish into the room.
+    assert!(
+        attempt_publish_track(LIVEKIT_A_SFU_ADDR, &jwt).await,
+        "expected the guest's local token to be usable for publishing"
+    );
 }
 
 /// A joined user succeeds in getting a token for a remote SFU.
@@ -226,6 +267,35 @@ async fn get_token_rejects_non_member() {
         status.as_u16(),
         403,
         "expected 403 for a non-member, got {status}: {body}"
+    );
+    assert_eq!(body["errcode"].as_str(), Some("M_FORBIDDEN"));
+}
+
+/// A non-joined guest is rejected.
+#[tokio::test]
+async fn get_token_rejects_non_member_guest() {
+    assert_stack_is_up();
+
+    // Alice creates (and thus joins) a room guests may join; the guest never
+    // joins it.
+    let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room_with_guest_access(SYNAPSE_A_CS_API_URL, &alice).await;
+    let guest = register_guest(SYNAPSE_A_CS_API_URL).await;
+
+    let (status, body) = request_get_token(
+        SYNAPSE_A_CS_API_URL,
+        &guest,
+        None,
+        LIVEKIT_A_URL,
+        &room_id,
+        "e2e-member-guest",
+    )
+    .await;
+
+    assert_eq!(
+        status.as_u16(),
+        403,
+        "expected 403 for a non-member guest, got {status}: {body}"
     );
     assert_eq!(body["errcode"].as_str(), Some("M_FORBIDDEN"));
 }
