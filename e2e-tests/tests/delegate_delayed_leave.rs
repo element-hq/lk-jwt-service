@@ -10,10 +10,8 @@ use lk_jwt_service_e2e_tests::{
     assert_stack_is_up, create_and_join_room, get_livekit_token, register_user,
 };
 
-/// Schedules a delayed `m.room.message` in `room_id` through MSC4140's
-/// dedicated scheduling endpoint,
-/// `PUT /rooms/{roomId}/delayed_event/{eventType}/{txnId}`, and returns its
-/// delay_id.
+/// Schedules a delayed `m.room.message` in `room_id` (MSC4140) and returns
+/// its delay_id.
 async fn schedule_delayed_message(
     cs_api_url: &str,
     access_token: &str,
@@ -62,8 +60,14 @@ async fn schedule_delayed_message(
         .to_owned()
 }
 
-/// Reports whether a message with the given body is in the last 20 messages of the room's timeline.
-async fn has_message(cs_api_url: &str, access_token: &str, room_id: &str, body: &str) -> bool {
+/// Finds the message with the given body among the last 20 messages of the
+/// room's timeline, returning its `origin_server_ts`.
+async fn find_message(
+    cs_api_url: &str,
+    access_token: &str,
+    room_id: &str,
+    body: &str,
+) -> Option<u64> {
     let resp = reqwest::Client::new()
         .get(format!(
             "{cs_api_url}/_matrix/client/v3/rooms/{room_id}/messages?dir=b&limit=20"
@@ -80,22 +84,29 @@ async fn has_message(cs_api_url: &str, access_token: &str, room_id: &str, body: 
         .as_array()
         .into_iter()
         .flatten()
-        .any(|event| event["content"]["body"].as_str() == Some(body))
+        .find(|event| event["content"]["body"].as_str() == Some(body))
+        .map(|event| {
+            event["origin_server_ts"]
+                .as_u64()
+                .expect("message is missing `origin_server_ts`")
+        })
 }
 
 /// Polls the end of the room's timeline until a message with the given body
-/// appears, or panics once the timeout elapses.
+/// appears, returning its `origin_server_ts`, or panics once the timeout
+/// elapses.
 async fn wait_for_message(
     cs_api_url: &str,
     access_token: &str,
     room_id: &str,
     body: &str,
     timeout: Duration,
-) {
+) -> u64 {
     let deadline = Instant::now() + timeout;
     loop {
-        if has_message(cs_api_url, access_token, room_id, body).await {
-            return;
+        if let Some(origin_server_ts) = find_message(cs_api_url, access_token, room_id, body).await
+        {
+            return origin_server_ts;
         }
         if Instant::now() > deadline {
             panic!("timed out waiting for a message with body {body:?} to appear in {room_id}");
@@ -108,8 +119,8 @@ async fn wait_for_message(
 /// `GET /delayed_events/{delay_id}` — this suite cares about.
 struct DelayedEvent {
     /// The timestamp its current countdown started from. Reset to "now" by
-    /// every `restart` action, so a later lookup returning a greater value
-    /// than an earlier one proves a restart landed in between.
+    /// every `restart` action. Left alone, the homeserver fires the event
+    /// at `delayed_since_ts + delay`.
     delayed_since_ts: u64,
 }
 
@@ -158,22 +169,39 @@ async fn get_delayed_event(
     })
 }
 
+/// Polls the delayed event until its `delayed_since_ts` has moved past
+/// `since` — i.e. until a further restart has landed — and returns the new
+/// value. Panics if the event stops being pending or `timeout` elapses first.
+async fn wait_for_restart(
+    cs_api_url: &str,
+    access_token: &str,
+    delay_id: &str,
+    since: u64,
+    timeout: Duration,
+) -> u64 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let delayed_since_ts = get_delayed_event(cs_api_url, access_token, delay_id)
+            .await
+            .expect("the delayed event was sent or cancelled while waiting for a restart")
+            .delayed_since_ts;
+        if delayed_since_ts > since {
+            return delayed_since_ts;
+        }
+        if Instant::now() > deadline {
+            panic!(
+                "timed out waiting for the delayed event to be restarted again: \
+                 delayed_since_ts stayed at {since}"
+            );
+        }
+        // Poll once a second to work around Synapse's rate-limits.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// The service takes over a delegated delayed event: it keeps it alive on the
 /// homeserver while the participant is connected to the SFU, and sends it once
 /// the participant leaves.
-///
-/// Both actions are observed directly through MSC4140's
-/// `GET /delayed_events/{delay_id}`:
-///
-///   - `restart` — a lookup right after scheduling captures the event's
-///     initial `delayed_since_ts`. A second lookup, made after waiting
-///     comfortably past the original delay, must see both a pending event
-///     and a *later* `delayed_since_ts` — the only way it could still be
-///     pending at that point at all is a restart the homeserver never
-///     performs on its own.
-///   - `send` — once the participant disconnects, the delayed event's
-///     message must land almost immediately, far faster than a homeserver
-///     countdown that's just been reset would ever fire it on its own.
 #[tokio::test]
 async fn delegate_delayed_leave_cs_succeeds() {
     assert_stack_is_up();
@@ -182,11 +210,9 @@ async fn delegate_delayed_leave_cs_succeeds() {
     let user = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
     let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &user).await;
 
-    // Short enough to keep the test fast, but long enough that the service's
-    // restarts (every ~80% of the delay) have clearly landed at least once
-    // before the "still pending" check below runs, even under CI-level
-    // jitter.
-    const DELAY_MS: u64 = 5_000;
+    // Long enough that the service's send after the hang-up (below) has a
+    // comfortable budget before the homeserver's own countdown would fire.
+    const DELAY_MS: u64 = 10_000;
     const SLOT_ID: &str = "m.call#ROOM";
     const MEMBER_ID: &str = "e2e-member";
     const MESSAGE_BODY: &str = "e2e-delegate-delayed-leave-proof";
@@ -277,20 +303,40 @@ async fn delegate_delayed_leave_cs_succeeds() {
     );
 
     // Second action: the participant hangs up. The SFU reports the departure
-    // to the service, which sends the delayed event right away — far sooner
-    // than the homeserver's own, repeatedly-reset countdown would ever fire
-    // it on its own. The bound here is deliberately tight relative to
-    // DELAY_MS: a send that's merely eventual rather than immediate (e.g. the
-    // service falling back to waiting out its own countdown) should show up
-    // as a timeout, not get masked by a generous one.
+    // to the service, which must send the delayed event.
+
+    // First wait for the next restart so we know when the homeserver would send the
+    // event on its own.
+    let restarted_since_ts = wait_for_restart(
+        SYNAPSE_A_CS_API_URL,
+        &user.access_token,
+        &delay_id,
+        restarted_since_ts,
+        Duration::from_millis(DELAY_MS + 2_000),
+    )
+    .await;
+    let homeserver_would_fire_at = restarted_since_ts + DELAY_MS;
+
+    // Now disconnect the participant.
     participant.disconnect().await;
 
-    wait_for_message(
+    // Wait for the event to be sent
+    let sent_at = wait_for_message(
         SYNAPSE_A_CS_API_URL,
         &user.access_token,
         &room_id,
         MESSAGE_BODY,
-        Duration::from_secs(10),
+        Duration::from_millis(DELAY_MS + 5_000),
     )
     .await;
+
+    // Ensure that the event was sent before the homeserver would have sent it
+    // which proves that it came from the service.
+    const SEND_BUFFER_MS: u64 = 2_000;
+    assert!(
+        sent_at + SEND_BUFFER_MS < homeserver_would_fire_at,
+        "the delayed event was not sent by the service promptly after the participant left: \
+         origin_server_ts {sent_at} is within {SEND_BUFFER_MS}ms of (or after) the homeserver's \
+         own countdown firing at {homeserver_would_fire_at}"
+    );
 }
