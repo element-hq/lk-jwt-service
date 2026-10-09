@@ -10,8 +10,10 @@ use lk_jwt_service_e2e_tests::{
     assert_stack_is_up, create_and_join_room, get_livekit_token, register_user,
 };
 
-/// Schedules a delayed `m.room.message` in `room_id` (MSC4140) and returns
-/// its delay_id.
+/// Schedules a delayed `m.room.message` in `room_id` through MSC4140's
+/// dedicated scheduling endpoint,
+/// `PUT /rooms/{roomId}/delayed_event/{eventType}/{txnId}`, and returns its
+/// delay_id.
 async fn schedule_delayed_message(
     cs_api_url: &str,
     access_token: &str,
@@ -26,20 +28,22 @@ async fn schedule_delayed_message(
         .extend([
             "_matrix",
             "client",
-            "v3",
+            "unstable",
+            "org.matrix.msc4140",
             "rooms",
             room_id,
-            "send",
+            "delayed_event",
             "m.room.message",
             txn_id,
         ]);
-    url.query_pairs_mut()
-        .append_pair("org.matrix.msc4140.delay", &delay_ms.to_string());
 
     let resp = reqwest::Client::new()
         .put(url)
         .bearer_auth(access_token)
-        .json(&serde_json::json!({"msgtype": "m.text", "body": body}))
+        .json(&serde_json::json!({
+            "delay_ms": delay_ms,
+            "content": {"msgtype": "m.text", "body": body},
+        }))
         .send()
         .await
         .expect("request to schedule a delayed event failed");
