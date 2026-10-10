@@ -348,7 +348,7 @@ async fn no_server_name_success() {
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
     assert_eq!(
         claims["video"]["canUpdateOwnMetadata"].as_bool(),
-        Some(true)
+        Some(false)
     );
     assert_eq!(claims["video"]["hidden"].as_bool(), Some(false));
 
@@ -359,6 +359,45 @@ async fn no_server_name_success() {
     assert_eq!(
         claims["video"]["room"].as_str(),
         Some(rooms[0].name.as_str())
+    );
+}
+
+/// With LIVEKIT_CAN_UPDATE_OWN_METADATA enabled, the token grants updating the
+/// participant's own metadata.
+#[tokio::test]
+async fn can_update_own_metadata_success() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    let sfu = FakeSfu::new().await;
+
+    let mut extra_env = app_service_env_with_hs_server_name(hs.server_name());
+    extra_env.insert(
+        "LIVEKIT_CAN_UPDATE_OWN_METADATA".to_owned(),
+        "true".to_owned(),
+    );
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        extra_env,
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_get_token_cs(
+        &svc,
+        get_token_cs_request(sfu.url()).to_string(),
+        Some(&user.user_id),
+    )
+    .await;
+
+    assert_eq!(status, 200, "body: {body}");
+
+    let response: Value = serde_json::from_str(&body).expect("response is not JSON");
+    let claims = decode_livekit_jwt(response["jwt"].as_str().unwrap_or_default());
+    assert_eq!(
+        claims["video"]["canUpdateOwnMetadata"].as_bool(),
+        Some(true)
     );
 }
 
