@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use lk_jwt_service_integration_tests::{
     FakeHomeserver, FakeRedis, FakeSfu, FakeUser, Service, ServiceConfig,
-    expect_delayed_event_request, expect_delayed_event_request_count, expect_job_not_persisted,
-    expect_job_persisted, expect_matrix_error, expect_no_delayed_event_request,
-    expect_no_delayed_event_requests, expect_no_user_info_lookups, expect_user_info_lookup,
+    expect_delayed_event_request, expect_delayed_event_request_count, expect_is_joined_request,
+    expect_job_not_persisted, expect_job_persisted, expect_matrix_error,
+    expect_no_delayed_event_request, expect_no_delayed_event_requests,
+    expect_no_is_joined_requests, expect_no_user_info_lookups, expect_user_info_lookup,
     legacy_livekit_identity, livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request,
     wait_for_delayed_event_request_count, wait_for_job_removed,
 };
@@ -1036,4 +1037,88 @@ async fn expired_jobs_are_purged_on_restart() {
     expect_no_delayed_event_requests(&hs);
 
     drop(svc);
+}
+
+const MEMBERSHIP_AS_TOKEN: &str = "as_token";
+
+/// Application-service configuration plus LIVEKIT_REQUIRE_MEMBERSHIP=true as
+/// extra_env, with the fake homeserver as the configured homeserver.
+fn require_membership_env(hs: &FakeHomeserver) -> HashMap<String, String> {
+    HashMap::from([
+        (
+            "LIVEKIT_AS_TOKEN".to_owned(),
+            MEMBERSHIP_AS_TOKEN.to_owned(),
+        ),
+        ("LIVEKIT_HS_TOKEN".to_owned(), "hs_token".to_owned()),
+        (
+            "LIVEKIT_HS_SERVER_NAME".to_owned(),
+            hs.server_name().to_owned(),
+        ),
+        ("LIVEKIT_REQUIRE_MEMBERSHIP".to_owned(), "true".to_owned()),
+    ])
+}
+
+/// With LIVEKIT_REQUIRE_MEMBERSHIP a member can register a delayed leave.
+#[tokio::test]
+async fn require_membership_joined_user_can_delegate() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        extra_env: require_membership_env(&hs),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_delegate(&svc, delegate_request(&hs, &user).to_string()).await;
+
+    assert_eq!(status, 200, "body: {body}");
+    expect_is_joined_request(&hs, "!room:example.com", &user.user_id, MEMBERSHIP_AS_TOKEN);
+}
+
+/// With LIVEKIT_REQUIRE_MEMBERSHIP a non-member gets 403 and no delayed-event
+/// job is registered, so the service never touches the delayed event.
+#[tokio::test]
+async fn require_membership_not_joined_user_is_forbidden() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_not_joined("!room:example.com", &user.user_id);
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        extra_env: require_membership_env(&hs),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_delegate(&svc, delegate_request(&hs, &user).to_string()).await;
+
+    expect_matrix_error(status, &body, 403, "M_FORBIDDEN");
+    expect_is_joined_request(&hs, "!room:example.com", &user.user_id, MEMBERSHIP_AS_TOKEN);
+    // The delay is 8 s; a registered job would not act before then, so look
+    // at the registration itself: the service must not have used the delay.
+    expect_no_delayed_event_requests(&hs);
+}
+
+/// Without the flag the endpoint stays upstream-compatible.
+#[tokio::test]
+async fn require_membership_off_does_not_ask_the_homeserver() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_not_joined("!room:example.com", &user.user_id);
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_delegate(&svc, delegate_request(&hs, &user).to_string()).await;
+
+    assert_eq!(status, 200, "body: {body}");
+    expect_no_is_joined_requests(&hs);
 }
