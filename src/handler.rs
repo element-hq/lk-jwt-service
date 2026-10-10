@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(feature = "appservice-ping-trigger")]
@@ -159,6 +160,10 @@ pub struct Handler {
     full_access_homeservers: Vec<String>,
     /// Configuration options used for running as an application service.
     app_service_config: AppServiceConfig,
+    /// Whether the standalone (OpenID-authenticated) endpoints must verify
+    /// room membership through the homeserver before serving a request.
+    /// Configured via LIVEKIT_REQUIRE_MEMBERSHIP; see `enforce_membership`.
+    require_membership: AtomicBool,
     /// The period between room-worker sanity checks. Zero disables the sanity
     /// check.
     sanity_check_interval: Duration,
@@ -224,6 +229,7 @@ impl Handler {
             livekit_auth: lk_auth,
             full_access_homeservers,
             app_service_config,
+            require_membership: AtomicBool::new(false),
             sanity_check_interval,
             cs_api_url_overrides: Arc::new(cs_api_url_overrides),
             cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
@@ -245,6 +251,14 @@ impl Handler {
                 job_restarted_rx,
             },
         )
+    }
+
+    /// Enables or disables the room-membership check on the standalone
+    /// endpoints (LIVEKIT_REQUIRE_MEMBERSHIP). Off by default. The caller is
+    /// responsible for only enabling it when the application service
+    /// configuration is set up; the check needs the AS token.
+    pub fn set_require_membership(&self, require: bool) {
+        self.require_membership.store(require, Ordering::Relaxed);
     }
 
     /// A watch receiver that flips to true once start-up recovery completed.
@@ -882,6 +896,47 @@ impl Handler {
         Ok(())
     }
 
+    /// Verifies, when LIVEKIT_REQUIRE_MEMBERSHIP is on, that `matrix_id` is
+    /// joined to `room_id` according to the configured homeserver
+    /// (MSC4502 `is_joined`). This closes the gap that the standalone
+    /// endpoints authenticate the OpenID token only.
+    ///
+    /// The check always goes to `hs_server_name`, never to the server named
+    /// in the OpenID token: the AS token must not be sent to a server chosen
+    /// by the client. A remote user's membership is read from the local
+    /// homeserver's room state. Fails closed: not joined is 403 M_FORBIDDEN,
+    /// any other failure (including MSC4502 being unavailable) is 502.
+    ///
+    /// Call this after `verify_openid_token` and before any LiveKit room
+    /// creation or delayed-event job registration. It must never run inside
+    /// the delayed-event job loop: a leave has to fire after the user left.
+    async fn enforce_membership(
+        &self,
+        matrix_id: &str,
+        room_id: &str,
+    ) -> Result<(), MatrixErrorResponse> {
+        if !self.require_membership.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if !room_id.starts_with('!') {
+            return Err(MatrixErrorResponse {
+                status: 400,
+                errcode: "M_INVALID_PARAM".into(),
+                err: "The room ID is malformed".into(),
+            });
+        }
+        let cs_api_url = self
+            .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
+            .await?;
+        self.require_joined(
+            &cs_api_url,
+            room_id,
+            JoinedSubject::User(matrix_id),
+            "The requesting user is not a member of the room",
+        )
+        .await
+    }
+
     /// Deprecated: serves the pre-Matrix-2.0 /sfu/get endpoint. Remove once
     /// all in-the-wild clients have migrated to /get_token.
     pub(crate) async fn process_legacy_sfu_request(
@@ -889,6 +944,7 @@ impl Handler {
         req: &LegacySfuRequest,
     ) -> Result<SfuResponse, MatrixErrorResponse> {
         let matrix_id = self.verify_openid_token(&req.openid_token, "").await?;
+        self.enforce_membership(&matrix_id, &req.room).await?;
 
         let is_full_access_user = self.is_full_access_user(&req.openid_token.matrix_server_name);
         let delayed_event_delegation_requested = !req.delay_id.is_empty();
@@ -966,6 +1022,7 @@ impl Handler {
         let matrix_id = self
             .verify_openid_token(&req.openid_token, &req.member.claimed_user_id)
             .await?;
+        self.enforce_membership(&matrix_id, &req.room_id).await?;
 
         let is_full_access_user = self.is_full_access_user(&req.openid_token.matrix_server_name);
         let delayed_event_delegation_requested = !req.delay_id.is_empty();
@@ -1220,6 +1277,7 @@ impl Handler {
         let matrix_id = self
             .verify_openid_token(&req.openid_token, &req.member.claimed_user_id)
             .await?;
+        self.enforce_membership(&matrix_id, &req.room_id).await?;
 
         // Delayed event delegation is restricted to full-access homeservers.
         if !self.is_full_access_user(&req.openid_token.matrix_server_name) {
@@ -1266,6 +1324,8 @@ impl Handler {
         require_non_empty_header(mxid_header, "Missing request authorization")?;
 
         self.require_matching_lk_url(&req.url, "delegate_delayed_leave_cs")?;
+
+        self.enforce_membership(mxid_header, &req.room_id).await?;
 
         let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);

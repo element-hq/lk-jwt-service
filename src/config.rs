@@ -33,6 +33,11 @@ pub struct Config {
     pub redis_url: String,
     /// Tokens used for authenticating requests to and from the homeserver.
     pub app_service_config: AppServiceConfig,
+    /// Whether the standalone endpoints (/sfu/get, /get_token,
+    /// /delegate_delayed_leave) verify room membership through the
+    /// homeserver (MSC4502). Requires the application service configuration.
+    /// Configure via LIVEKIT_REQUIRE_MEMBERSHIP (default false).
+    pub require_membership: bool,
 }
 
 /// Configuration options used for running as an application service.
@@ -253,6 +258,17 @@ pub fn parse_config() -> Result<Config, String> {
 
     let app_service_config = read_app_service_config()?;
 
+    let require_membership = parse_bool_env("LIVEKIT_REQUIRE_MEMBERSHIP")?;
+    if require_membership && !app_service_config.is_set_up() {
+        return Err(
+            "LIVEKIT_REQUIRE_MEMBERSHIP is set, but the application service \
+            configuration is not set up: set LIVEKIT_AS_REGISTRATION_FILE (or \
+            LIVEKIT_AS_TOKEN, LIVEKIT_HS_TOKEN and LIVEKIT_HS_SERVER_NAME), which is \
+            needed to ask the homeserver whether a user is in the room"
+                .into(),
+        );
+    }
+
     let mut redis_url_string = env_var("LIVEKIT_REDIS_URL");
     let redis_password = env_var("LIVEKIT_REDIS_PASSWORD");
     if redis_url_string.is_empty() {
@@ -291,7 +307,20 @@ pub fn parse_config() -> Result<Config, String> {
         cs_api_url_overrides,
         redis_url: redis_url_string,
         app_service_config,
+        require_membership,
     })
+}
+
+/// Reads a boolean environment variable. Unset or empty is false; otherwise
+/// the value must be one of true/false/1/0/yes/no/on/off (case-insensitive),
+/// so that a typo can never silently disable a security check.
+fn parse_bool_env(name: &str) -> Result<bool, String> {
+    let raw = env_var(name);
+    match raw.trim().to_lowercase().as_str() {
+        "" | "false" | "0" | "no" | "off" => Ok(false),
+        "true" | "1" | "yes" | "on" => Ok(true),
+        _ => Err(format!("{name} must be true or false, got {raw:?}")),
+    }
 }
 
 /// Expands a bind address into the socket addresses to try, in order. A bare
@@ -724,6 +753,7 @@ mod tests {
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
                     app_service_config: Default::default(),
+                    require_membership: false,
                 }),
                 want_err_msg: "",
             },
@@ -771,6 +801,7 @@ mod tests {
                         hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".to_owned(),
                         hs_server_name: "example.com".to_owned(),
                     },
+                    require_membership: false,
                 }),
                 want_err_msg: "",
             },
@@ -794,6 +825,7 @@ mod tests {
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
                     app_service_config: Default::default(),
+                    require_membership: false,
                 }),
                 want_err_msg: "",
             },
@@ -842,6 +874,122 @@ mod tests {
                     set or all be left empty",
             },
             Case {
+                name: "Require membership with app service config",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
+                    ("LIVEKIT_REQUIRE_MEMBERSHIP", "true"),
+                ],
+                want_config: Some(Config {
+                    key: "test_key".into(),
+                    secret: "test_secret".into(),
+                    lk_url: "wss://test.livekit.cloud".into(),
+                    skip_verify_tls: false,
+                    full_access_homeservers: vec!["*".into()],
+                    lk_jwt_bind: ":8080".into(),
+                    sanity_check_interval: Duration::ZERO,
+                    cs_api_url_overrides: HashMap::new(),
+                    redis_url: String::new(),
+                    app_service_config: AppServiceConfig {
+                        as_token: "as_token_env_pheethiewixohp9eecheeGh".to_owned(),
+                        hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".to_owned(),
+                        hs_server_name: "example.com".to_owned(),
+                    },
+                    require_membership: true,
+                }),
+                want_err_msg: "",
+            },
+            Case {
+                name: "Require membership accepts 1",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
+                    ("LIVEKIT_REQUIRE_MEMBERSHIP", "1"),
+                ],
+                want_config: Some(Config {
+                    key: "test_key".into(),
+                    secret: "test_secret".into(),
+                    lk_url: "wss://test.livekit.cloud".into(),
+                    skip_verify_tls: false,
+                    full_access_homeservers: vec!["*".into()],
+                    lk_jwt_bind: ":8080".into(),
+                    sanity_check_interval: Duration::ZERO,
+                    cs_api_url_overrides: HashMap::new(),
+                    redis_url: String::new(),
+                    app_service_config: AppServiceConfig {
+                        as_token: "as_token_env_pheethiewixohp9eecheeGh".to_owned(),
+                        hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".to_owned(),
+                        hs_server_name: "example.com".to_owned(),
+                    },
+                    require_membership: true,
+                }),
+                want_err_msg: "",
+            },
+            Case {
+                name: "Require membership without app service config refuses to start",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_REQUIRE_MEMBERSHIP", "true"),
+                ],
+                want_config: None,
+                want_err_msg: "LIVEKIT_REQUIRE_MEMBERSHIP is set, but the application service \
+                    configuration is not set up: set LIVEKIT_AS_REGISTRATION_FILE (or \
+                    LIVEKIT_AS_TOKEN, LIVEKIT_HS_TOKEN and LIVEKIT_HS_SERVER_NAME), which is \
+                    needed to ask the homeserver whether a user is in the room",
+            },
+            Case {
+                name: "Require membership explicitly false without app service config",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_REQUIRE_MEMBERSHIP", "false"),
+                ],
+                want_config: Some(Config {
+                    key: "test_key".into(),
+                    secret: "test_secret".into(),
+                    lk_url: "wss://test.livekit.cloud".into(),
+                    skip_verify_tls: false,
+                    full_access_homeservers: vec!["*".into()],
+                    lk_jwt_bind: ":8080".into(),
+                    sanity_check_interval: Duration::ZERO,
+                    cs_api_url_overrides: HashMap::new(),
+                    redis_url: String::new(),
+                    app_service_config: Default::default(),
+                    require_membership: false,
+                }),
+                want_err_msg: "",
+            },
+            Case {
+                name: "Require membership typo is rejected, not ignored",
+                env: vec![
+                    ("LIVEKIT_KEY", "test_key"),
+                    ("LIVEKIT_SECRET", "test_secret"),
+                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
+                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
+                    ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
+                    ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
+                    ("LIVEKIT_HS_SERVER_NAME", "example.com"),
+                    ("LIVEKIT_REQUIRE_MEMBERSHIP", "ture"),
+                ],
+                want_config: None,
+                want_err_msg: "LIVEKIT_REQUIRE_MEMBERSHIP must be true or false, got \"ture\"",
+            },
+            Case {
                 name: "Sanity check interval invalid",
                 env: vec![
                     ("LIVEKIT_KEY", "test_key"),
@@ -873,6 +1021,7 @@ mod tests {
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: String::new(),
                     app_service_config: Default::default(),
+                    require_membership: false,
                 }),
                 want_err_msg: "",
             },
@@ -908,6 +1057,7 @@ mod tests {
                     cs_api_url_overrides: HashMap::new(),
                     redis_url: "redis://localhost:6379".to_owned(),
                     app_service_config: Default::default(),
+                    require_membership: false,
                 }),
                 want_err_msg: "",
             },
@@ -935,6 +1085,7 @@ mod tests {
                     redis_url: "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379"
                         .to_owned(),
                     app_service_config: Default::default(),
+                    require_membership: false,
                 }),
                 want_err_msg: "",
             },

@@ -4813,3 +4813,341 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_unavailable() {
     assert_eq!(err.errcode, "M_UNKNOWN", "expected M_UNKNOWN");
     handler.close().await;
 }
+
+// ── LIVEKIT_REQUIRE_MEMBERSHIP on the standalone endpoints ────────────────────
+
+/// What `is_joined` should answer in a membership test.
+#[derive(Clone, Copy)]
+enum Membership {
+    Joined,
+    NotJoined,
+    /// Synapse answered with an error (MSC4502 disabled, missing scope, ...).
+    Error,
+    /// `is_joined` must not be called at all (it would panic when unmocked).
+    Unmocked,
+}
+
+/// Counters and captures shared with the mocks of a membership test.
+#[derive(Default)]
+struct MembershipProbe {
+    is_joined_calls: std::sync::atomic::AtomicUsize,
+    rooms_created: std::sync::atomic::AtomicUsize,
+    participant_lookups: std::sync::atomic::AtomicUsize,
+    /// (cs_api_url, room_id, subject) of every is_joined call.
+    is_joined_args: Mutex<Vec<(String, String, String)>>,
+}
+
+impl MembershipProbe {
+    fn is_joined_calls(&self) -> usize {
+        self.is_joined_calls.load(Ordering::SeqCst)
+    }
+    fn rooms_created(&self) -> usize {
+        self.rooms_created.load(Ordering::SeqCst)
+    }
+    fn participant_lookups(&self) -> usize {
+        self.participant_lookups.load(Ordering::SeqCst)
+    }
+}
+
+/// Deps for a membership test: `sub` is the OpenID subject.
+fn membership_deps(
+    probe: &Arc<MembershipProbe>,
+    sub: &str,
+    membership: Membership,
+) -> HandlerTestDeps {
+    let is_joined_probe = probe.clone();
+    let is_joined_fn: Option<IsJoinedFn> = match membership {
+        Membership::Unmocked => None,
+        m => Some(Box::new(move |url, room, subject| {
+            is_joined_probe
+                .is_joined_calls
+                .fetch_add(1, Ordering::SeqCst);
+            is_joined_probe.is_joined_args.lock().unwrap().push((
+                url.as_str().to_owned(),
+                room.to_owned(),
+                subject.to_string(),
+            ));
+            match m {
+                Membership::Joined => Ok(true),
+                Membership::NotJoined => Ok(false),
+                _ => Err("failed to check room membership: http status code 404".into()),
+            }
+        })),
+    };
+    let room_probe = probe.clone();
+    let lookup_probe = probe.clone();
+    HandlerTestDeps {
+        exchange_openid_userinfo_fn: exchange_openid_userinfo_ok(sub),
+        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
+            room_probe.rooms_created.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })),
+        participant_exists_fn: Some(Box::new(move |_, _| {
+            lookup_probe
+                .participant_lookups
+                .fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        })),
+        is_joined_fn,
+        ..Default::default()
+    }
+}
+
+/// A Handler running as the application service of example.com, serving
+/// example.com and other.com as full-access homeservers, with the membership
+/// check switched on or off.
+fn new_membership_handler(deps: HandlerTestDeps, require_membership: bool) -> Arc<Handler> {
+    let handler = new_delegation_app_service_handler(deps);
+    handler.set_require_membership(require_membership);
+    handler
+}
+
+fn membership_legacy_request(server: &str, room: &str) -> LegacySfuRequest {
+    LegacySfuRequest {
+        room: room.into(),
+        openid_token: OpenIdTokenType {
+            access_token: "token".into(),
+            matrix_server_name: server.into(),
+            ..Default::default()
+        },
+        device_id: "device-id".into(),
+        ..Default::default()
+    }
+}
+
+/// Runs `call` once for each of the three standalone endpoints (plus the C-S
+/// delayed-leave route), against a handler built from `deps`.
+#[derive(Clone, Copy, Debug)]
+enum Endpoint {
+    Legacy,
+    GetToken,
+    DelegateDelayedLeave,
+    DelegateDelayedLeaveCs,
+}
+
+const ALL_ENDPOINTS: [Endpoint; 4] = [
+    Endpoint::Legacy,
+    Endpoint::GetToken,
+    Endpoint::DelegateDelayedLeave,
+    Endpoint::DelegateDelayedLeaveCs,
+];
+
+/// Sends a valid request for `endpoint` for `@user:example.com` in `room`.
+async fn call_endpoint(
+    handler: &Arc<Handler>,
+    endpoint: Endpoint,
+    room: &str,
+) -> Result<(), MatrixErrorResponse> {
+    let user = "@user:example.com";
+    match endpoint {
+        Endpoint::Legacy => handler
+            .process_legacy_sfu_request(&membership_legacy_request("example.com", room))
+            .await
+            .map(|_| ()),
+        Endpoint::GetToken => {
+            let mut req = valid_sfu_request();
+            req.room_id = room.into();
+            handler.process_sfu_request(&req).await.map(|_| ())
+        }
+        Endpoint::DelegateDelayedLeave => {
+            let mut req = valid_delegate_delayed_leave_request();
+            req.room_id = room.into();
+            handler
+                .process_delegate_delayed_leave(&req)
+                .await
+                .map(|_| ())
+        }
+        Endpoint::DelegateDelayedLeaveCs => {
+            let mut req = valid_delegate_delayed_leave_cs_request();
+            req.room_id = room.into();
+            handler
+                .process_delegate_delayed_leave_cs(&req, user)
+                .await
+                .map(|_| ())
+        }
+    }
+}
+
+fn membership_handler_for(
+    endpoint: Endpoint,
+    probe: &Arc<MembershipProbe>,
+    membership: Membership,
+    require_membership: bool,
+) -> Arc<Handler> {
+    let mut deps = membership_deps(probe, "@user:example.com", membership);
+    if matches!(endpoint, Endpoint::DelegateDelayedLeaveCs) {
+        deps.get_delayed_event_delay_fn =
+            Some(Box::new(|_, _, _, _, _| Ok(Duration::from_secs(30))));
+    }
+    new_membership_handler(deps, require_membership)
+}
+
+const MEMBERSHIP_ROOM: &str = "!testRoom:example.com";
+
+#[tokio::test]
+async fn test_membership_joined_user_is_served() {
+    for endpoint in ALL_ENDPOINTS {
+        let probe = Arc::new(MembershipProbe::default());
+        let handler = membership_handler_for(endpoint, &probe, Membership::Joined, true);
+        call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
+            .await
+            .unwrap_or_else(|e| panic!("{endpoint:?}: expected success, got {}", e.status));
+        assert_eq!(probe.is_joined_calls(), 1, "{endpoint:?}: is_joined calls");
+        let args = probe.is_joined_args.lock().unwrap().clone();
+        assert_eq!(
+            args,
+            vec![(
+                "https://matrix.example.com".to_owned(),
+                MEMBERSHIP_ROOM.to_owned(),
+                "@user:example.com".to_owned()
+            )],
+            "{endpoint:?}: is_joined arguments"
+        );
+        handler.close().await;
+    }
+}
+
+#[tokio::test]
+async fn test_membership_not_joined_is_forbidden_and_creates_nothing() {
+    for endpoint in ALL_ENDPOINTS {
+        let probe = Arc::new(MembershipProbe::default());
+        let handler = membership_handler_for(endpoint, &probe, Membership::NotJoined, true);
+        let err = call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
+            .await
+            .expect_err("expected MatrixErrorResponse");
+        assert_eq!(err.status, 403, "{endpoint:?}: status");
+        assert_eq!(err.errcode, "M_FORBIDDEN", "{endpoint:?}: errcode");
+        assert_eq!(
+            probe.rooms_created(),
+            0,
+            "{endpoint:?}: LiveKit room created"
+        );
+        // Give a wrongly registered delayed-event job time to look up the
+        // participant.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            probe.participant_lookups(),
+            0,
+            "{endpoint:?}: delayed-event job registered"
+        );
+        handler.close().await;
+    }
+}
+
+#[tokio::test]
+async fn test_membership_check_error_fails_closed_with_502() {
+    for endpoint in ALL_ENDPOINTS {
+        let probe = Arc::new(MembershipProbe::default());
+        let handler = membership_handler_for(endpoint, &probe, Membership::Error, true);
+        let err = call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
+            .await
+            .expect_err("expected MatrixErrorResponse");
+        assert_eq!(err.status, 502, "{endpoint:?}: status");
+        assert_eq!(err.errcode, "M_UNKNOWN", "{endpoint:?}: errcode");
+        assert_eq!(
+            probe.rooms_created(),
+            0,
+            "{endpoint:?}: LiveKit room created"
+        );
+        handler.close().await;
+    }
+}
+
+/// With the flag off the behaviour is the upstream one: `is_joined` is never
+/// consulted (an unmocked `is_joined` panics) and the request is served.
+#[tokio::test]
+async fn test_membership_flag_off_never_calls_is_joined() {
+    for endpoint in [
+        Endpoint::Legacy,
+        Endpoint::GetToken,
+        Endpoint::DelegateDelayedLeave,
+    ] {
+        let probe = Arc::new(MembershipProbe::default());
+        let handler = membership_handler_for(endpoint, &probe, Membership::Unmocked, false);
+        call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
+            .await
+            .unwrap_or_else(|e| panic!("{endpoint:?}: expected success, got {}", e.status));
+        assert_eq!(probe.is_joined_calls(), 0, "{endpoint:?}: is_joined calls");
+        handler.close().await;
+    }
+}
+
+/// A room ID must be a `!` room ID; aliases and garbage are rejected before
+/// the homeserver is asked anything.
+#[tokio::test]
+async fn test_membership_rejects_non_room_id() {
+    for endpoint in ALL_ENDPOINTS {
+        for room in [
+            "#alias:example.com",
+            "room-without-sigil",
+            "$event:example.com",
+        ] {
+            let probe = Arc::new(MembershipProbe::default());
+            let handler = membership_handler_for(endpoint, &probe, Membership::Unmocked, true);
+            let err = call_endpoint(&handler, endpoint, room)
+                .await
+                .expect_err("expected MatrixErrorResponse");
+            assert_eq!(err.status, 400, "{endpoint:?} {room}: status");
+            assert_eq!(
+                err.errcode, "M_INVALID_PARAM",
+                "{endpoint:?} {room}: errcode"
+            );
+            assert_eq!(
+                probe.is_joined_calls(),
+                0,
+                "{endpoint:?} {room}: is_joined calls"
+            );
+            handler.close().await;
+        }
+    }
+}
+
+/// The membership check goes to the configured homeserver, even when the
+/// OpenID token names another server, so the AS token is never sent to a
+/// server picked by the client.
+#[tokio::test]
+async fn test_membership_uses_configured_homeserver_not_openid_server() {
+    let probe = Arc::new(MembershipProbe::default());
+    let handler = new_membership_handler(
+        membership_deps(&probe, "@user:other.com", Membership::Joined),
+        true,
+    );
+    handler
+        .process_legacy_sfu_request(&membership_legacy_request("other.com", MEMBERSHIP_ROOM))
+        .await
+        .expect("expected success");
+    let args = probe.is_joined_args.lock().unwrap().clone();
+    assert_eq!(
+        args,
+        vec![(
+            "https://matrix.example.com".to_owned(),
+            MEMBERSHIP_ROOM.to_owned(),
+            "@user:other.com".to_owned()
+        )],
+        "membership must be asked of hs_server_name for the remote user"
+    );
+    handler.close().await;
+}
+
+/// The check runs before the delayed-event job is registered, so a
+/// non-member with a delay_id on /get_token gets no job and no room either.
+#[tokio::test]
+async fn test_membership_not_joined_with_delay_id_registers_no_job() {
+    let probe = Arc::new(MembershipProbe::default());
+    let handler = new_membership_handler(
+        membership_deps(&probe, "@user:example.com", Membership::NotJoined),
+        true,
+    );
+    let mut req = valid_sfu_request();
+    req.delay_id = "syd_delay123".into();
+    req.delay_timeout = 30000;
+    let err = handler
+        .process_sfu_request(&req)
+        .await
+        .expect_err("expected MatrixErrorResponse");
+    assert_eq!(err.status, 403);
+    assert_eq!(probe.rooms_created(), 0);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(probe.participant_lookups(), 0);
+    handler.close().await;
+}

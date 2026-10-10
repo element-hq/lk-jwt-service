@@ -76,6 +76,15 @@ async fn main() {
         }
     };
 
+    if config.require_membership {
+        info!("Room membership is verified through the homeserver (LIVEKIT_REQUIRE_MEMBERSHIP)");
+    } else {
+        warn!(
+            "LIVEKIT_REQUIRE_MEMBERSHIP is off: /sfu/get, /get_token and /delegate_delayed_leave \
+             do not check room membership"
+        );
+    }
+
     let handler = Handler::new(
         LiveKitAuth {
             key: config.key.clone(),
@@ -91,6 +100,7 @@ async fn main() {
             skip_verify_tls: config.skip_verify_tls,
         }),
     );
+    handler.set_require_membership(config.require_membership);
 
     let sanity_check_interval_display = if config.sanity_check_interval.is_zero() {
         "disabled".to_owned()
