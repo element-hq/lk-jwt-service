@@ -112,6 +112,7 @@ Set environment variables to configure the service:
 | `LIVEKIT_HS_TOKEN`                            | The token used by the homeserver for authenticating requests to the service as an application service | ❌ No, ⚠️ Required when running as an application service unless `LIVEKIT_AS_REGISTRATION_FILE` is set | |
 | `LIVEKIT_AS_REGISTRATION_FILE`                | Path to an application service registration file containing the application service tokens. Takes precedence over `LIVEKIT_AS_TOKEN` and `LIVEKIT_HS_TOKEN` if specified. | ❌ No ⚠️ Required when running as an application service unless `LIVEKIT_AS_TOKEN` and `LIVEKIT_HS_TOKEN` are set | |
 | `LIVEKIT_HS_SERVER_NAME`                      | When running as an application service, the associated homeserver's server name. The C-S API needs to be resolvable from the server name. | ❌ No, ⚠️ Required when running as an application service | |
+| `LIVEKIT_REQUIRE_MEMBERSHIP`                  | When `true`, `/sfu/get`, `/get_token` and `/delegate_delayed_leave` also check that the user is joined to the room, through the homeserver (see [Requiring room membership](#-requiring-room-membership-on-the-standalone-endpoints)). The service refuses to start if it is set without the application service configuration. | ❌ No | `false` |
 
 > [!WARNING]
 > **Restricting room creation** requires two pieces working together:
@@ -169,6 +170,34 @@ io.element.msc4502.scopes: [ "urn:matrix:client:io.element.msc4502:rooms:is_join
 io.element.msc4512.proxy_prefix: "rtc/livekit" # Proxy /rtc/livekit requests on the C-S and S-S API
 io.element.msc4512.proxy_url: "http://127.0.0.1:1234" # Forward proxied requests to this URL
 ```
+
+## 🔒 Requiring Room Membership on the Standalone Endpoints
+
+The endpoints that Synapse proxies (`/_matrix/client/unstable/io.element.msc4195/rtc/livekit/…`) verify that the
+requesting user is joined to the room. The standalone endpoints `/sfu/get`, `/get_token` and
+`/delegate_delayed_leave` authenticate the OpenID token only, so anyone with a valid token of an allowed
+homeserver can obtain a LiveKit token for any room ID they know. Set `LIVEKIT_REQUIRE_MEMBERSHIP=true` to add the
+same membership check to these endpoints (and to the proxied `delegate_delayed_leave`). The default is `false`,
+which keeps the previous behaviour.
+
+With the flag on:
+
+- The service asks the homeserver configured in `LIVEKIT_HS_SERVER_NAME` (never the server named in the OpenID
+  token) whether the user is joined, using the application service token and
+  [MSC4502](https://github.com/matrix-org/matrix-spec-proposals/pull/4502). The room ID must be a `!` room ID.
+- A user who is not joined gets `403 M_FORBIDDEN`; no LiveKit room is created and no delayed-event job is registered.
+  Any other failure (homeserver unreachable, MSC4502 or the scope missing, unexpected response) fails closed with
+  `502 M_UNKNOWN`, and the error, including the HTTP status, is logged at error level.
+- The delayed leave is checked when it is registered, never afterwards, so a leave still fires after the user left.
+- A participant who is already connected stays connected, and a token already issued stays valid until it expires.
+- The service refuses to start unless the application service configuration is set up
+  (`LIVEKIT_AS_REGISTRATION_FILE`, or `LIVEKIT_AS_TOKEN`, `LIVEKIT_HS_TOKEN` and `LIVEKIT_HS_SERVER_NAME`), even if
+  Synapse does not proxy any requests to the service.
+
+On Synapse, set `experimental_features.msc4502_enabled: true` and register the service as an application service
+whose registration file contains `io.element.msc4502.scopes: ["urn:matrix:client:io.element.msc4502:rooms:is_joined"]`
+and a `users` namespace that covers the users to be checked (see the example above). The membership of remote users
+is read from the local homeserver's room state, so the namespace needs to cover local users only.
 
 ## 🔌 LiveKit SFU Wiring (Webhooks)
 
