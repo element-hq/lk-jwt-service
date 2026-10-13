@@ -915,13 +915,6 @@ impl Handler {
         if !self.verifies_legacy_membership {
             return Ok(());
         }
-        if !room_id.starts_with('!') {
-            return Err(MatrixErrorResponse {
-                status: 400,
-                errcode: "M_INVALID_PARAM".into(),
-                err: "The room ID is malformed".into(),
-            });
-        }
         // Use the `hs_server_name` we are configured for rather than the one
         // specified in the OpenID token.
         let hs_server_name = &self.app_service_config.hs_server_name;

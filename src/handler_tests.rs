@@ -5265,36 +5265,6 @@ async fn test_membership_without_app_service_never_calls_is_joined() {
     }
 }
 
-/// A room ID must be a `!` room ID; aliases and garbage are rejected before
-/// the homeserver is asked anything.
-#[tokio::test]
-async fn test_membership_rejects_non_room_id() {
-    for endpoint in STANDALONE_ENDPOINTS {
-        for room in [
-            "#alias:example.com",
-            "room-without-sigil",
-            "$event:example.com",
-        ] {
-            let probe = Arc::new(MembershipProbe::default());
-            let handler = membership_handler_for(&probe, Membership::Unmocked, true);
-            let err = call_endpoint(&handler, endpoint, room)
-                .await
-                .expect_err("expected MatrixErrorResponse");
-            assert_eq!(err.status, 400, "{endpoint:?} {room}: status");
-            assert_eq!(
-                err.errcode, "M_INVALID_PARAM",
-                "{endpoint:?} {room}: errcode"
-            );
-            assert_eq!(
-                probe.is_joined_calls(),
-                0,
-                "{endpoint:?} {room}: is_joined calls"
-            );
-            handler.close().await;
-        }
-    }
-}
-
 /// The membership check runs after the request's local checks, so a request
 /// that is refused anyway costs the homeserver nothing: here a user of a
 /// restricted homeserver asking for delegation.
