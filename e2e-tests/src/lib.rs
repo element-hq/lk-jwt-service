@@ -207,6 +207,47 @@ pub async fn join_room_via(
     assert!(status.is_success(), "join failed: {status}: {body}");
 }
 
+/// Requests an OpenID token for `user` from the homeserver behind
+/// `cs_api_url`, as a client does before calling the service's standalone
+/// endpoints. Returned as the JSON object those endpoints expect under
+/// `openid_token`.
+pub async fn request_openid_token(cs_api_url: &str, user: &MatrixUser) -> serde_json::Value {
+    let mut url = reqwest::Url::parse(cs_api_url).expect("invalid CS API URL");
+    url.path_segments_mut()
+        .expect("cs_api_url cannot be a base")
+        .extend([
+            "_matrix",
+            "client",
+            "v3",
+            "user",
+            user.user_id.as_str(),
+            "openid",
+            "request_token",
+        ]);
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(&user.access_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("OpenID token request failed");
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .expect("OpenID token response was not valid JSON");
+    assert!(
+        status.is_success(),
+        "requesting an OpenID token failed: {status}: {body}"
+    );
+    assert!(
+        body["access_token"].is_string() && body["matrix_server_name"].is_string(),
+        "OpenID token response is missing fields: {body}"
+    );
+    body
+}
+
 // ── SFU verification ─────────────────────────────────────────────────────────
 
 /// Connects to the LiveKit SFU at `sfu_addr`'s RTC signalling endpoint using

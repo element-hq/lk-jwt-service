@@ -7,6 +7,7 @@
 //! recovery, and the HTTP endpoints.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::Body;
 use base64::Engine;
@@ -294,8 +295,13 @@ fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
     )
 }
 
-/// Creates a Handler configured for testing the /get_token C-S requests.
-fn new_get_token_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+/// Creates a Handler configured for testing the /get_token C-S requests,
+/// running as the application service of example.com. Unless `deps` mocks
+/// `is_joined`, every user counts as joined.
+fn new_get_token_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handler> {
+    if deps.is_joined_fn.is_none() {
+        deps.is_joined_fn = is_joined_ok(true);
+    }
     Handler::new(
         LiveKitAuth {
             key: "key".into(),
@@ -333,8 +339,12 @@ fn new_delegate_delayed_leave_handler(deps: HandlerTestDeps) -> Arc<Handler> {
 
 /// Creates a Handler configured for testing delayed leave delegation while
 /// running as the application service of example.com, with other.com as a
-/// further full-access homeserver.
-fn new_delegation_app_service_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+/// further full-access homeserver. Unless `deps` mocks `is_joined`, every
+/// user counts as joined.
+fn new_delegation_app_service_handler(mut deps: HandlerTestDeps) -> Arc<Handler> {
+    if deps.is_joined_fn.is_none() {
+        deps.is_joined_fn = is_joined_ok(true);
+    }
     Handler::new(
         default_auth(),
         vec!["example.com".into(), "other.com".into()],
@@ -359,11 +369,16 @@ fn new_delegation_app_service_handler(deps: HandlerTestDeps) -> Arc<Handler> {
     )
 }
 
-/// Creates a Handler configured for testing delegate_delayed_leave C-S requests.
+/// Creates a Handler configured for testing delegate_delayed_leave C-S
+/// requests. Unless `deps` mocks them, the delay lookup finds a 30 s delay
+/// and every user counts as joined.
 fn new_delegate_delayed_leave_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handler> {
     if deps.get_delayed_event_delay_fn.is_none() {
         deps.get_delayed_event_delay_fn =
             Some(Box::new(|_, _, _, _, _| Ok(Duration::from_secs(30))));
+    }
+    if deps.is_joined_fn.is_none() {
+        deps.is_joined_fn = is_joined_ok(true);
     }
     Handler::new(
         default_auth(),
@@ -4814,7 +4829,153 @@ async fn test_process_delegate_delayed_leave_cs_delay_lookup_unavailable() {
     handler.close().await;
 }
 
-// ── LIVEKIT_REQUIRE_MEMBERSHIP on the standalone endpoints ────────────────────
+/// A leave may only be delegated by a member of the room. The route asks the configured
+/// local homeserver about the user named in the mxid header, for the requested room.
+#[tokio::test]
+async fn test_process_delegate_delayed_leave_cs_asks_membership() {
+    let is_joined_args: Arc<Mutex<Vec<(String, String, String)>>> = Default::default();
+    let captured = is_joined_args.clone();
+    let deps = HandlerTestDeps {
+        is_joined_fn: Some(Box::new(move |url, room, subject| {
+            captured.lock().unwrap().push((
+                url.as_str().to_owned(),
+                room.to_owned(),
+                subject.to_string(),
+            ));
+            Ok(true)
+        })),
+        // Keep the registered job from touching anything.
+        participant_exists_fn: Some(Box::new(|_, _| Box::pin(std::future::pending()))),
+        ..Default::default()
+    };
+    let handler = new_delegate_delayed_leave_cs_handler(deps);
+    let req = valid_delegate_delayed_leave_cs_request();
+
+    handler
+        .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
+        .await
+        .expect("unexpected error");
+    assert_eq!(
+        *is_joined_args.lock().unwrap(),
+        vec![(
+            "https://matrix.example.com".to_owned(),
+            req.room_id.clone(),
+            DELEGATE_DELAYED_LEAVE_CS_MXID.to_owned()
+        )],
+        "expected one is_joined call against the configured local homeserver"
+    );
+    handler.close().await;
+}
+
+/// A user who is not in the room gets 403 M_FORBIDDEN before the delay is
+/// looked up, so no job is registered and the delayed event is never touched.
+#[tokio::test]
+async fn test_process_delegate_delayed_leave_cs_not_joined() {
+    let delay_lookups = Arc::new(AtomicUsize::new(0));
+    let counter = delay_lookups.clone();
+    let deps = HandlerTestDeps {
+        is_joined_fn: is_joined_ok(false),
+        get_delayed_event_delay_fn: Some(Box::new(move |_, _, _, _, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Duration::from_secs(30))
+        })),
+        ..Default::default()
+    };
+    let handler = new_delegate_delayed_leave_cs_handler(deps);
+    let req = valid_delegate_delayed_leave_cs_request();
+
+    let err = handler
+        .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
+        .await
+        .expect_err("expected MatrixErrorResponse");
+    assert_eq!(err.status, 403, "expected 403");
+    assert_eq!(err.errcode, "M_FORBIDDEN", "expected M_FORBIDDEN");
+    assert_eq!(
+        delay_lookups.load(Ordering::SeqCst),
+        0,
+        "expected no delay lookup, and so no job, for a non-member"
+    );
+    handler.close().await;
+}
+
+/// A homeserver that cannot answer the membership question fails with 502 M_UNKNOWN.
+#[tokio::test]
+async fn test_process_delegate_delayed_leave_cs_membership_check_error() {
+    let deps = HandlerTestDeps {
+        is_joined_fn: Some(Box::new(|_, _, _| Err("boom".into()))),
+        ..Default::default()
+    };
+    let handler = new_delegate_delayed_leave_cs_handler(deps);
+    let req = valid_delegate_delayed_leave_cs_request();
+
+    let err = handler
+        .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
+        .await
+        .expect_err("expected MatrixErrorResponse");
+    assert_eq!(err.status, 502, "expected 502");
+    assert_eq!(err.errcode, "M_UNKNOWN", "expected M_UNKNOWN");
+    handler.close().await;
+}
+
+/// The route is reached through the local homeserver for one of its own
+/// users, so the check does not depend on the full-access homeservers.
+#[tokio::test]
+async fn test_process_delegate_delayed_leave_cs_checks_membership_with_other_full_access_homeservers()
+ {
+    let deps = HandlerTestDeps {
+        is_joined_fn: is_joined_ok(false),
+        get_delayed_event_delay_fn: Some(Box::new(|_, _, _, _, _| Ok(Duration::from_secs(30)))),
+        ..Default::default()
+    };
+    let handler = Handler::new(
+        default_auth(),
+        vec!["example.com".into(), "other.com".into()],
+        crate::config::AppServiceConfig {
+            as_token: "as_token".into(),
+            hs_token: HS_TOKEN.into(),
+            hs_server_name: "example.com".into(),
+        },
+        Duration::ZERO,
+        HashMap::from([(
+            "example.com".to_owned(),
+            CsApiUrl("https://matrix.example.com".into()),
+        )]),
+        None,
+        Arc::new(deps),
+    );
+    assert!(!handler.verifies_legacy_membership());
+    let req = valid_delegate_delayed_leave_cs_request();
+
+    let err = handler
+        .process_delegate_delayed_leave_cs(&req, DELEGATE_DELAYED_LEAVE_CS_MXID)
+        .await
+        .expect_err("expected MatrixErrorResponse");
+    assert_eq!(err.status, 403, "expected 403");
+    assert_eq!(err.errcode, "M_FORBIDDEN", "expected M_FORBIDDEN");
+    handler.close().await;
+}
+
+/// A malformed mxid header is rejected as 400 M_INVALID_PARAM before the
+/// homeserver is asked anything.
+#[tokio::test]
+async fn test_process_delegate_delayed_leave_cs_malformed_mxid() {
+    let deps = HandlerTestDeps {
+        is_joined_fn: Some(Box::new(|_, _, _| panic!("is_joined must not be called"))),
+        ..Default::default()
+    };
+    let handler = new_delegate_delayed_leave_cs_handler(deps);
+    let req = valid_delegate_delayed_leave_cs_request();
+
+    let err = handler
+        .process_delegate_delayed_leave_cs(&req, "not-a-user-id")
+        .await
+        .expect_err("expected MatrixErrorResponse");
+    assert_eq!(err.status, 400, "expected 400");
+    assert_eq!(err.errcode, "M_INVALID_PARAM", "expected M_INVALID_PARAM");
+    handler.close().await;
+}
+
+// ── Room membership on the standalone endpoints ───────────────────────────────
 
 /// What `is_joined` should answer in a membership test.
 #[derive(Clone, Copy)]
@@ -4830,9 +4991,9 @@ enum Membership {
 /// Counters and captures shared with the mocks of a membership test.
 #[derive(Default)]
 struct MembershipProbe {
-    is_joined_calls: std::sync::atomic::AtomicUsize,
-    rooms_created: std::sync::atomic::AtomicUsize,
-    participant_lookups: std::sync::atomic::AtomicUsize,
+    is_joined_calls: AtomicUsize,
+    rooms_created: AtomicUsize,
+    participant_lookups: AtomicUsize,
     /// (cs_api_url, room_id, subject) of every is_joined call.
     is_joined_args: Mutex<Vec<(String, String, String)>>,
 }
@@ -4893,13 +5054,41 @@ fn membership_deps(
     }
 }
 
-/// A Handler running as the application service of example.com, serving
-/// example.com and other.com as full-access homeservers, with the membership
-/// check switched on or off.
-fn new_membership_handler(deps: HandlerTestDeps, require_membership: bool) -> Arc<Handler> {
-    let handler = new_delegation_app_service_handler(deps);
-    handler.set_require_membership(require_membership);
-    handler
+/// A Handler with `full_access` as the full-access homeservers, running as
+/// the application service of example.com if `app_service` is set. Unlike
+/// the other app-service constructors it leaves `is_joined` exactly as
+/// `deps` mocks it, so an unexpected call panics.
+fn new_membership_handler(
+    deps: HandlerTestDeps,
+    app_service: bool,
+    full_access: &[&str],
+) -> Arc<Handler> {
+    Handler::new(
+        default_auth(),
+        full_access.iter().map(|s| s.to_string()).collect(),
+        if app_service {
+            crate::config::AppServiceConfig {
+                as_token: "as_token".into(),
+                hs_token: HS_TOKEN.into(),
+                hs_server_name: "example.com".into(),
+            }
+        } else {
+            Default::default()
+        },
+        Duration::ZERO,
+        HashMap::from([
+            (
+                "example.com".to_owned(),
+                CsApiUrl("https://matrix.example.com".into()),
+            ),
+            (
+                "other.com".to_owned(),
+                CsApiUrl("https://matrix.other.com".into()),
+            ),
+        ]),
+        None,
+        Arc::new(deps),
+    )
 }
 
 fn membership_legacy_request(server: &str, room: &str) -> LegacySfuRequest {
@@ -4915,21 +5104,18 @@ fn membership_legacy_request(server: &str, room: &str) -> LegacySfuRequest {
     }
 }
 
-/// Runs `call` once for each of the three standalone endpoints (plus the C-S
-/// delayed-leave route), against a handler built from `deps`.
+/// The standalone endpoints.
 #[derive(Clone, Copy, Debug)]
 enum Endpoint {
     Legacy,
     GetToken,
     DelegateDelayedLeave,
-    DelegateDelayedLeaveCs,
 }
 
-const ALL_ENDPOINTS: [Endpoint; 4] = [
+const STANDALONE_ENDPOINTS: [Endpoint; 3] = [
     Endpoint::Legacy,
     Endpoint::GetToken,
     Endpoint::DelegateDelayedLeave,
-    Endpoint::DelegateDelayedLeaveCs,
 ];
 
 /// Sends a valid request for `endpoint` for `@user:example.com` in `room`.
@@ -4938,7 +5124,6 @@ async fn call_endpoint(
     endpoint: Endpoint,
     room: &str,
 ) -> Result<(), MatrixErrorResponse> {
-    let user = "@user:example.com";
     match endpoint {
         Endpoint::Legacy => handler
             .process_legacy_sfu_request(&membership_legacy_request("example.com", room))
@@ -4957,38 +5142,25 @@ async fn call_endpoint(
                 .await
                 .map(|_| ())
         }
-        Endpoint::DelegateDelayedLeaveCs => {
-            let mut req = valid_delegate_delayed_leave_cs_request();
-            req.room_id = room.into();
-            handler
-                .process_delegate_delayed_leave_cs(&req, user)
-                .await
-                .map(|_| ())
-        }
     }
 }
 
 fn membership_handler_for(
-    endpoint: Endpoint,
     probe: &Arc<MembershipProbe>,
     membership: Membership,
-    require_membership: bool,
+    app_service: bool,
 ) -> Arc<Handler> {
-    let mut deps = membership_deps(probe, "@user:example.com", membership);
-    if matches!(endpoint, Endpoint::DelegateDelayedLeaveCs) {
-        deps.get_delayed_event_delay_fn =
-            Some(Box::new(|_, _, _, _, _| Ok(Duration::from_secs(30))));
-    }
-    new_membership_handler(deps, require_membership)
+    let deps = membership_deps(probe, "@user:example.com", membership);
+    new_membership_handler(deps, app_service, &["example.com"])
 }
 
 const MEMBERSHIP_ROOM: &str = "!testRoom:example.com";
 
 #[tokio::test]
 async fn test_membership_joined_user_is_served() {
-    for endpoint in ALL_ENDPOINTS {
+    for endpoint in STANDALONE_ENDPOINTS {
         let probe = Arc::new(MembershipProbe::default());
-        let handler = membership_handler_for(endpoint, &probe, Membership::Joined, true);
+        let handler = membership_handler_for(&probe, Membership::Joined, true);
         call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
             .await
             .unwrap_or_else(|e| panic!("{endpoint:?}: expected success, got {}", e.status));
@@ -5009,9 +5181,9 @@ async fn test_membership_joined_user_is_served() {
 
 #[tokio::test]
 async fn test_membership_not_joined_is_forbidden_and_creates_nothing() {
-    for endpoint in ALL_ENDPOINTS {
+    for endpoint in STANDALONE_ENDPOINTS {
         let probe = Arc::new(MembershipProbe::default());
-        let handler = membership_handler_for(endpoint, &probe, Membership::NotJoined, true);
+        let handler = membership_handler_for(&probe, Membership::NotJoined, true);
         let err = call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
             .await
             .expect_err("expected MatrixErrorResponse");
@@ -5036,9 +5208,9 @@ async fn test_membership_not_joined_is_forbidden_and_creates_nothing() {
 
 #[tokio::test]
 async fn test_membership_check_error_fails_closed_with_502() {
-    for endpoint in ALL_ENDPOINTS {
+    for endpoint in STANDALONE_ENDPOINTS {
         let probe = Arc::new(MembershipProbe::default());
-        let handler = membership_handler_for(endpoint, &probe, Membership::Error, true);
+        let handler = membership_handler_for(&probe, Membership::Error, true);
         let err = call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
             .await
             .expect_err("expected MatrixErrorResponse");
@@ -5053,17 +5225,38 @@ async fn test_membership_check_error_fails_closed_with_502() {
     }
 }
 
-/// With the flag off the behaviour is the upstream one: `is_joined` is never
-/// consulted (an unmocked `is_joined` panics) and the request is served.
+/// The configured homeserver not resolving is a deployment problem, not the
+/// client's: the standalone endpoints fail closed with 502 rather than the
+/// resolver's usual 400.
 #[tokio::test]
-async fn test_membership_flag_off_never_calls_is_joined() {
-    for endpoint in [
-        Endpoint::Legacy,
-        Endpoint::GetToken,
-        Endpoint::DelegateDelayedLeave,
-    ] {
+async fn test_membership_unresolvable_homeserver_fails_closed_with_502() {
+    for endpoint in STANDALONE_ENDPOINTS {
         let probe = Arc::new(MembershipProbe::default());
-        let handler = membership_handler_for(endpoint, &probe, Membership::Unmocked, false);
+        let mut deps = membership_deps(&probe, "@user:example.com", Membership::Unmocked);
+        deps.resolve_cs_api_url_fn = Some(Box::new(|_| Err("no .well-known".into())));
+        let handler = new_membership_handler(deps, true, &["example.com"]);
+        let err = call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
+            .await
+            .expect_err("expected MatrixErrorResponse");
+        assert_eq!(err.status, 502, "{endpoint:?}: status");
+        assert_eq!(err.errcode, "M_UNKNOWN", "{endpoint:?}: errcode");
+        assert_eq!(
+            probe.rooms_created(),
+            0,
+            "{endpoint:?}: LiveKit room created"
+        );
+        handler.close().await;
+    }
+}
+
+/// Without the application service configuration there is no credential to
+/// ask a homeserver: `is_joined` is never consulted (an unmocked `is_joined`
+/// panics) and the OpenID token alone is checked, as before.
+#[tokio::test]
+async fn test_membership_without_app_service_never_calls_is_joined() {
+    for endpoint in STANDALONE_ENDPOINTS {
+        let probe = Arc::new(MembershipProbe::default());
+        let handler = membership_handler_for(&probe, Membership::Unmocked, false);
         call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
             .await
             .unwrap_or_else(|e| panic!("{endpoint:?}: expected success, got {}", e.status));
@@ -5076,14 +5269,14 @@ async fn test_membership_flag_off_never_calls_is_joined() {
 /// the homeserver is asked anything.
 #[tokio::test]
 async fn test_membership_rejects_non_room_id() {
-    for endpoint in ALL_ENDPOINTS {
+    for endpoint in STANDALONE_ENDPOINTS {
         for room in [
             "#alias:example.com",
             "room-without-sigil",
             "$event:example.com",
         ] {
             let probe = Arc::new(MembershipProbe::default());
-            let handler = membership_handler_for(endpoint, &probe, Membership::Unmocked, true);
+            let handler = membership_handler_for(&probe, Membership::Unmocked, true);
             let err = call_endpoint(&handler, endpoint, room)
                 .await
                 .expect_err("expected MatrixErrorResponse");
@@ -5102,15 +5295,57 @@ async fn test_membership_rejects_non_room_id() {
     }
 }
 
-/// The membership check goes to the configured homeserver, even when the
-/// OpenID token names another server, so the AS token is never sent to a
-/// server picked by the client.
+/// The membership check runs after the request's local checks, so a request
+/// that is refused anyway costs the homeserver nothing: here a user of a
+/// restricted homeserver asking for delegation.
 #[tokio::test]
-async fn test_membership_uses_configured_homeserver_not_openid_server() {
+async fn test_membership_checked_after_local_checks() {
+    let probe = Arc::new(MembershipProbe::default());
+    let handler = new_membership_handler(
+        membership_deps(&probe, "@user:third.com", Membership::Unmocked),
+        true,
+        &["example.com"],
+    );
+
+    let mut req = valid_delegate_delayed_leave_request();
+    req.openid_token.matrix_server_name = "third.com".into();
+    req.member.claimed_user_id = "@user:third.com".into();
+    let err = handler
+        .process_delegate_delayed_leave(&req)
+        .await
+        .expect_err("expected MatrixErrorResponse");
+    assert_eq!(err.status, 403);
+    assert_eq!(
+        err.err,
+        "Delegation of delayed events is only supported for full access users"
+    );
+
+    let mut req = valid_sfu_request();
+    req.openid_token.matrix_server_name = "third.com".into();
+    req.member.claimed_user_id = "@user:third.com".into();
+    req.delay_id = "syd_delay123".into();
+    req.delay_timeout = 30000;
+    let err = handler
+        .process_sfu_request(&req)
+        .await
+        .expect_err("expected MatrixErrorResponse");
+    assert_eq!(err.status, 400);
+    assert_eq!(err.errcode, "M_BAD_JSON");
+
+    assert_eq!(probe.is_joined_calls(), 0);
+    handler.close().await;
+}
+
+/// A restricted user (from another homeserver) is checked too, against the
+/// configured homeserver and never the server named in the OpenID token, so
+/// the AS token is never sent to a server picked by the client.
+#[tokio::test]
+async fn test_membership_checks_restricted_user_against_configured_homeserver() {
     let probe = Arc::new(MembershipProbe::default());
     let handler = new_membership_handler(
         membership_deps(&probe, "@user:other.com", Membership::Joined),
         true,
+        &["example.com"],
     );
     handler
         .process_legacy_sfu_request(&membership_legacy_request("other.com", MEMBERSHIP_ROOM))
@@ -5137,6 +5372,7 @@ async fn test_membership_not_joined_with_delay_id_registers_no_job() {
     let handler = new_membership_handler(
         membership_deps(&probe, "@user:example.com", Membership::NotJoined),
         true,
+        &["example.com"],
     );
     let mut req = valid_sfu_request();
     req.delay_id = "syd_delay123".into();
@@ -5150,4 +5386,50 @@ async fn test_membership_not_joined_with_delay_id_registers_no_job() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(probe.participant_lookups(), 0);
     handler.close().await;
+}
+
+/// The configured homeserver can only vouch for membership in rooms it is
+/// in, which is every room with a call on this SFU exactly when its users
+/// are the only ones who can create LiveKit rooms. With other full-access
+/// homeservers, a wildcard, or a full-access homeserver that is not the
+/// configured one, the standalone endpoints are served on the OpenID token
+/// alone, as before.
+#[tokio::test]
+async fn test_membership_skipped_unless_hs_is_the_only_full_access_homeserver() {
+    // example.com is full access, so all standalone endpoints serve its user.
+    for full_access in [&["example.com", "other.com"][..], &["*"][..]] {
+        for endpoint in STANDALONE_ENDPOINTS {
+            let probe = Arc::new(MembershipProbe::default());
+            let deps = membership_deps(&probe, "@user:example.com", Membership::Unmocked);
+            let handler = new_membership_handler(deps, true, full_access);
+            assert!(!handler.verifies_legacy_membership(), "{full_access:?}");
+            call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{full_access:?} {endpoint:?}: expected success, got {}",
+                        e.status
+                    )
+                });
+            assert_eq!(
+                probe.is_joined_calls(),
+                0,
+                "{full_access:?} {endpoint:?}: is_joined calls"
+            );
+            handler.close().await;
+        }
+    }
+    // example.com is restricted here, so only the token endpoints serve its
+    // user (delegation is refused locally either way).
+    for endpoint in [Endpoint::Legacy, Endpoint::GetToken] {
+        let probe = Arc::new(MembershipProbe::default());
+        let deps = membership_deps(&probe, "@user:example.com", Membership::Unmocked);
+        let handler = new_membership_handler(deps, true, &["other.com"]);
+        assert!(!handler.verifies_legacy_membership());
+        call_endpoint(&handler, endpoint, MEMBERSHIP_ROOM)
+            .await
+            .unwrap_or_else(|e| panic!("{endpoint:?}: expected success, got {}", e.status));
+        assert_eq!(probe.is_joined_calls(), 0, "{endpoint:?}: is_joined calls");
+        handler.close().await;
+    }
 }

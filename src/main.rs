@@ -76,15 +76,6 @@ async fn main() {
         }
     };
 
-    if config.require_membership {
-        info!("Room membership is verified through the homeserver (LIVEKIT_REQUIRE_MEMBERSHIP)");
-    } else {
-        warn!(
-            "LIVEKIT_REQUIRE_MEMBERSHIP is off: /sfu/get, /get_token and /delegate_delayed_leave \
-             do not check room membership"
-        );
-    }
-
     let handler = Handler::new(
         LiveKitAuth {
             key: config.key.clone(),
@@ -100,7 +91,19 @@ async fn main() {
             skip_verify_tls: config.skip_verify_tls,
         }),
     );
-    handler.set_require_membership(config.require_membership);
+
+    if handler.verifies_legacy_membership() {
+        info!(
+            "/sfu/get, /get_token and /delegate_delayed_leave verify room membership through the homeserver"
+        );
+    } else {
+        warn!(
+            LIVEKIT_FULL_ACCESS_HOMESERVERS = ?config.full_access_homeservers,
+            "/sfu/get, /get_token and /delegate_delayed_leave do not verify room membership: \
+             the homeserver can only vouch for membership when it is the only full-access homeserver \
+             and when it integrates the service as an application service"
+        );
+    }
 
     let sanity_check_interval_display = if config.sanity_check_interval.is_zero() {
         "disabled".to_owned()
