@@ -173,24 +173,10 @@ io.element.msc4512.proxy_url: "http://127.0.0.1:1234" # Forward proxied requests
 ## 🔒 Room Membership on the Standalone Endpoints
 
 The endpoints that Synapse proxies (`/_matrix/client/unstable/io.element.msc4195/rtc/livekit/…`) verify that the
-requesting user is joined to the room. The standalone endpoints `/sfu/get`, `/get_token` and
-`/delegate_delayed_leave` authenticate the OpenID token, which on its own only proves who the user is, not that
-they are in the room. The service applies the same membership check to these endpoints only when it runs as an
-application service **and** `LIVEKIT_FULL_ACCESS_HOMESERVERS` names only the configured homeserver. Otherwise, with several full-access homeservers or `*`, calls may exist in rooms the application service's
-homeserver doesn't know about which makes it impossible to verify room membership.
-
-With the check active:
-
-- The service asks the homeserver configured in `LIVEKIT_HS_SERVER_NAME` (never the server named in the OpenID
-  token) whether the user is joined, using the application service token and
-  [MSC4502](https://github.com/matrix-org/matrix-spec-proposals/pull/4502). The room ID must be a `!` room ID.
-- A user who is not joined gets `403 M_FORBIDDEN`; no LiveKit room is created and no delayed-event job is registered.
-  Any other failure (homeserver unresolvable or unreachable, MSC4502 or the scope missing, unexpected response)
-  fails with `502 M_UNKNOWN`, and the error is logged at error level.
-- Users of other homeservers (restricted users) are checked too; their membership is read from the local
-  homeserver's room state.
-- The delayed leave is checked when it is registered, never afterwards, so a leave still fires after the user left.
-- A participant who is already connected stays connected, and a token already issued stays valid until it expires.
+requesting user is joined to the room. The standalone endpoints `/sfu/get`, `/get_token` and `/delegate_delayed_leave`,
+however, only apply this check when the service runs as an application service **and** `LIVEKIT_FULL_ACCESS_HOMESERVERS`
+names only the configured homeserver. Otherwise, with several full-access homeservers or `*`, sessions may exist in
+rooms the application service's homeserver doesn't know about which makes it impossible to verify room membership.
 
 This needs `experimental_features.msc4502_enabled: true` on Synapse and the
 `urn:matrix:client:io.element.msc4502:rooms:is_joined` scope in the registration file (see
