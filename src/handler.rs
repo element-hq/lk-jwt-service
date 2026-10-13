@@ -223,7 +223,7 @@ impl Handler {
         let (recovery_done_tx, _) = watch::channel(false);
 
         // On the legacy endpoints, membership can only be verified where the
-        // configured homeserver is in every room this SFU hosts a call for,
+        // configured homeserver is in every room this SFU hosts a session for,
         // which holds exactly when its users are the only ones who can create
         // LiveKit rooms.
         let verifies_legacy_membership = app_service_config.is_set_up()
