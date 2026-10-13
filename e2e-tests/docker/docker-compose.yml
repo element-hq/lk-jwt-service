@@ -82,6 +82,10 @@ services:
       - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse-a.e2e.test
       - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service-a.yaml
       - LIVEKIT_HS_SERVER_NAME=synapse-a.e2e.test
+      # The standalone endpoints verify OpenID tokens against the
+      # homeserver's federation API, which serves the self-signed
+      # certificate from ./certs.
+      - LIVEKIT_INSECURE_SKIP_VERIFY_TLS=YES_I_KNOW_WHAT_I_AM_DOING
       - LIVEKIT_CS_API_URL_OVERRIDES=synapse-a.e2e.test=http://synapse-a:8008,synapse-b.e2e.test=http://synapse-b:8008
     volumes:
       - ./app-service-a.yaml:/etc/lk-jwt-service/app-service-a.yaml:ro
@@ -100,9 +104,15 @@ services:
       - LIVEKIT_URL=ws://livekit-b:7880
       - LIVEKIT_KEY=e2e_livekit_key_b
       - LIVEKIT_SECRET=e2e_livekit_secret_b_0123456789ab
-      - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse-b.e2e.test
+      # A second full-access homeserver: this service's homeserver cannot
+      # verify room membership on the standalone endpoints.
+      - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse-b.e2e.test,synapse-a.e2e.test
       - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service-b.yaml
       - LIVEKIT_HS_SERVER_NAME=synapse-b.e2e.test
+      # The standalone endpoints verify OpenID tokens against the
+      # homeserver's federation API, which serves the self-signed
+      # certificate from ./certs.
+      - LIVEKIT_INSECURE_SKIP_VERIFY_TLS=YES_I_KNOW_WHAT_I_AM_DOING
       - LIVEKIT_CS_API_URL_OVERRIDES=synapse-b.e2e.test=http://synapse-b:8008,synapse-a.e2e.test=http://synapse-a:8008
     volumes:
       - ./app-service-b.yaml:/etc/lk-jwt-service/app-service-b.yaml:ro

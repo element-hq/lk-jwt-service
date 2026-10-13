@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use lk_jwt_service_integration_tests::{
-    FakeHomeserver, FakeRedis, FakeSfu, FakeUser, LIVEKIT_KEY, Service, ServiceConfig,
-    decode_livekit_jwt, expect_delayed_event_request, expect_delayed_event_request_count,
-    expect_job_not_persisted, expect_job_persisted, expect_matrix_error,
-    expect_no_delayed_event_request, expect_no_delayed_event_requests, expect_no_user_info_lookups,
+    APP_SERVICE_AS_TOKEN, FakeHomeserver, FakeRedis, FakeSfu, FakeUser, LIVEKIT_KEY, Service,
+    ServiceConfig, app_service_env, decode_livekit_jwt, expect_delayed_event_request,
+    expect_delayed_event_request_count, expect_is_joined_request, expect_job_not_persisted,
+    expect_job_persisted, expect_matrix_error, expect_no_delayed_event_request,
+    expect_no_delayed_event_requests, expect_no_is_joined_requests, expect_no_user_info_lookups,
     expect_user_info_lookup, livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request,
     wait_for_delayed_event_request_count, wait_for_job_removed,
 };
@@ -1151,4 +1152,91 @@ async fn expired_jobs_are_purged_on_restart() {
     expect_no_delayed_event_requests(&hs);
 
     drop(svc);
+}
+
+/// Running as an application service, a member of the room gets a token,
+/// after the service asked the homeserver about the user.
+#[tokio::test]
+async fn app_service_joined_user_is_served() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    let sfu = FakeSfu::new().await;
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        extra_env: app_service_env(&hs),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_sfu_get(&svc, sfu_get_request(&hs, &user).to_string()).await;
+
+    assert_eq!(status, 200, "body: {body}");
+    expect_is_joined_request(
+        &hs,
+        "!room:example.com",
+        &user.user_id,
+        APP_SERVICE_AS_TOKEN,
+    );
+    assert_eq!(sfu.create_room_requests().len(), 1);
+}
+
+/// Running as an application service, a valid OpenID token is not enough: a
+/// user who is not in the room gets 403 and no LiveKit room is created.
+#[tokio::test]
+async fn app_service_not_joined_user_is_forbidden() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_not_joined("!room:example.com", &user.user_id);
+    let sfu = FakeSfu::new().await;
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        extra_env: app_service_env(&hs),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_sfu_get(&svc, sfu_get_request(&hs, &user).to_string()).await;
+
+    expect_matrix_error(status, &body, 403, "M_FORBIDDEN");
+    expect_is_joined_request(
+        &hs,
+        "!room:example.com",
+        &user.user_id,
+        APP_SERVICE_AS_TOKEN,
+    );
+    assert_eq!(
+        sfu.create_room_requests().len(),
+        0,
+        "no room may be created"
+    );
+    expect_no_delayed_event_requests(&hs);
+}
+
+/// Without the application service configuration the service has no
+/// credential to ask the homeserver: the OpenID token alone is checked.
+#[tokio::test]
+async fn no_app_service_does_not_ask_the_homeserver() {
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    hs.set_not_joined("!room:example.com", &user.user_id);
+    let sfu = FakeSfu::new().await;
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_sfu_get(&svc, sfu_get_request(&hs, &user).to_string()).await;
+
+    assert_eq!(status, 200, "body: {body}");
+    expect_no_is_joined_requests(&hs);
 }

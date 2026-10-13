@@ -92,6 +92,19 @@ async fn main() {
         }),
     );
 
+    if handler.verifies_legacy_membership() {
+        info!(
+            "/sfu/get, /get_token and /delegate_delayed_leave verify room membership through the homeserver"
+        );
+    } else {
+        warn!(
+            LIVEKIT_FULL_ACCESS_HOMESERVERS = ?config.full_access_homeservers,
+            "/sfu/get, /get_token and /delegate_delayed_leave do not verify room membership: \
+             the homeserver can only vouch for membership when it is the only full-access homeserver \
+             and when it integrates the service as an application service"
+        );
+    }
+
     let sanity_check_interval_display = if config.sanity_check_interval.is_zero() {
         "disabled".to_owned()
     } else {

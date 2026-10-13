@@ -159,6 +159,9 @@ pub struct Handler {
     full_access_homeservers: Vec<String>,
     /// Configuration options used for running as an application service.
     app_service_config: AppServiceConfig,
+    /// Whether the standalone endpoints verify room membership through the
+    /// homeserver.
+    verifies_legacy_membership: bool,
     /// The period between room-worker sanity checks. Zero disables the sanity
     /// check.
     sanity_check_interval: Duration,
@@ -219,11 +222,19 @@ impl Handler {
         let (loop_done_tx, _) = watch::channel(false);
         let (recovery_done_tx, _) = watch::channel(false);
 
+        // On the legacy endpoints, membership can only be verified where the
+        // configured homeserver is in every room this SFU hosts a session for,
+        // which holds exactly when its users are the only ones who can create
+        // LiveKit rooms.
+        let verifies_legacy_membership = app_service_config.is_set_up()
+            && full_access_homeservers == [app_service_config.hs_server_name.as_str()];
+
         let handler = Arc::new(Self {
             cancel: CancellationToken::new(),
             livekit_auth: lk_auth,
             full_access_homeservers,
             app_service_config,
+            verifies_legacy_membership,
             sanity_check_interval,
             cs_api_url_overrides: Arc::new(cs_api_url_overrides),
             cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
@@ -882,6 +893,57 @@ impl Handler {
         Ok(())
     }
 
+    /// Whether the standalone endpoints verify room membership through the
+    /// homeserver.
+    ///
+    /// True if we are running as an application service and the configured
+    /// home server is the only full-access server.
+    pub fn verifies_legacy_membership(&self) -> bool {
+        self.verifies_legacy_membership
+    }
+
+    /// Verifies that `matrix_id` is joined to `room_id` on the standalone endpoints.
+    ///
+    /// Does nothing if the service isn't configured to perform this check
+    /// (see [`Handler::verifies_legacy_membership`]).
+    async fn enforce_legacy_membership(
+        &self,
+        matrix_id: &str,
+        room_id: &str,
+    ) -> Result<(), MatrixErrorResponse> {
+        // Ensure we are actually configured to run this check.
+        if !self.verifies_legacy_membership {
+            return Ok(());
+        }
+        // Use the `hs_server_name` we are configured for rather than the one
+        // specified in the OpenID token.
+        let hs_server_name = &self.app_service_config.hs_server_name;
+        let cs_api_url = self
+            .deps
+            .resolve_cs_api_url(
+                hs_server_name,
+                &self.cs_api_url_overrides,
+                Some(&self.cs_api_url_cache),
+            )
+            .await
+            .map_err(|err| {
+                error!(matrix_id, room = %room_id, server_name = %hs_server_name, err = %err,
+                    "Handler: could not resolve the homeserver to check room membership");
+                MatrixErrorResponse {
+                    status: 502,
+                    errcode: "M_UNKNOWN".into(),
+                    err: "Unable to verify room membership".into(),
+                }
+            })?;
+        self.require_joined(
+            &cs_api_url,
+            room_id,
+            JoinedSubject::User(matrix_id),
+            "The requesting user is not a member of the room",
+        )
+        .await
+    }
+
     /// Deprecated: serves the pre-Matrix-2.0 /sfu/get endpoint. Remove once
     /// all in-the-wild clients have migrated to /get_token.
     pub(crate) async fn process_legacy_sfu_request(
@@ -904,6 +966,9 @@ impl Handler {
         debug!(matrix_id = %matrix_id,
             access = if is_full_access_user { "full" } else { "restricted" },
             "Handler: got Matrix user info");
+
+        self.enforce_legacy_membership(&matrix_id, &req.room)
+            .await?;
 
         let lk_identity = LiveKitIdentity(format!("{matrix_id}:{}", req.device_id));
         let slot_id = "m.call#ROOM";
@@ -981,6 +1046,9 @@ impl Handler {
         debug!(matrix_id = %matrix_id,
             access = if is_full_access_user { "full" } else { "restricted" },
             "Handler: got Matrix user info");
+
+        self.enforce_legacy_membership(&matrix_id, &req.room_id)
+            .await?;
 
         let lk_identity =
             legacy_livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
@@ -1230,6 +1298,9 @@ impl Handler {
             });
         }
 
+        self.enforce_legacy_membership(&matrix_id, &req.room_id)
+            .await?;
+
         let lk_identity =
             legacy_livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
@@ -1267,14 +1338,29 @@ impl Handler {
 
         self.require_matching_lk_url(&req.url, "delegate_delayed_leave_cs")?;
 
+        // Only checked for well-formedness; the C-S API is resolved from the
+        // configured `hs_server_name` below.
+        matrix_server_name(mxid_header).ok_or_else(|| MatrixErrorResponse {
+            status: 400,
+            errcode: "M_INVALID_PARAM".into(),
+            err: "Malformed user identifier".into(),
+        })?;
+
         let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
-        // Verify that the Client-Server API can be resolved and prime the
-        // cache.
         let cs_api_url = self
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
+
+        // A leave may only be delegated by a member of the room.
+        self.require_joined(
+            &cs_api_url,
+            &req.room_id,
+            JoinedSubject::User(mxid_header),
+            "The requesting user is not a member of the room",
+        )
+        .await?;
 
         let delay_timeout = self
             .look_up_delay_timeout(&cs_api_url, &req.delay_id, &req.room_id, mxid_header)

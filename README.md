@@ -170,6 +170,18 @@ io.element.msc4512.proxy_prefix: "rtc/livekit" # Proxy /rtc/livekit requests on 
 io.element.msc4512.proxy_url: "http://127.0.0.1:1234" # Forward proxied requests to this URL
 ```
 
+## 🔒 Room Membership on the Standalone Endpoints
+
+The endpoints that Synapse proxies (`/_matrix/client/unstable/io.element.msc4195/rtc/livekit/…`) verify that the
+requesting user is joined to the room. The standalone endpoints `/sfu/get`, `/get_token` and `/delegate_delayed_leave`,
+however, only apply this check when the service runs as an application service **and** `LIVEKIT_FULL_ACCESS_HOMESERVERS`
+names only the configured homeserver. Otherwise, with several full-access homeservers or `*`, sessions may exist in
+rooms the application service's homeserver doesn't know about which makes it impossible to verify room membership.
+
+This needs `experimental_features.msc4502_enabled: true` on Synapse and the
+`urn:matrix:client:io.element.msc4502:rooms:is_joined` scope in the registration file (see
+[Homeserver Wiring](#-homeserver-wiring-application-service)), which the proxied endpoints require anyway.
+
 ## 🔌 LiveKit SFU Wiring (Webhooks)
 
 Delegated MatrixRTC leave handling

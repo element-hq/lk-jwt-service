@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -204,6 +205,25 @@ pub async fn wait_for_delayed_event_request_count(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// The AS token that `app_service_env` configures.
+pub const APP_SERVICE_AS_TOKEN: &str = "as_token";
+
+/// Environment that makes the service the application service of the fake
+/// homeserver `hs`, for `ServiceConfig::extra_env`.
+pub fn app_service_env(hs: &FakeHomeserver) -> HashMap<String, String> {
+    HashMap::from([
+        (
+            "LIVEKIT_AS_TOKEN".to_owned(),
+            APP_SERVICE_AS_TOKEN.to_owned(),
+        ),
+        ("LIVEKIT_HS_TOKEN".to_owned(), "hs_token".to_owned()),
+        (
+            "LIVEKIT_HS_SERVER_NAME".to_owned(),
+            hs.server_name().to_owned(),
+        ),
+    ])
 }
 
 /// Assert that no /is_joined request has been recorded.
