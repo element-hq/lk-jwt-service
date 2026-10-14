@@ -187,7 +187,8 @@ async fn get_instead_of_post() {
 }
 
 /// A valid request from a joined user of the origin server succeeds, the
-/// user's membership is verified, and the LiveKit room is created.
+/// user's membership is verified, and the LiveKit room is created. By
+/// default any remote user may publish, as MSC4195 recommends.
 #[tokio::test]
 async fn success() {
     let hs = FakeHomeserver::new().await;
@@ -221,7 +222,7 @@ async fn success() {
     );
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
     assert_eq!(claims["video"]["roomCreate"].as_bool(), Some(false));
-    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));
+    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
 
     expect_is_joined_request(
@@ -237,6 +238,78 @@ async fn success() {
         claims["video"]["room"].as_str(),
         Some(rooms[0].name.as_str())
     );
+}
+
+/// When LIVEKIT_REMOTE_PUBLISH_HOMESERVERS names other homeservers, a joined
+/// user of an unlisted origin server still gets a token, but one that only
+/// grants subscribing.
+#[tokio::test]
+async fn unlisted_origin_only_subscribes() {
+    let hs = FakeHomeserver::new().await;
+    let sfu = FakeSfu::new().await;
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        remote_publish_homeservers: Some(vec!["someone-else.example.org".to_owned()]),
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        extra_env: app_service_env(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_get_token_ss(
+        &svc,
+        get_token_ss_request("@alice:origin.example.org", sfu.url()).to_string(),
+        Some(ORIGIN_SERVER),
+        Some(HS_TOKEN),
+    )
+    .await;
+
+    assert_eq!(status, 200, "body: {body}");
+    let response: Value = serde_json::from_str(&body).expect("response is not JSON");
+    let claims = decode_livekit_jwt(response["jwt"].as_str().unwrap_or_default());
+    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));
+    assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
+
+    // Membership is verified for subscribers just the same.
+    expect_is_joined_request(
+        &hs,
+        "!room:example.com",
+        "@alice:origin.example.org",
+        AS_TOKEN,
+    );
+}
+
+/// An empty LIVEKIT_REMOTE_PUBLISH_HOMESERVERS switches remote publishing
+/// off for everyone.
+#[tokio::test]
+async fn empty_remote_publish_list_lets_nobody_publish() {
+    let hs = FakeHomeserver::new().await;
+    let sfu = FakeSfu::new().await;
+
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        remote_publish_homeservers: Some(vec![]),
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        extra_env: app_service_env(hs.server_name()),
+        ..Default::default()
+    })
+    .await;
+
+    let (status, body) = post_get_token_ss(
+        &svc,
+        get_token_ss_request("@alice:origin.example.org", sfu.url()).to_string(),
+        Some(ORIGIN_SERVER),
+        Some(HS_TOKEN),
+    )
+    .await;
+
+    assert_eq!(status, 200, "body: {body}");
+    let response: Value = serde_json::from_str(&body).expect("response is not JSON");
+    let claims = decode_livekit_jwt(response["jwt"].as_str().unwrap_or_default());
+    assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));
 }
 
 /// A request is rejected when the requesting user is not joined to the room.

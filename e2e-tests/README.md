@@ -6,10 +6,15 @@ and a real LiveKit SFU, all running as Docker containers.
 
 The stack is duplicated: two independent Synapse + lk-jwt-service +
 LiveKit trios, A and B, run alongside each other, so federated scenarios
-can be exercised, too. The two differ in one setting: stack A's service is the
-application service of its only full-access homeserver and so verifies room
-membership on its standalone endpoints, while stack B's service lists both
-homeservers as full-access and so does not.
+can be exercised, too. The two differ in two settings:
+
+1. Stack A's service is the application service of its only full-access
+   homeserver and so verifies room membership on its standalone endpoints,
+   while stack B's service lists both homeservers as full-access and so does
+   not.
+1. Stack A's service has remote publishing switched off while stack B's leaves
+   it at the default, so stack A's users may publish on stack B's SFU via the
+   S-S API but not the other way round.
 
 ```
    e2e test binary (`cargo test`, driven from the host)
