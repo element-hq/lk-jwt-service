@@ -54,7 +54,7 @@ fn service_binary() -> PathBuf {
 pub struct ServiceConfig {
     /// Becomes LIVEKIT_FULL_ACCESS_HOMESERVERS.
     pub full_access_homeservers: Vec<String>,
-    /// Becomes LIVEKIT_REMOTE_PUBLISH_HOMESERVERS when set. None leaves the
+    /// Becomes the value set in LIVEKIT_REMOTE_PUBLISH_HOMESERVERS. None leaves
     /// variable unset, so the service applies its default.
     pub remote_publish_homeservers: Option<Vec<String>>,
     /// Becomes LIVEKIT_CS_API_URL_OVERRIDES.
