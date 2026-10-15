@@ -240,7 +240,7 @@ async fn success() {
     );
 }
 
-/// When LIVEKIT_REMOTE_PUBLISH_HOMESERVERS names other homeservers, a joined
+/// When LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS names other homeservers, a joined
 /// user of an unlisted origin server still gets a token, but one that only
 /// grants subscribing.
 #[tokio::test]
@@ -250,7 +250,7 @@ async fn unlisted_origin_only_subscribes() {
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec!["*".to_owned()],
-        remote_publish_homeservers: Some(vec!["someone-else.example.org".to_owned()]),
+        remote_can_publish_homeservers: Some(vec!["someone-else.example.org".to_owned()]),
         cs_api_url_overrides: hs.cs_api_url_override(),
         livekit_url: Some(sfu.url().to_owned()),
         extra_env: app_service_env(hs.server_name()),
@@ -281,16 +281,16 @@ async fn unlisted_origin_only_subscribes() {
     );
 }
 
-/// An empty LIVEKIT_REMOTE_PUBLISH_HOMESERVERS switches remote publishing
+/// An empty LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS switches remote publishing
 /// off for everyone.
 #[tokio::test]
-async fn empty_remote_publish_list_lets_nobody_publish() {
+async fn empty_remote_can_publish_list_lets_nobody_publish() {
     let hs = FakeHomeserver::new().await;
     let sfu = FakeSfu::new().await;
 
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec!["*".to_owned()],
-        remote_publish_homeservers: Some(vec![]),
+        remote_can_publish_homeservers: Some(vec![]),
         cs_api_url_overrides: hs.cs_api_url_override(),
         livekit_url: Some(sfu.url().to_owned()),
         extra_env: app_service_env(hs.server_name()),

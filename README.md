@@ -103,7 +103,7 @@ Set environment variables to configure the service:
 | `LIVEKIT_JWT_BIND`                            | Address to bind the server to                                 | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_PORT` | `:8080` |
 | `LIVEKIT_JWT_PORT`                            | ⚠️ Deprecated Port to bind the server to                      | ❌ No, ⚠️ mutually exclusive with `LIVEKIT_JWT_BIND` |         |
 | `LIVEKIT_FULL_ACCESS_HOMESERVERS`             | Comma-separated list of full-access homeservers (`*` for all — see security note below). Ignored when serving C-S and S-S endpoints as an application service. | ✅ Yes                                               |         |
-| `LIVEKIT_REMOTE_PUBLISH_HOMESERVERS`          | Comma-separated list of homeservers whose users may publish on the SFU when their token request is relayed over federation (`*` for all, empty for none — see [Publishing from Other Homeservers](#-publishing-from-other-homeservers)). Only used when running as an application service. | ❌ No                                                | `*`     |
+| `LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS`      | Comma-separated list of remote homeservers whose users may publish on the SFU when their token request is relayed over federation (`*` for all, empty for none — see [Publishing from Other Homeservers](#-publishing-from-other-homeservers)). Only used when running as an application service. | ❌ No                                                | `*`     |
 | `LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS`       | Interval (seconds) at which delegated-leave jobs re-check that a connected participant is still on the SFU. Guards against missed SFU webhooks. Unset/`0` disables the sanity check. | ❌ No                                                | `0` (disabled) |
 | `LIVEKIT_LOG_LEVEL`                           | One of `debug`, `info`, `warn`/`warning`, `error`             | ❌ No                                                | `info` |
 | `LIVEKIT_CS_API_URL_OVERRIDES`                | Comma-separated list of overrides for Client-Server API locations that cannot be inferred using .well-known discovery (e.g. `example.com=matrix-client.example.com`) | ❌ No                                                | |
@@ -188,7 +188,7 @@ This needs `experimental_features.msc4502_enabled: true` on Synapse and the
 [MSC4195](https://github.com/matrix-org/matrix-spec-proposals/pull/4195) optionally lets a client publish on an SFU of
 another homeserver, discovered from a session member's `m.rtc.member` event. The client's homeserver relays the token
 request to this service's S-S endpoint over federation, and the service decides whether the token grants publishing.
-The MSC recommends allowing remote users to publish, which is the default. `LIVEKIT_REMOTE_PUBLISH_HOMESERVERS`
+The MSC recommends allowing remote users to publish, which is the default. `LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS`
 enables operators to narrow this to the listed homeservers or switch it off when set to an empty value. Users of
 unlisted homeservers still get a token for subscribing though. Users of the configured homeserver always may publish,
 through the C-S endpoint.

@@ -107,7 +107,7 @@ async fn main() {
 
     if config.app_service_config.is_set_up() {
         info!(
-            LIVEKIT_REMOTE_PUBLISH_HOMESERVERS = ?config.app_service_config.remote_publish_homeservers,
+            LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS = ?config.app_service_config.remote_can_publish_homeservers,
             "Users of the remote-publish homeservers may publish on the SFU via the S-S API"
         );
     }

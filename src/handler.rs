@@ -683,7 +683,10 @@ impl Handler {
     /// Whether users of `origin` may publish on the SFU when their token
     /// request is relayed over federation.
     pub(crate) fn may_publish_remotely(&self, origin: &str) -> bool {
-        server_list_contains(&self.app_service_config.remote_publish_homeservers, origin)
+        server_list_contains(
+            &self.app_service_config.remote_can_publish_homeservers,
+            origin,
+        )
     }
 
     /// The owner to record on a delayed-event job for an OpenID-verified

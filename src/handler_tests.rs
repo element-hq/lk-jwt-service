@@ -3565,8 +3565,8 @@ async fn test_process_get_token_ss_request() {
         fail_join_token: bool,
         /// The full-access homeservers the handler is configured with.
         full_access: &'static [&'static str],
-        /// The remote-publish homeservers the handler is configured with.
-        remote_publish: &'static [&'static str],
+        /// The remote-can-publish homeservers the handler is configured with.
+        remote_can_publish: &'static [&'static str],
         expect_create_room: bool,
         /// Whether the issued token grants publishing.
         expect_can_publish: bool,
@@ -3583,7 +3583,7 @@ async fn test_process_get_token_ss_request() {
         is_server_joined: true,
         fail_join_token: false,
         full_access: &[OWN_SERVER],
-        remote_publish: &["*"],
+        remote_can_publish: &["*"],
         expect_create_room: false,
         expect_can_publish: true,
         expect_error: false,
@@ -3596,20 +3596,20 @@ async fn test_process_get_token_ss_request() {
         },
         Case {
             name: "Listed origin may publish",
-            remote_publish: &[ORIGIN_SERVER],
+            remote_can_publish: &[ORIGIN_SERVER],
             expect_create_room: true,
             ..base
         },
         Case {
             name: "Unlisted origin only subscribes",
-            remote_publish: &["someone-else.example.org"],
+            remote_can_publish: &["someone-else.example.org"],
             expect_create_room: true,
             expect_can_publish: false,
             ..base
         },
         Case {
             name: "Empty list lets nobody publish remotely",
-            remote_publish: &[],
+            remote_can_publish: &[],
             expect_create_room: true,
             expect_can_publish: false,
             ..base
@@ -3617,7 +3617,7 @@ async fn test_process_get_token_ss_request() {
         Case {
             name: "Full access alone does not grant remote publishing",
             full_access: &[OWN_SERVER, ORIGIN_SERVER],
-            remote_publish: &[],
+            remote_can_publish: &[],
             expect_create_room: true,
             expect_can_publish: false,
             ..base
@@ -3722,8 +3722,8 @@ async fn test_process_get_token_ss_request() {
                 as_token: "as_token".into(),
                 hs_token: "hs_token".into(),
                 hs_server_name: OWN_SERVER.into(),
-                remote_publish_homeservers: tc
-                    .remote_publish
+                remote_can_publish_homeservers: tc
+                    .remote_can_publish
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),

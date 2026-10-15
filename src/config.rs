@@ -46,7 +46,7 @@ pub struct AppServiceConfig {
     pub hs_server_name: String,
     /// The homeservers whose users may publish on the SFU when their token
     /// request is relayed over federation.
-    pub remote_publish_homeservers: Vec<String>,
+    pub remote_can_publish_homeservers: Vec<String>,
 }
 
 impl Default for AppServiceConfig {
@@ -55,7 +55,7 @@ impl Default for AppServiceConfig {
             as_token: String::new(),
             hs_token: String::new(),
             hs_server_name: String::new(),
-            remote_publish_homeservers: vec!["*".to_owned()],
+            remote_can_publish_homeservers: vec!["*".to_owned()],
         }
     }
 }
@@ -134,10 +134,11 @@ pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
     let path = env_var("LIVEKIT_AS_REGISTRATION_FILE");
 
     // Unset means the default of letting any remote user publish.
-    let remote_publish_homeservers = match std::env::var("LIVEKIT_REMOTE_PUBLISH_HOMESERVERS") {
-        Ok(raw) => parse_server_list(&raw),
-        Err(_) => AppServiceConfig::default().remote_publish_homeservers,
-    };
+    let remote_can_publish_homeservers =
+        match std::env::var("LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS") {
+            Ok(raw) => parse_server_list(&raw),
+            Err(_) => AppServiceConfig::default().remote_can_publish_homeservers,
+        };
 
     let config = if !path.is_empty() {
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -158,7 +159,7 @@ pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
             as_token,
             hs_token,
             hs_server_name,
-            remote_publish_homeservers,
+            remote_can_publish_homeservers,
         }
     } else {
         let as_token = env_var("LIVEKIT_AS_TOKEN").trim().to_owned();
@@ -168,7 +169,7 @@ pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
             as_token,
             hs_token,
             hs_server_name,
-            remote_publish_homeservers,
+            remote_can_publish_homeservers,
         }
     };
 
@@ -181,9 +182,9 @@ pub fn read_app_service_config() -> Result<AppServiceConfig, String> {
         );
     }
 
-    if config.is_empty() && std::env::var_os("LIVEKIT_REMOTE_PUBLISH_HOMESERVERS").is_some() {
+    if config.is_empty() && std::env::var_os("LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS").is_some() {
         warn!(
-            "LIVEKIT_REMOTE_PUBLISH_HOMESERVERS only applies to the S-S endpoint, which is served \
+            "LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS only applies to the S-S endpoint, which is served \
              as an application service; it has no effect without one"
         );
     }
@@ -497,7 +498,7 @@ mod tests {
                     as_token: "as_token_env_pheethiewixohp9eecheeGh".into(),
                     hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".into(),
                     hs_server_name: "example.com".to_owned(),
-                    remote_publish_homeservers: vec!["*".to_owned()],
+                    remote_can_publish_homeservers: vec!["*".to_owned()],
                 }),
             },
             Case {
@@ -507,13 +508,19 @@ mod tests {
                     ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
                     ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
                     ("LIVEKIT_HS_SERVER_NAME", "example.com"),
-                    ("LIVEKIT_REMOTE_PUBLISH_HOMESERVERS", "bob.com, carol.com"),
+                    (
+                        "LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS",
+                        "bob.com, carol.com",
+                    ),
                 ],
                 expected: Some(AppServiceConfig {
                     as_token: "as_token_env_pheethiewixohp9eecheeGh".into(),
                     hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".into(),
                     hs_server_name: "example.com".to_owned(),
-                    remote_publish_homeservers: vec!["bob.com".to_owned(), "carol.com".to_owned()],
+                    remote_can_publish_homeservers: vec![
+                        "bob.com".to_owned(),
+                        "carol.com".to_owned(),
+                    ],
                 }),
             },
             Case {
@@ -523,13 +530,13 @@ mod tests {
                     ("LIVEKIT_AS_TOKEN", "as_token_env_pheethiewixohp9eecheeGh"),
                     ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
                     ("LIVEKIT_HS_SERVER_NAME", "example.com"),
-                    ("LIVEKIT_REMOTE_PUBLISH_HOMESERVERS", ""),
+                    ("LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS", ""),
                 ],
                 expected: Some(AppServiceConfig {
                     as_token: "as_token_env_pheethiewixohp9eecheeGh".into(),
                     hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".into(),
                     hs_server_name: "example.com".to_owned(),
-                    remote_publish_homeservers: vec![],
+                    remote_can_publish_homeservers: vec![],
                 }),
             },
             Case {

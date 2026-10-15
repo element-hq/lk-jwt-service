@@ -54,9 +54,9 @@ fn service_binary() -> PathBuf {
 pub struct ServiceConfig {
     /// Becomes LIVEKIT_FULL_ACCESS_HOMESERVERS.
     pub full_access_homeservers: Vec<String>,
-    /// Becomes the value set in LIVEKIT_REMOTE_PUBLISH_HOMESERVERS. None leaves
+    /// Becomes the value set in LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS. None leaves
     /// variable unset, so the service applies its default.
-    pub remote_publish_homeservers: Option<Vec<String>>,
+    pub remote_can_publish_homeservers: Option<Vec<String>>,
     /// Becomes LIVEKIT_CS_API_URL_OVERRIDES.
     pub cs_api_url_overrides: HashMap<String, String>,
     /// Becomes LIVEKIT_URL. Defaults to a closed local port; tests that
@@ -110,10 +110,10 @@ impl Service {
             ("LIVEKIT_LOG_LEVEL".into(), "debug".into()),
         ]);
 
-        if let Some(remote_publish_homeservers) = &cfg.remote_publish_homeservers {
+        if let Some(remote_can_publish_homeservers) = &cfg.remote_can_publish_homeservers {
             env.insert(
-                "LIVEKIT_REMOTE_PUBLISH_HOMESERVERS".into(),
-                remote_publish_homeservers.join(","),
+                "LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS".into(),
+                remote_can_publish_homeservers.join(","),
             );
         }
 
