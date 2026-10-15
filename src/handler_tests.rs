@@ -313,6 +313,7 @@ fn new_get_token_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handler> {
             as_token: "as_token".into(),
             hs_token: HS_TOKEN.into(),
             hs_server_name: "example.com".into(),
+            ..Default::default()
         },
         Duration::ZERO,
         HashMap::new(),
@@ -352,6 +353,7 @@ fn new_delegation_app_service_handler(mut deps: HandlerTestDeps) -> Arc<Handler>
             as_token: "as_token".into(),
             hs_token: HS_TOKEN.into(),
             hs_server_name: "example.com".into(),
+            ..Default::default()
         },
         Duration::ZERO,
         HashMap::from([
@@ -387,6 +389,7 @@ fn new_delegate_delayed_leave_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handl
             as_token: "as_token".into(),
             hs_token: HS_TOKEN.into(),
             hs_server_name: "example.com".into(),
+            ..Default::default()
         },
         Duration::ZERO,
         HashMap::from([(
@@ -532,6 +535,7 @@ fn new_get_token_ss_handler(deps: HandlerTestDeps) -> Arc<Handler> {
             as_token: "as_token".into(),
             hs_token: HS_TOKEN.into(),
             hs_server_name: "example.com".into(),
+            ..Default::default()
         },
         Duration::ZERO,
         HashMap::new(),
@@ -3165,6 +3169,7 @@ async fn test_process_get_token_cs_request() {
                 as_token: "as_token".into(),
                 hs_token: "hs_token".into(),
                 hs_server_name: "example.com".into(),
+                ..Default::default()
             },
             Duration::ZERO,
             HashMap::new(),
@@ -3558,7 +3563,13 @@ async fn test_process_get_token_ss_request() {
         is_member: bool,
         is_server_joined: bool,
         fail_join_token: bool,
+        /// The full-access homeservers the handler is configured with.
+        full_access: &'static [&'static str],
+        /// The remote-can-publish homeservers the handler is configured with.
+        remote_can_publish: &'static [&'static str],
         expect_create_room: bool,
+        /// Whether the issued token grants publishing.
+        expect_can_publish: bool,
         expect_error: bool,
     }
     let base = Case {
@@ -3571,13 +3582,44 @@ async fn test_process_get_token_ss_request() {
         is_member: true,
         is_server_joined: true,
         fail_join_token: false,
+        full_access: &[OWN_SERVER],
+        remote_can_publish: &["*"],
         expect_create_room: false,
+        expect_can_publish: true,
         expect_error: false,
     };
     for tc in [
         Case {
-            name: "All OK",
+            name: "All OK (any origin may publish by default)",
             expect_create_room: true,
+            ..base
+        },
+        Case {
+            name: "Listed origin may publish",
+            remote_can_publish: &[ORIGIN_SERVER],
+            expect_create_room: true,
+            ..base
+        },
+        Case {
+            name: "Unlisted origin only subscribes",
+            remote_can_publish: &["someone-else.example.org"],
+            expect_create_room: true,
+            expect_can_publish: false,
+            ..base
+        },
+        Case {
+            name: "Empty list lets nobody publish remotely",
+            remote_can_publish: &[],
+            expect_create_room: true,
+            expect_can_publish: false,
+            ..base
+        },
+        Case {
+            name: "Full access alone does not grant remote publishing",
+            full_access: &[OWN_SERVER, ORIGIN_SERVER],
+            remote_can_publish: &[],
+            expect_create_room: true,
+            expect_can_publish: false,
             ..base
         },
         Case {
@@ -3675,11 +3717,16 @@ async fn test_process_get_token_ss_request() {
                 secret: "secret".into(),
                 lk_url: LK_URL.into(),
             },
-            vec!["example.com".into()],
+            tc.full_access.iter().map(|s| s.to_string()).collect(),
             crate::config::AppServiceConfig {
                 as_token: "as_token".into(),
                 hs_token: "hs_token".into(),
                 hs_server_name: OWN_SERVER.into(),
+                remote_can_publish_homeservers: tc
+                    .remote_can_publish
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             },
             Duration::ZERO,
             HashMap::new(),
@@ -3702,6 +3749,19 @@ async fn test_process_get_token_ss_request() {
             assert!(
                 !result.jwt.is_empty(),
                 "{}: expected non-empty JWT",
+                tc.name
+            );
+            let claims = parse_jwt_claims(&result.jwt, "secret");
+            assert_eq!(
+                claims["video"]["canPublish"],
+                serde_json::Value::Bool(tc.expect_can_publish),
+                "{}: canPublish must follow the remote-publish homeservers",
+                tc.name
+            );
+            assert_eq!(
+                claims["video"]["canSubscribe"],
+                serde_json::Value::Bool(true),
+                "{}: canSubscribe must always be granted",
                 tc.name
             );
         }
@@ -4934,6 +4994,7 @@ async fn test_process_delegate_delayed_leave_cs_checks_membership_with_other_ful
             as_token: "as_token".into(),
             hs_token: HS_TOKEN.into(),
             hs_server_name: "example.com".into(),
+            ..Default::default()
         },
         Duration::ZERO,
         HashMap::from([(
@@ -5071,6 +5132,7 @@ fn new_membership_handler(
                 as_token: "as_token".into(),
                 hs_token: HS_TOKEN.into(),
                 hs_server_name: "example.com".into(),
+                ..Default::default()
             }
         } else {
             Default::default()

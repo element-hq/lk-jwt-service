@@ -83,6 +83,12 @@ const USER_ID_HEADER: &str = "X-Matrix-User-Identifier";
 /// the origin of a proxied federation request.
 const ORIGIN_HEADER: &str = "X-Matrix-Origin";
 
+/// Whether `server_name` is in `list`, where a list of just `*` matches any
+/// server.
+fn server_list_contains(list: &[String], server_name: &str) -> bool {
+    list == ["*"] || list.iter().any(|s| s == server_name)
+}
+
 /// Returns 401 M_UNAUTHORIZED with `err` if `header` (e.g. the caller's mxid
 /// or origin server name) is empty.
 fn require_non_empty_header(header: &str, err: &str) -> Result<(), MatrixErrorResponse> {
@@ -671,16 +677,16 @@ impl Handler {
     }
 
     pub(crate) fn is_full_access_user(&self, matrix_server_name: &str) -> bool {
-        // Grant full access if wildcard '*' is present as the only entry
-        if self.full_access_homeservers.len() == 1 && self.full_access_homeservers[0] == "*" {
-            return true;
-        }
+        server_list_contains(&self.full_access_homeservers, matrix_server_name)
+    }
 
-        // Check if the matrix_server_name is in the list of full-access
-        // homeservers
-        self.full_access_homeservers
-            .iter()
-            .any(|s| s == matrix_server_name)
+    /// Whether users of `origin` may publish on the SFU when their token
+    /// request is relayed over federation.
+    pub(crate) fn may_publish_remotely(&self, origin: &str) -> bool {
+        server_list_contains(
+            &self.app_service_config.remote_can_publish_homeservers,
+            origin,
+        )
     }
 
     /// The owner to record on a delayed-event job for an OpenID-verified
@@ -1256,20 +1262,22 @@ impl Handler {
         let lk_identity = livekit_identity_for(&req.user_id, &req.member_id);
         let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
 
-        // Federated participants relayed via the S-S API never get publish
-        // rights.
+        // Federated participants may publish unless the operator restricts
+        // remote publishing to other homeservers.
+        let can_publish = self.may_publish_remotely(origin_header);
         let token = self.get_join_token_or_internal_error(
             &lk_room_alias,
             &lk_identity,
             &req.user_id,
-            false,
+            can_publish,
         )?;
 
         self.create_livekit_room_or_internal_error(&lk_room_alias, &req.user_id, &lk_identity)
             .await?;
 
         info!(user_id = %req.user_id, member_id = %req.member_id,
-            origin = %origin_header, matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
+            origin = %origin_header, access = if can_publish { "full" } else { "restricted" },
+            matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
             lk_id = %lk_identity, room = %lk_room_alias,
             "Handler: generated SFU access token (app-service S-S)");
 

@@ -678,6 +678,7 @@ async fn aborts_and_sends_when_participant_goes_missing_undetected() {
             "LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS".to_owned(),
             "1".to_owned(),
         )]),
+        ..Default::default()
     })
     .await;
 

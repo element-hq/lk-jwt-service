@@ -83,7 +83,7 @@ async fn main() {
             lk_url: config.lk_url.clone(),
         },
         config.full_access_homeservers.clone(),
-        config.app_service_config,
+        config.app_service_config.clone(),
         config.sanity_check_interval,
         config.cs_api_url_overrides.clone(),
         store,
@@ -102,6 +102,13 @@ async fn main() {
             "/sfu/get, /get_token and /delegate_delayed_leave do not verify room membership: \
              the homeserver can only vouch for membership when it is the only full-access homeserver \
              and when it integrates the service as an application service"
+        );
+    }
+
+    if config.app_service_config.is_set_up() {
+        info!(
+            LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS = ?config.app_service_config.remote_can_publish_homeservers,
+            "Users of the remote-publish homeservers may publish on the SFU via the S-S API"
         );
     }
 

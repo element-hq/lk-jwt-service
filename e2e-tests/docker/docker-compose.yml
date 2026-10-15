@@ -80,6 +80,10 @@ services:
       - LIVEKIT_KEY=e2e_livekit_key_a
       - LIVEKIT_SECRET=e2e_livekit_secret_a_0123456789ab
       - LIVEKIT_FULL_ACCESS_HOMESERVERS=synapse-a.e2e.test
+      # Remote publishing switched off: federated users of this stack's SFU
+      # only get to subscribe. Stack B leaves it at the default, which lets
+      # any remote user publish.
+      - LIVEKIT_REMOTE_CAN_PUBLISH_HOMESERVERS=
       - LIVEKIT_AS_REGISTRATION_FILE=/etc/lk-jwt-service/app-service-a.yaml
       - LIVEKIT_HS_SERVER_NAME=synapse-a.e2e.test
       # The standalone endpoints verify OpenID tokens against the

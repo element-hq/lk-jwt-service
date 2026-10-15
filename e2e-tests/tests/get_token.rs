@@ -4,9 +4,10 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, MatrixUser, SYNAPSE_A_CS_API_URL, SYNAPSE_A_SERVER_NAME,
-    SYNAPSE_B_CS_API_URL, assert_stack_is_up, attempt_publish_track, create_and_join_room,
-    get_livekit_token, join_room_via, register_user, verify_livekit_token_is_usable,
+    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LIVEKIT_B_SFU_ADDR, LIVEKIT_B_URL, MatrixUser,
+    SYNAPSE_A_CS_API_URL, SYNAPSE_A_SERVER_NAME, SYNAPSE_B_CS_API_URL, SYNAPSE_B_SERVER_NAME,
+    assert_stack_is_up, attempt_publish_track, create_and_join_room, get_livekit_token,
+    join_room_via, register_user, verify_livekit_token_is_usable,
 };
 
 /// Low-level POST to `/rtc/livekit/get_token` through `cs_api_url` as `user`,
@@ -149,8 +150,8 @@ async fn get_token_remote_sfu_succeeds() {
     verify_livekit_token_is_usable(LIVEKIT_A_SFU_ADDR, &jwt).await;
 }
 
-/// A remote user's token only grants subscribe rights: unlike a local
-/// user's, it cannot be used to publish into the room.
+/// A remote user's token only grants subscribe rights when the SFU's service
+/// has remote publishing switched off, as stack A's has.
 #[tokio::test]
 async fn get_token_remote_sfu_cannot_publish() {
     assert_stack_is_up();
@@ -175,8 +176,8 @@ async fn get_token_remote_sfu_cannot_publish() {
     // and requests a token through his own homeserver's C-S API, naming hs A
     // as the MatrixRTC session's SFU-hosting homeserver. hs B relays this to
     // hs A via the MSC4512 federation proxy, which in turn calls the S-S
-    // endpoint on hs A's app service — the path that never grants publish
-    // rights.
+    // endpoint on hs A's app service, which has remote publishing switched
+    // off.
     let bob = register_user(SYNAPSE_B_CS_API_URL, "bob", "e2e-test-password").await;
     join_room_via(SYNAPSE_B_CS_API_URL, &bob, &room_id, SYNAPSE_A_SERVER_NAME).await;
     let bob_jwt = get_relayed_livekit_token(
@@ -199,6 +200,54 @@ async fn get_token_remote_sfu_cannot_publish() {
     assert!(
         !attempt_publish_track(LIVEKIT_A_SFU_ADDR, &bob_jwt).await,
         "expected bob's remote token to be rejected for publishing"
+    );
+}
+
+/// A remote user's token grants publish rights by default.
+#[tokio::test]
+async fn get_token_remote_sfu_can_publish_by_default() {
+    assert_stack_is_up();
+
+    // Bob creates (and thus joins) a room on his own homeserver (hs B) and
+    // requests a token locally first, which creates the LiveKit room on hs
+    // B's SFU.
+    let bob = register_user(SYNAPSE_B_CS_API_URL, "bob", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_B_CS_API_URL, &bob).await;
+    get_livekit_token(
+        SYNAPSE_B_CS_API_URL,
+        &bob,
+        LIVEKIT_B_URL,
+        &room_id,
+        "m.call#ROOM",
+        "e2e-member-bob",
+    )
+    .await;
+
+    // Alice, on hs A, joins the room and requests a token for hs B's SFU
+    // through her own homeserver, which relays it to hs B's app service.
+    let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    join_room_via(
+        SYNAPSE_A_CS_API_URL,
+        &alice,
+        &room_id,
+        SYNAPSE_B_SERVER_NAME,
+    )
+    .await;
+    let alice_jwt = get_relayed_livekit_token(
+        SYNAPSE_A_CS_API_URL,
+        &alice,
+        SYNAPSE_B_SERVER_NAME,
+        LIVEKIT_B_URL,
+        &room_id,
+        "e2e-member-alice",
+    )
+    .await;
+
+    // The proof that matters: hs B's real LiveKit SFU lets Alice publish on
+    // a token requested through hs A.
+    assert!(
+        attempt_publish_track(LIVEKIT_B_SFU_ADDR, &alice_jwt).await,
+        "expected alice's remote token to be usable for publishing"
     );
 }
 
