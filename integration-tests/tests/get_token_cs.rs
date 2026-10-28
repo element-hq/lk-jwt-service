@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 const AS_TOKEN: &str = "as_token";
 const HS_TOKEN: &str = "hs_token";
 
-const GET_TOKEN_CS_PATH: &str = "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token";
+const GET_TOKEN_CS_PATH: &str = "/_matrix/client/v1/rtc/livekit/get_token";
 
 /// App-service configuration as extra_env.
 fn app_service_env_with_hs_server_name(hs_server_name: &str) -> HashMap<String, String> {

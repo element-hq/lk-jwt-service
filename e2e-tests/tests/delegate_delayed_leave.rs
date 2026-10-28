@@ -251,7 +251,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // running as an application service.
     let resp = reqwest::Client::new()
         .post(format!(
-            "{SYNAPSE_A_CS_API_URL}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave"
+            "{SYNAPSE_A_CS_API_URL}/_matrix/client/v1/rtc/livekit/delegate_delayed_leave"
         ))
         .bearer_auth(&user.access_token)
         .json(&serde_json::json!({

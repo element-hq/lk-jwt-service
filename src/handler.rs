@@ -33,7 +33,9 @@ use crate::delayed_event_manager::{
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::helper::new_unique_id;
 use crate::helper::{
-    CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_SS_PATH, JoinedSubject,
+    CsApiUrl, CsApiUrlCache, DELEGATE_DELAYED_LEAVE_CS_PATH,
+    DELEGATE_DELAYED_LEAVE_CS_UNSTABLE_PATH, Deps, FederationTokenError, GET_TOKEN_CS_PATH,
+    GET_TOKEN_CS_UNSTABLE_PATH, GET_TOKEN_SS_PATH, GET_TOKEN_SS_UNSTABLE_PATH, JoinedSubject,
     LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId, legacy_livekit_identity_for,
     livekit_identity_for, livekit_room_alias_for, matrix_server_name,
 };
@@ -82,6 +84,21 @@ const USER_ID_HEADER: &str = "X-Matrix-User-Identifier";
 /// The header the homeserver sets to the pre-authenticated server name of
 /// the origin of a proxied federation request.
 const ORIGIN_HEADER: &str = "X-Matrix-Origin";
+
+/// The `error` of every 403 M_FORBIDDEN from the membership and origin checks.
+/// MSC4195 forbids revealing whether a particular user or room exists, so the
+/// specific reason, such as which party isn't joined to the room, is only
+/// logged.
+const FORBIDDEN_MSG: &str = "Access to this room is not permitted";
+
+/// A 403 M_FORBIDDEN carrying [`FORBIDDEN_MSG`].
+fn forbidden() -> MatrixErrorResponse {
+    MatrixErrorResponse {
+        status: 403,
+        errcode: "M_FORBIDDEN".into(),
+        err: FORBIDDEN_MSG.into(),
+    }
+}
 
 /// Whether `server_name` is in `list`, where a list of just `*` matches any
 /// server.
@@ -862,14 +879,14 @@ impl Handler {
         Ok(())
     }
 
-    /// Returns 403 M_FORBIDDEN with `forbidden_msg` if `subject` isn't joined
-    /// to `room_id`, or 502 M_UNKNOWN if membership can't be verified.
+    /// Returns 403 M_FORBIDDEN if `subject` isn't joined to `room_id`, or 502
+    /// M_UNKNOWN if membership can't be verified. The 403 carries the generic
+    /// [`FORBIDDEN_MSG`] so that it doesn't reveal whose membership failed.
     async fn require_joined(
         &self,
         cs_api_url: &CsApiUrl,
         room_id: &str,
         subject: JoinedSubject<'_>,
-        forbidden_msg: &str,
     ) -> Result<(), MatrixErrorResponse> {
         let is_joined = self
             .deps
@@ -890,11 +907,8 @@ impl Handler {
                 }
             })?;
         if !is_joined {
-            return Err(MatrixErrorResponse {
-                status: 403,
-                errcode: "M_FORBIDDEN".into(),
-                err: forbidden_msg.into(),
-            });
+            info!(%subject, room = %room_id, "Handler: not joined to the room");
+            return Err(forbidden());
         }
         Ok(())
     }
@@ -941,13 +955,8 @@ impl Handler {
                     err: "Unable to verify room membership".into(),
                 }
             })?;
-        self.require_joined(
-            &cs_api_url,
-            room_id,
-            JoinedSubject::User(matrix_id),
-            "The requesting user is not a member of the room",
-        )
-        .await
+        self.require_joined(&cs_api_url, room_id, JoinedSubject::User(matrix_id))
+            .await
     }
 
     /// Deprecated: serves the pre-Matrix-2.0 /sfu/get endpoint. Remove once
@@ -1147,13 +1156,8 @@ impl Handler {
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)
             .await?;
 
-        self.require_joined(
-            &cs_api_url,
-            &req.room_id,
-            JoinedSubject::User(mxid_header),
-            "The requesting user is not a member of the room",
-        )
-        .await?;
+        self.require_joined(&cs_api_url, &req.room_id, JoinedSubject::User(mxid_header))
+            .await?;
 
         if is_local {
             let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
@@ -1181,7 +1185,6 @@ impl Handler {
                 &cs_api_url,
                 &req.room_id,
                 JoinedSubject::Server(target_server_name),
-                "The target server is not joined to the room",
             )
             .await?;
 
@@ -1230,11 +1233,9 @@ impl Handler {
                 err: "Malformed user identifier".into(),
             })?;
         if user_server_name != origin_header {
-            return Err(MatrixErrorResponse {
-                status: 403,
-                errcode: "M_FORBIDDEN".into(),
-                err: "The user_id does not belong to the origin server".into(),
-            });
+            info!(user_id = %req.user_id, origin = %origin_header,
+                "Handler: user_id does not belong to the origin server");
+            return Err(forbidden());
         }
 
         let cs_api_url = self
@@ -1245,17 +1246,11 @@ impl Handler {
             &cs_api_url,
             &req.room_id,
             JoinedSubject::Server(&self.app_service_config.hs_server_name),
-            "This server is not joined to the room",
         )
         .await?;
 
-        self.require_joined(
-            &cs_api_url,
-            &req.room_id,
-            JoinedSubject::User(&req.user_id),
-            "The requesting user is not a member of the room",
-        )
-        .await?;
+        self.require_joined(&cs_api_url, &req.room_id, JoinedSubject::User(&req.user_id))
+            .await?;
 
         self.require_matching_lk_url(&req.url, "get_token_ss")?;
 
@@ -1362,13 +1357,8 @@ impl Handler {
             .await?;
 
         // A leave may only be delegated by a member of the room.
-        self.require_joined(
-            &cs_api_url,
-            &req.room_id,
-            JoinedSubject::User(mxid_header),
-            "The requesting user is not a member of the room",
-        )
-        .await?;
+        self.require_joined(&cs_api_url, &req.room_id, JoinedSubject::User(mxid_header))
+            .await?;
 
         let delay_timeout = self
             .look_up_delay_timeout(&cs_api_url, &req.delay_id, &req.room_id, mxid_header)
@@ -1408,13 +1398,16 @@ impl Handler {
         if self.app_service_config.is_set_up() {
             router = router
                 .route("/_matrix/app/v1/ping", any(handle_appservice_ping))
-                .route(
-                    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token",
-                    any(handle_get_token_cs),
-                )
+                .route(GET_TOKEN_CS_PATH, any(handle_get_token_cs))
+                .route(GET_TOKEN_CS_UNSTABLE_PATH, any(handle_get_token_cs))
                 .route(GET_TOKEN_SS_PATH, any(handle_get_token_ss))
+                .route(GET_TOKEN_SS_UNSTABLE_PATH, any(handle_get_token_ss))
                 .route(
-                    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave",
+                    DELEGATE_DELAYED_LEAVE_CS_PATH,
+                    any(handle_delegate_delayed_leave_cs),
+                )
+                .route(
+                    DELEGATE_DELAYED_LEAVE_CS_UNSTABLE_PATH,
                     any(handle_delegate_delayed_leave_cs),
                 );
 
@@ -1424,7 +1417,9 @@ impl Handler {
             }
         }
 
-        router.with_state(self.clone())
+        router
+            .fallback(handle_unrecognized)
+            .with_state(self.clone())
     }
 }
 
@@ -1434,12 +1429,7 @@ fn matrix_error_for_federation_token(err: FederationTokenError) -> MatrixErrorRe
         FederationTokenError::Destination {
             status: 403,
             errcode,
-        } if errcode == "M_FORBIDDEN" => MatrixErrorResponse {
-            status: 403,
-            errcode,
-            err: "The requesting user is not a member of the room on the destination homeserver"
-                .into(),
-        },
+        } if errcode == "M_FORBIDDEN" => forbidden(),
         FederationTokenError::Destination {
             status: 400,
             errcode,
@@ -1631,6 +1621,11 @@ async fn handle_delegate_delayed_leave(
         Err(err) => matrix_error_into_response(&err),
     };
     apply_cors_json(resp)
+}
+
+/// Answers requests for unknown endpoints with 404 M_UNRECOGNIZED as per the spec.
+async fn handle_unrecognized() -> Response {
+    matrix_error_response(404, "M_UNRECOGNIZED", "Unrecognized request")
 }
 
 async fn healthcheck(req: Request) -> Response {
