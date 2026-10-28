@@ -137,9 +137,15 @@ When set up as an application service, the integration depends on
 [MSC4512](https://github.com/matrix-org/matrix-spec-proposals/pull/4512). On Synapse, enable both
 by setting `msc4502_enabled: true` and `msc4512_enabled: true` under `experimental_features`.
 
-None of these proposals, nor [MSC4195](https://github.com/matrix-org/matrix-spec-proposals/pull/4195),
-is part of the spec yet, so the service and Synapse use their unstable identifiers
-(`/_matrix/client/unstable/io.element.msc4195/…`, `io.element.msc4502.*` and `io.element.msc4512.*`).
+Neither of these proposals is part of the spec yet, so the service and Synapse use their unstable
+identifiers (`io.element.msc4502.*` and `io.element.msc4512.*`).
+
+[MSC4195](https://github.com/matrix-org/matrix-spec-proposals/pull/4195) has been accepted, and the service
+serves its endpoints on the stable `/_matrix/client/v1/rtc/livekit/…` and `/_matrix/federation/v1/rtc/livekit/…`
+paths. The unstable `/_matrix/client/unstable/io.element.msc4195/…` and `/_matrix/federation/unstable/io.element.msc4195/…`
+paths are still served for clients and servers that haven't migrated yet. When relaying token requests to other
+homeservers, the service uses the stable federation endpoint and falls back to the unstable one if the destination
+doesn't recognise it.
 
 The service needs to cover all local users because it needs to verify room memberships
 without being joined to any rooms itself. This requires the `urn:matrix:client:io.element.msc4502:rooms:is_joined`
@@ -173,7 +179,7 @@ io.element.msc4512.proxy_url: "http://127.0.0.1:1234" # Forward proxied requests
 
 ## 🔒 Room Membership on the Standalone Endpoints
 
-The endpoints that Synapse proxies (`/_matrix/client/unstable/io.element.msc4195/rtc/livekit/…`) verify that the
+The endpoints that Synapse proxies (`/_matrix/client/(unstable/io.element.msc4195|v1)/rtc/livekit/…`) verify that the
 requesting user is joined to the room. The standalone endpoints `/sfu/get`, `/get_token` and `/delegate_delayed_leave`,
 however, only apply this check when the service runs as an application service **and** `LIVEKIT_FULL_ACCESS_HOMESERVERS`
 names only the configured homeserver. Otherwise, with several full-access homeservers or `*`, sessions may exist in
