@@ -479,11 +479,20 @@ fn marshal_get_token_cs_request(mutate: impl FnOnce(&mut GetTokenCsRequest)) -> 
     serde_json::to_string(&req).expect("failed to marshal request")
 }
 
-/// POSTs to /_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token.
+/// POSTs to /_matrix/client/v1/rtc/livekit/get_token.
 fn post_get_token_cs_request(body: String, header_mxid: &str) -> http::Request<Body> {
+    post_get_token_cs_request_to(GET_TOKEN_CS_PATH, body, header_mxid)
+}
+
+/// POSTs a /get_token C-S request to `path`.
+fn post_get_token_cs_request_to(
+    path: &str,
+    body: String,
+    header_mxid: &str,
+) -> http::Request<Body> {
     http::Request::builder()
         .method("POST")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(path)
         .header("Authorization", format!("Bearer {HS_TOKEN}"))
         .header("X-Matrix-User-Identifier", header_mxid)
         .body(Body::from(body))
@@ -511,11 +520,16 @@ fn marshal_get_token_ss_request(mutate: impl FnOnce(&mut GetTokenSsRequest)) -> 
     serde_json::to_string(&req).expect("failed to marshal request")
 }
 
-/// POSTs to /_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token.
+/// POSTs to /_matrix/federation/v1/rtc/livekit/get_token.
 fn post_get_token_ss_request(body: String, origin: &str) -> http::Request<Body> {
+    post_get_token_ss_request_to(GET_TOKEN_SS_PATH, body, origin)
+}
+
+/// POSTs a /get_token S-S request to `path`.
+fn post_get_token_ss_request_to(path: &str, body: String, origin: &str) -> http::Request<Body> {
     http::Request::builder()
         .method("POST")
-        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(path)
         .header("Authorization", format!("Bearer {HS_TOKEN}"))
         .header("X-Matrix-Origin", origin)
         .body(Body::from(body))
@@ -2458,7 +2472,7 @@ async fn test_handle_get_token_cs_method_not_allowed() {
     for method in ["GET", "PUT", "DELETE", "PATCH"] {
         let req = http::Request::builder()
             .method(method)
-            .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+            .uri(GET_TOKEN_CS_PATH)
             .body(Body::empty())
             .unwrap();
         let resp = send_request(&handler, req).await;
@@ -2477,7 +2491,7 @@ async fn test_handle_get_token_cs_options() {
     let handler = new_get_token_cs_handler(HandlerTestDeps::default());
     let req = http::Request::builder()
         .method("OPTIONS")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(GET_TOKEN_CS_PATH)
         .body(Body::empty())
         .unwrap();
     let resp = send_request(&handler, req).await;
@@ -2509,7 +2523,7 @@ async fn test_handle_get_token_cs_missing_hs_token() {
     let body = marshal_get_token_cs_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(GET_TOKEN_CS_PATH)
         .header("X-Matrix-User-Identifier", GET_TOKEN_CS_MXID)
         .body(Body::from(body))
         .unwrap();
@@ -2529,7 +2543,7 @@ async fn test_handle_get_token_cs_wrong_hs_token() {
     let body = marshal_get_token_cs_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(GET_TOKEN_CS_PATH)
         .header("Authorization", "Bearer wrong_token")
         .header("X-Matrix-User-Identifier", GET_TOKEN_CS_MXID)
         .body(Body::from(body))
@@ -2543,44 +2557,54 @@ async fn test_handle_get_token_cs_wrong_hs_token() {
     handler.close().await;
 }
 
-/// A valid request produces a 200 response.
+/// A valid request produces a 200 response on both the stable and the
+/// unstable path.
 #[tokio::test]
 async fn test_handle_get_token_cs_success() {
-    let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let create_called_clone = create_called.clone();
-    let deps = HandlerTestDeps {
-        resolve_cs_api_url_fn: Some(Box::new(|_| {
-            Ok(CsApiUrl("https://matrix.example.com".into()))
-        })),
-        is_joined_fn: is_joined_ok(true),
-        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
-            create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        })),
-        ..Default::default()
-    };
-    let handler = new_get_token_cs_handler(deps);
+    for path in [GET_TOKEN_CS_PATH, GET_TOKEN_CS_UNSTABLE_PATH] {
+        let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let create_called_clone = create_called.clone();
+        let deps = HandlerTestDeps {
+            resolve_cs_api_url_fn: Some(Box::new(|_| {
+                Ok(CsApiUrl("https://matrix.example.com".into()))
+            })),
+            is_joined_fn: is_joined_ok(true),
+            create_livekit_room_fn: Some(Box::new(move |_, _, _| {
+                create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let handler = new_get_token_cs_handler(deps);
 
-    let body = marshal_get_token_cs_request(|_| {});
-    let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
-    assert_eq!(resp.status(), StatusCode::OK, "status");
-    assert!(
-        create_called.load(std::sync::atomic::Ordering::SeqCst),
-        "expected create_livekit_room to be called for full-access user"
-    );
+        let body = marshal_get_token_cs_request(|_| {});
+        let resp = send_request(
+            &handler,
+            post_get_token_cs_request_to(path, body, GET_TOKEN_CS_MXID),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path}: status");
+        assert!(
+            create_called.load(std::sync::atomic::Ordering::SeqCst),
+            "{path}: expected create_livekit_room to be called for full-access user"
+        );
 
-    let body = body_bytes(resp).await;
-    let response: GetTokenCsResponse =
-        serde_json::from_slice(&body).expect("failed to decode response body");
-    assert!(!response.jwt.is_empty(), "expected JWT to be non-empty");
+        let body = body_bytes(resp).await;
+        let response: GetTokenCsResponse =
+            serde_json::from_slice(&body).expect("failed to decode response body");
+        assert!(
+            !response.jwt.is_empty(),
+            "{path}: expected JWT to be non-empty"
+        );
 
-    let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
-    assert_eq!(
-        claims["video"]["hidden"],
-        serde_json::Value::Bool(false),
-        "hidden must be false"
-    );
-    handler.close().await;
+        let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
+        assert_eq!(
+            claims["video"]["hidden"],
+            serde_json::Value::Bool(false),
+            "{path}: hidden must be false"
+        );
+        handler.close().await;
+    }
 }
 
 /// The LiveKit identity is derived from the X-Matrix-User-Identifier header
@@ -2876,7 +2900,7 @@ async fn test_handle_get_token_cs_missing_header() {
     let body = marshal_get_token_cs_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(GET_TOKEN_CS_PATH)
         .header("Authorization", format!("Bearer {HS_TOKEN}"))
         .body(Body::from(body))
         .unwrap();
@@ -3248,7 +3272,7 @@ async fn test_handle_get_token_ss_method_not_allowed() {
     for method in ["GET", "PUT", "DELETE", "PATCH"] {
         let req = http::Request::builder()
             .method(method)
-            .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+            .uri(GET_TOKEN_SS_PATH)
             .body(Body::empty())
             .unwrap();
         let resp = send_request(&handler, req).await;
@@ -3267,7 +3291,7 @@ async fn test_handle_get_token_ss_options() {
     let handler = new_get_token_ss_handler(HandlerTestDeps::default());
     let req = http::Request::builder()
         .method("OPTIONS")
-        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(GET_TOKEN_SS_PATH)
         .body(Body::empty())
         .unwrap();
     let resp = send_request(&handler, req).await;
@@ -3299,7 +3323,7 @@ async fn test_handle_get_token_ss_missing_hs_token() {
     let body = marshal_get_token_ss_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(GET_TOKEN_SS_PATH)
         .header("X-Matrix-Origin", GET_TOKEN_SS_ORIGIN)
         .body(Body::from(body))
         .unwrap();
@@ -3319,7 +3343,7 @@ async fn test_handle_get_token_ss_wrong_hs_token() {
     let body = marshal_get_token_ss_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(GET_TOKEN_SS_PATH)
         .header("Authorization", "Bearer wrong_token")
         .header("X-Matrix-Origin", GET_TOKEN_SS_ORIGIN)
         .body(Body::from(body))
@@ -3340,7 +3364,7 @@ async fn test_handle_get_token_ss_missing_origin_header() {
     let body = marshal_get_token_ss_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token")
+        .uri(GET_TOKEN_SS_PATH)
         .header("Authorization", format!("Bearer {HS_TOKEN}"))
         .body(Body::from(body))
         .unwrap();
@@ -3402,40 +3426,46 @@ async fn test_handle_get_token_ss_url_mismatch() {
     handler.close().await;
 }
 
-/// A valid request produces a 200 response.
+/// A valid request produces a 200 response on both the stable and the
+/// unstable path.
 #[tokio::test]
 async fn test_handle_get_token_ss_success() {
-    let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let create_called_clone = create_called.clone();
-    let deps = HandlerTestDeps {
-        resolve_cs_api_url_fn: Some(Box::new(|_| {
-            Ok(CsApiUrl("https://matrix.example.com".into()))
-        })),
-        is_joined_fn: is_joined_ok(true),
-        create_livekit_room_fn: Some(Box::new(move |_, _, _| {
-            create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        })),
-        ..Default::default()
-    };
-    let handler = new_get_token_ss_handler(deps);
-    let body = marshal_get_token_ss_request(|_| {});
-    let resp = send_request(
-        &handler,
-        post_get_token_ss_request(body, GET_TOKEN_SS_ORIGIN),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK, "status");
-    assert!(
-        create_called.load(std::sync::atomic::Ordering::SeqCst),
-        "expected create_livekit_room to be called for the S-S endpoint"
-    );
+    for path in [GET_TOKEN_SS_PATH, GET_TOKEN_SS_UNSTABLE_PATH] {
+        let create_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let create_called_clone = create_called.clone();
+        let deps = HandlerTestDeps {
+            resolve_cs_api_url_fn: Some(Box::new(|_| {
+                Ok(CsApiUrl("https://matrix.example.com".into()))
+            })),
+            is_joined_fn: is_joined_ok(true),
+            create_livekit_room_fn: Some(Box::new(move |_, _, _| {
+                create_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let handler = new_get_token_ss_handler(deps);
+        let body = marshal_get_token_ss_request(|_| {});
+        let resp = send_request(
+            &handler,
+            post_get_token_ss_request_to(path, body, GET_TOKEN_SS_ORIGIN),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path}: status");
+        assert!(
+            create_called.load(std::sync::atomic::Ordering::SeqCst),
+            "{path}: expected create_livekit_room to be called for the S-S endpoint"
+        );
 
-    let body = body_bytes(resp).await;
-    let response: GetTokenSsResponse =
-        serde_json::from_slice(&body).expect("failed to decode response body");
-    assert!(!response.jwt.is_empty(), "expected JWT to be non-empty");
-    handler.close().await;
+        let body = body_bytes(resp).await;
+        let response: GetTokenSsResponse =
+            serde_json::from_slice(&body).expect("failed to decode response body");
+        assert!(
+            !response.jwt.is_empty(),
+            "{path}: expected JWT to be non-empty"
+        );
+        handler.close().await;
+    }
 }
 
 /// If `user_id` does not belong to the origin server, the request is

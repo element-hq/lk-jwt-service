@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use rand::Rng;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
@@ -23,8 +24,16 @@ use crate::delayed_event_manager::{AppServiceIdentity, DELAYED_EVENTS_ENDPOINT, 
 use crate::requests::{GetTokenSsRequest, GetTokenSsResponse, OpenIdTokenType};
 use crate::retry::{Classify, ErrorClass};
 
-/// The path of the `/rtc/livekit/get_token` S-S endpoint,.
-pub const GET_TOKEN_SS_PATH: &str =
+/// The path of the `/rtc/livekit/get_token` C-S endpoint.
+pub const GET_TOKEN_CS_PATH: &str = "/_matrix/client/v1/rtc/livekit/get_token";
+/// The MSC4195 unstable path of the `/rtc/livekit/get_token` C-S endpoint.
+pub const GET_TOKEN_CS_UNSTABLE_PATH: &str =
+    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token";
+
+/// The path of the `/rtc/livekit/get_token` S-S endpoint.
+pub const GET_TOKEN_SS_PATH: &str = "/_matrix/federation/v1/rtc/livekit/get_token";
+/// The MSC4195 unstable path of the `/rtc/livekit/get_token` S-S endpoint.
+pub const GET_TOKEN_SS_UNSTABLE_PATH: &str =
     "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token";
 
 /// The authentication bundle for talking to LiveKit.
@@ -1095,67 +1104,113 @@ pub trait Deps: Send + Sync {
                 "fed_proxy",
             ]);
 
-        let resp = http_client(self.skip_verify_tls())
-            .post(endpoint.clone())
-            .bearer_auth(as_token)
-            .json(&serde_json::json!({
-                "destination": destination,
-                "method": "POST",
-                "path": GET_TOKEN_SS_PATH,
-                "body": req,
-            }))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| {
-                let msg = error_chain(&e);
-                debug!(url = %endpoint, err = %msg, "request_get_token_via_federation");
-                FederationTokenError::Other(format!("failed to reach the federation proxy: {msg}"))
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(FederationTokenError::Other(format!(
-                "federation proxy request failed: http status code {}",
-                status.as_u16()
-            )));
-        }
-
-        // `content` is left untyped here: on a destination-side error it's a
-        // Matrix error body ({errcode, error}), not a GetTokenSsResponse.
-        #[derive(Deserialize)]
-        struct FedProxyResponse {
-            status: u16,
-            #[serde(default)]
-            content: Option<serde_json::Value>,
-        }
-        let parsed: FedProxyResponse = resp.json().await.map_err(|e| {
-            FederationTokenError::Other(format!("failed to parse federation proxy response: {e}"))
-        })?;
-
-        if !(200..300).contains(&parsed.status) {
-            let errcode = parsed
-                .content
-                .as_ref()
-                .and_then(|c| c.get("errcode"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            return Err(FederationTokenError::Destination {
-                status: parsed.status,
+        let client = http_client(self.skip_verify_tls());
+        match post_via_fed_proxy(
+            client,
+            &endpoint,
+            as_token,
+            destination,
+            GET_TOKEN_SS_PATH,
+            req,
+        )
+        .await
+        {
+            // The destination doesn't recognise the stable endpoint yet. Retry
+            // on the unstable one. The spec mandates 404 M_UNRECOGNIZED for
+            // unknown endpoints. An empty errcode is accepted, too, because
+            // versions predating the stable endpoints did not include the
+            // error code on 404s.
+            Err(FederationTokenError::Destination {
+                status: 404,
                 errcode,
-            });
+            }) if errcode.is_empty() || errcode == "M_UNRECOGNIZED" => {
+                debug!(%destination, %errcode,
+                    "request_get_token_via_federation: stable endpoint not recognised, retrying on the unstable one");
+                post_via_fed_proxy(
+                    client,
+                    &endpoint,
+                    as_token,
+                    destination,
+                    GET_TOKEN_SS_UNSTABLE_PATH,
+                    req,
+                )
+                .await
+            }
+            result => result,
         }
-
-        let content = parsed.content.ok_or_else(|| {
-            FederationTokenError::Other("destination homeserver returned an empty response".into())
-        })?;
-        serde_json::from_value(content).map_err(|e| {
-            FederationTokenError::Other(format!(
-                "failed to parse destination homeserver response: {e}"
-            ))
-        })
     }
+}
+
+/// POSTs `body` to the S-S `path` on `destination` via the federation proxy
+/// at `endpoint` and decodes the destination's response.
+async fn post_via_fed_proxy<B: Serialize + ?Sized, R: DeserializeOwned>(
+    client: &reqwest::Client,
+    endpoint: &url::Url,
+    as_token: &str,
+    destination: &str,
+    path: &str,
+    body: &B,
+) -> Result<R, FederationTokenError> {
+    let resp = client
+        .post(endpoint.clone())
+        .bearer_auth(as_token)
+        .json(&serde_json::json!({
+            "destination": destination,
+            "method": "POST",
+            "path": path,
+            "body": body,
+        }))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| {
+            let msg = error_chain(&e);
+            debug!(url = %endpoint, %path, err = %msg, "post_via_fed_proxy");
+            FederationTokenError::Other(format!("failed to reach the federation proxy: {msg}"))
+        })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(FederationTokenError::Other(format!(
+            "federation proxy request failed: http status code {}",
+            status.as_u16()
+        )));
+    }
+
+    // `content` is left untyped here: on a destination-side error it's a
+    // Matrix error body ({errcode, error}), not an `R`.
+    #[derive(Deserialize)]
+    struct FedProxyResponse {
+        status: u16,
+        #[serde(default)]
+        content: Option<serde_json::Value>,
+    }
+    let parsed: FedProxyResponse = resp.json().await.map_err(|e| {
+        FederationTokenError::Other(format!("failed to parse federation proxy response: {e}"))
+    })?;
+
+    if !(200..300).contains(&parsed.status) {
+        let errcode = parsed
+            .content
+            .as_ref()
+            .and_then(|c| c.get("errcode"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        return Err(FederationTokenError::Destination {
+            status: parsed.status,
+            errcode,
+        });
+    }
+
+    let content = parsed.content.ok_or_else(|| {
+        FederationTokenError::Other("destination homeserver returned an empty response".into())
+    })?;
+    serde_json::from_value(content).map_err(|e| {
+        FederationTokenError::Other(format!(
+            "failed to parse destination homeserver response: {e}"
+        ))
+    })
 }
 
 /// The production [`Deps`] implementation — all behaviour comes from the
@@ -3337,6 +3392,136 @@ mod tests {
         assert!(
             result.is_err(),
             "expected transport/server error, got {result:?}"
+        );
+    }
+
+    // ── request_get_token_via_federation ─────────────────────────────────────
+
+    /// A homeserver stub serving the MSC4512 /fed_proxy endpoint.
+    struct FedProxyServer {
+        server: TestHttpServer,
+        paths: Arc<Mutex<Vec<String>>>,
+    }
+
+    /// Spawn a homeserver stub serving the MSC4512 /fed_proxy endpoint. `respond`
+    /// maps the relayed S-S path to the destination's (status, content).
+    async fn spawn_fed_proxy_server(
+        respond: impl Fn(&str) -> (u16, serde_json::Value) + Clone + Send + Sync + 'static,
+    ) -> FedProxyServer {
+        let paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let paths_clone = paths.clone();
+        let router = Router::new().route(
+            "/_matrix/client/unstable/io.element.msc4512/appservice/fed_proxy",
+            any(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let paths = paths_clone.clone();
+                let respond = respond.clone();
+                async move {
+                    let path = body["path"].as_str().unwrap_or_default().to_owned();
+                    let (status, content) = respond(&path);
+                    paths.lock().unwrap().push(path);
+                    axum::Json(serde_json::json!({ "status": status, "content": content }))
+                }
+            }),
+        );
+        let server = spawn_http_server(router).await;
+        FedProxyServer { server, paths }
+    }
+
+    async fn request_get_token_via(
+        fed_proxy: &FedProxyServer,
+    ) -> Result<GetTokenSsResponse, FederationTokenError> {
+        RealDeps::default()
+            .request_get_token_via_federation(
+                &CsApiUrl(fed_proxy.server.url.clone()),
+                "as_token",
+                "remote.example.org",
+                &GetTokenSsRequest {
+                    url: "wss://livekit.remote.example.org".into(),
+                    user_id: "@alice:example.com".into(),
+                    room_id: "!room:example.com".into(),
+                    slot_id: "m.call#ROOM".into(),
+                    member_id: "member".into(),
+                },
+            )
+            .await
+    }
+
+    /// The stable S-S endpoint is tried first and the unstable one is left
+    /// alone when the destination recognises it.
+    #[tokio::test]
+    async fn test_request_get_token_via_federation_uses_stable_endpoint() {
+        let fed_proxy =
+            spawn_fed_proxy_server(|_| (200, serde_json::json!({ "jwt": "remote-jwt" }))).await;
+
+        let resp = request_get_token_via(&fed_proxy)
+            .await
+            .expect("unexpected error");
+        assert_eq!(resp.jwt, "remote-jwt");
+        assert_eq!(
+            *fed_proxy.paths.lock().unwrap(),
+            vec![GET_TOKEN_SS_PATH.to_owned()]
+        );
+    }
+
+    /// A destination that doesn't recognise the stable S-S endpoint is retried
+    /// on the unstable one.
+    #[tokio::test]
+    async fn test_request_get_token_via_federation_falls_back_to_unstable_endpoint() {
+        for content in [
+            serde_json::json!({ "errcode": "M_UNRECOGNIZED" }),
+            serde_json::Value::Null,
+        ] {
+            let fed_proxy = spawn_fed_proxy_server({
+                let content = content.clone();
+                move |path| {
+                    if path == GET_TOKEN_SS_PATH {
+                        (404, content.clone())
+                    } else {
+                        (200, serde_json::json!({ "jwt": "remote-jwt" }))
+                    }
+                }
+            })
+            .await;
+
+            let resp = request_get_token_via(&fed_proxy)
+                .await
+                .unwrap_or_else(|e| panic!("{content}: unexpected error: {e}"));
+            assert_eq!(resp.jwt, "remote-jwt", "{content}");
+            assert_eq!(
+                *fed_proxy.paths.lock().unwrap(),
+                vec![
+                    GET_TOKEN_SS_PATH.to_owned(),
+                    GET_TOKEN_SS_UNSTABLE_PATH.to_owned()
+                ],
+                "{content}"
+            );
+        }
+    }
+
+    /// Errors other than an unrecognised endpoint are not retried.
+    #[tokio::test]
+    async fn test_request_get_token_via_federation_no_fallback_on_other_errors() {
+        let fed_proxy = spawn_fed_proxy_server(|_| {
+            (
+                403,
+                serde_json::json!({ "errcode": "M_FORBIDDEN", "error": "not joined" }),
+            )
+        })
+        .await;
+
+        let err = request_get_token_via(&fed_proxy)
+            .await
+            .expect_err("expected the destination error to surface");
+        match err {
+            FederationTokenError::Destination { status, errcode } => {
+                assert_eq!(status, 403);
+                assert_eq!(errcode, "M_FORBIDDEN");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(
+            *fed_proxy.paths.lock().unwrap(),
+            vec![GET_TOKEN_SS_PATH.to_owned()]
         );
     }
 }
