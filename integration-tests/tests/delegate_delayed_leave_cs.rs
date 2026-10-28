@@ -18,7 +18,7 @@ const AS_TOKEN: &str = "as_token";
 const HS_TOKEN: &str = "hs_token";
 
 const DELEGATE_DELAYED_LEAVE_CS_PATH: &str =
-    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave";
+    "/_matrix/client/v1/rtc/livekit/delegate_delayed_leave";
 
 /// App-service configuration as extra_env.
 fn app_service_env_with_hs_server_name(hs_server_name: &str) -> HashMap<String, String> {

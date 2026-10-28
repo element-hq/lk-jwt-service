@@ -609,12 +609,20 @@ fn marshal_delegate_delayed_leave_cs_request(
     serde_json::to_string(&req).expect("failed to marshal request")
 }
 
-/// POSTs to
-/// /_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave.
+/// POSTs to /_matrix/client/v1/rtc/livekit/delegate_delayed_leave.
 fn post_delegate_delayed_leave_cs_request(body: String, header_mxid: &str) -> http::Request<Body> {
+    post_delegate_delayed_leave_cs_request_to(DELEGATE_DELAYED_LEAVE_CS_PATH, body, header_mxid)
+}
+
+/// POSTs a delegate_delayed_leave C-S request to `path`.
+fn post_delegate_delayed_leave_cs_request_to(
+    path: &str,
+    body: String,
+    header_mxid: &str,
+) -> http::Request<Body> {
     http::Request::builder()
         .method("POST")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave")
+        .uri(path)
         .header("Authorization", format!("Bearer {HS_TOKEN}"))
         .header("X-Matrix-User-Identifier", header_mxid)
         .body(Body::from(body))
@@ -4440,7 +4448,7 @@ async fn test_handle_delegate_delayed_leave_cs_method_not_allowed() {
     for method in ["GET", "PUT", "DELETE", "PATCH"] {
         let req = http::Request::builder()
             .method(method)
-            .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave")
+            .uri(DELEGATE_DELAYED_LEAVE_CS_PATH)
             .body(Body::empty())
             .unwrap();
         let resp = send_request(&handler, req).await;
@@ -4459,7 +4467,7 @@ async fn test_handle_delegate_delayed_leave_cs_options() {
     let handler = new_delegate_delayed_leave_cs_handler(HandlerTestDeps::default());
     let req = http::Request::builder()
         .method("OPTIONS")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave")
+        .uri(DELEGATE_DELAYED_LEAVE_CS_PATH)
         .body(Body::empty())
         .unwrap();
     let resp = send_request(&handler, req).await;
@@ -4494,7 +4502,7 @@ async fn test_handle_delegate_delayed_leave_cs_missing_hs_token() {
     let body = marshal_delegate_delayed_leave_cs_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave")
+        .uri(DELEGATE_DELAYED_LEAVE_CS_PATH)
         .header("X-Matrix-User-Identifier", DELEGATE_DELAYED_LEAVE_CS_MXID)
         .body(Body::from(body))
         .unwrap();
@@ -4514,7 +4522,7 @@ async fn test_handle_delegate_delayed_leave_cs_wrong_hs_token() {
     let body = marshal_delegate_delayed_leave_cs_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave")
+        .uri(DELEGATE_DELAYED_LEAVE_CS_PATH)
         .header("Authorization", "Bearer wrong_token")
         .header("X-Matrix-User-Identifier", DELEGATE_DELAYED_LEAVE_CS_MXID)
         .body(Body::from(body))
@@ -4535,7 +4543,7 @@ async fn test_handle_delegate_delayed_leave_cs_missing_header() {
     let body = marshal_delegate_delayed_leave_cs_request(|_| {});
     let req = http::Request::builder()
         .method("POST")
-        .uri("/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave")
+        .uri(DELEGATE_DELAYED_LEAVE_CS_PATH)
         .header("Authorization", format!("Bearer {HS_TOKEN}"))
         .body(Body::from(body))
         .unwrap();
@@ -4630,33 +4638,39 @@ async fn test_handle_delegate_delayed_leave_cs_cs_api_url_resolution_error() {
 }
 
 /// A valid request produces a 200 response with an empty JSON object body —
-/// no JWT is returned, differentiating it from /get_token.
+/// no JWT is returned, differentiating it from /get_token. Both the stable and
+/// the unstable path are served.
 #[tokio::test]
 async fn test_handle_delegate_delayed_leave_cs_success() {
-    let deps = HandlerTestDeps {
-        participant_exists_fn: participant_exists_block_until_cancelled(),
-        ..Default::default()
-    };
-    let handler = new_delegate_delayed_leave_cs_handler(deps);
-    let body = marshal_delegate_delayed_leave_cs_request(|_| {});
-    let resp = send_request(
-        &handler,
-        post_delegate_delayed_leave_cs_request(body, DELEGATE_DELAYED_LEAVE_CS_MXID),
-    )
-    .await;
+    for path in [
+        DELEGATE_DELAYED_LEAVE_CS_PATH,
+        DELEGATE_DELAYED_LEAVE_CS_UNSTABLE_PATH,
+    ] {
+        let deps = HandlerTestDeps {
+            participant_exists_fn: participant_exists_block_until_cancelled(),
+            ..Default::default()
+        };
+        let handler = new_delegate_delayed_leave_cs_handler(deps);
+        let body = marshal_delegate_delayed_leave_cs_request(|_| {});
+        let resp = send_request(
+            &handler,
+            post_delegate_delayed_leave_cs_request_to(path, body, DELEGATE_DELAYED_LEAVE_CS_MXID),
+        )
+        .await;
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "expected 200 for valid request"
-    );
-    let body = body_bytes(resp).await;
-    assert_eq!(
-        String::from_utf8_lossy(&body).trim(),
-        "{}",
-        "expected empty object in response body"
-    );
-    handler.close().await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{path}: expected 200 for valid request"
+        );
+        let body = body_bytes(resp).await;
+        assert_eq!(
+            String::from_utf8_lossy(&body).trim(),
+            "{}",
+            "{path}: expected empty object in response body"
+        );
+        handler.close().await;
+    }
 }
 
 // ── process_delegate_delayed_leave_cs unit tests ──────────────────────────────

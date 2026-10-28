@@ -33,7 +33,8 @@ use crate::delayed_event_manager::{
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::helper::new_unique_id;
 use crate::helper::{
-    CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, GET_TOKEN_CS_PATH,
+    CsApiUrl, CsApiUrlCache, DELEGATE_DELAYED_LEAVE_CS_PATH,
+    DELEGATE_DELAYED_LEAVE_CS_UNSTABLE_PATH, Deps, FederationTokenError, GET_TOKEN_CS_PATH,
     GET_TOKEN_CS_UNSTABLE_PATH, GET_TOKEN_SS_PATH, GET_TOKEN_SS_UNSTABLE_PATH, JoinedSubject,
     LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, UniqueId, legacy_livekit_identity_for,
     livekit_identity_for, livekit_room_alias_for, matrix_server_name,
@@ -1402,7 +1403,11 @@ impl Handler {
                 .route(GET_TOKEN_SS_PATH, any(handle_get_token_ss))
                 .route(GET_TOKEN_SS_UNSTABLE_PATH, any(handle_get_token_ss))
                 .route(
-                    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave",
+                    DELEGATE_DELAYED_LEAVE_CS_PATH,
+                    any(handle_delegate_delayed_leave_cs),
+                )
+                .route(
+                    DELEGATE_DELAYED_LEAVE_CS_UNSTABLE_PATH,
                     any(handle_delegate_delayed_leave_cs),
                 );
 

@@ -36,6 +36,14 @@ pub const GET_TOKEN_SS_PATH: &str = "/_matrix/federation/v1/rtc/livekit/get_toke
 pub const GET_TOKEN_SS_UNSTABLE_PATH: &str =
     "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token";
 
+/// The path of the `/rtc/livekit/delegate_delayed_leave` C-S endpoint.
+pub const DELEGATE_DELAYED_LEAVE_CS_PATH: &str =
+    "/_matrix/client/v1/rtc/livekit/delegate_delayed_leave";
+/// The MSC4195 unstable path of the `/rtc/livekit/delegate_delayed_leave` C-S
+/// endpoint.
+pub const DELEGATE_DELAYED_LEAVE_CS_UNSTABLE_PATH: &str =
+    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave";
+
 /// The authentication bundle for talking to LiveKit.
 #[derive(Debug, Clone, Default)]
 pub struct LiveKitAuth {
