@@ -635,6 +635,30 @@ async fn test_healthcheck() {
     handler.close().await;
 }
 
+/// Unknown endpoints are answered with 404 M_UNRECOGNIZED.
+#[tokio::test]
+async fn test_unknown_endpoint_is_unrecognized() {
+    let handler = new_get_token_cs_handler(HandlerTestDeps::default());
+    for path in [
+        "/does-not-exist",
+        "/_matrix/client/v2/rtc/livekit/get_token",
+        "/_matrix/federation/v1/rtc/livekit/unknown",
+    ] {
+        let req = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = send_request(&handler, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}: status");
+        let body = body_bytes(resp).await;
+        let matrix_err: MatrixErrorBody =
+            serde_json::from_slice(&body).expect("failed to decode response body");
+        assert_eq!(matrix_err.errcode, "M_UNRECOGNIZED", "{path}: errcode");
+    }
+    handler.close().await;
+}
+
 // ── Handler unit tests ────────────────────────────────────────────────────────
 
 #[tokio::test]

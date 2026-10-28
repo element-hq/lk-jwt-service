@@ -1424,7 +1424,9 @@ impl Handler {
             }
         }
 
-        router.with_state(self.clone())
+        router
+            .fallback(handle_unrecognized)
+            .with_state(self.clone())
     }
 }
 
@@ -1631,6 +1633,11 @@ async fn handle_delegate_delayed_leave(
         Err(err) => matrix_error_into_response(&err),
     };
     apply_cors_json(resp)
+}
+
+/// Answers requests for unknown endpoints with 404 M_UNRECOGNIZED as per the spec.
+async fn handle_unrecognized() -> Response {
+    matrix_error_response(404, "M_UNRECOGNIZED", "Unrecognized request")
 }
 
 async fn healthcheck(req: Request) -> Response {
