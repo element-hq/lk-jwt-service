@@ -126,6 +126,23 @@ async fn main() {
         "Starting service"
     );
 
+    if let Some(path) = config.lk_jwt_bind.strip_prefix("unix:") {
+        let _ = std::fs::remove_file(path);
+        let listener = match tokio::net::UnixListener::bind(path) {
+            Ok(bound) => bound,
+            Err(err) => {
+                eprintln!("Failed to bind {path}: {err}");
+                std::process::exit(1);
+            }
+        };
+        let router = handler.prepare_router();
+        if let Err(err) = axum::serve(listener, router).await {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let mut listener = None;
     for bind_addr in bind_addresses(&config.lk_jwt_bind) {
         match tokio::net::TcpListener::bind(&bind_addr).await {
