@@ -10,7 +10,7 @@ axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23.0"
 jsonwebtoken = { version = "10.4.0", features = ["aws_lc_rs"] }
-livekit-protocol = "0.7.10"
+livekit-protocol = "0.8.0"
 prost = "0.12"
 rcgen = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }

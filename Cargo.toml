@@ -22,8 +22,8 @@ path = "src/bin/healthcheck.rs"
 appservice-ping-trigger = []
 
 [dependencies]
-livekit-api = { version = "0.6", features = ["rustls-tls-native-roots"] }
-livekit-protocol = "0.7"
+livekit-api = { version = "0.9", features = ["rustls-tls-native-roots"] }
+livekit-protocol = "0.8"
 # Must match livekit-protocol's prost version; the RoomService Twirp client
 # in helper.rs encodes/decodes its message types directly.
 prost = "0.12"
