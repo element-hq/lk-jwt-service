@@ -60,7 +60,7 @@ rust-yaml = "1.1.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-jsonwebtoken = "10"
+jsonwebtoken = "11"
 temp-env = "0.3"
 http-body-util = "0.1"
 rcgen = "0.14"

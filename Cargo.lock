@@ -1164,6 +1164,21 @@ version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "signature",
+ "zeroize",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "11.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e75fe14a82d81e5f5af639997db37d8b96045938a7ac6ab18cdbe1c7467e05e1"
+dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -1284,7 +1299,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb65d06695dd768d7ef2135a9ba169a4048119041b543a50323fd78ec5ee064b"
 dependencies = [
  "hmac",
- "jsonwebtoken",
+ "jsonwebtoken 10.4.0",
  "livekit-protocol",
  "serde",
  "sha2 0.10.9",
@@ -1306,7 +1321,7 @@ dependencies = [
  "http",
  "http-body-util",
  "httpdate",
- "jsonwebtoken",
+ "jsonwebtoken 11.1.0",
  "livekit-api",
  "livekit-protocol",
  "prost",
@@ -1351,7 +1366,7 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.23.1",
- "jsonwebtoken",
+ "jsonwebtoken 11.1.0",
  "livekit-protocol",
  "prost",
  "rcgen",
