@@ -9,7 +9,7 @@ publish = false
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23.0"
-jsonwebtoken = { version = "10.4.0", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 livekit-protocol = "0.8.0"
 # Must match livekit-protocol's prost version.
 prost = "0.14"
