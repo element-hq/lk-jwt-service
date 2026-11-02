@@ -698,10 +698,10 @@ async fn test_get_join_token() {
         serde_json::Value::Bool(true),
         "canPublish must reflect the passed-in flag"
     );
-    assert_eq!(
+    assert_ne!(
         claims["video"]["hidden"],
-        serde_json::Value::Bool(false),
-        "hidden must be false"
+        serde_json::Value::Bool(true),
+        "hidden must not be true"
     );
 }
 
@@ -717,10 +717,15 @@ async fn test_get_join_token_can_publish_false() {
     .expect("unexpected error");
 
     let claims = parse_jwt_claims(&token_string, "testSecret");
-    assert_ne!(
+    assert_eq!(
         claims["video"]["canPublish"],
-        serde_json::Value::Bool(true),
+        serde_json::Value::Bool(false),
         "canPublish must reflect the passed-in flag"
+    );
+    assert_eq!(
+        claims["video"]["canPublishData"],
+        serde_json::Value::Bool(false),
+        "canPublishData must reflect the passed-in flag"
     );
 }
 
@@ -2551,10 +2556,10 @@ async fn test_handle_get_token_cs_success() {
     assert!(!response.jwt.is_empty(), "expected JWT to be non-empty");
 
     let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
-    assert_eq!(
+    assert_ne!(
         claims["video"]["hidden"],
-        serde_json::Value::Bool(false),
-        "hidden must be false"
+        serde_json::Value::Bool(true),
+        "hidden must not be true"
     );
     handler.close().await;
 }

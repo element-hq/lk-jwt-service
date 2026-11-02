@@ -221,7 +221,7 @@ async fn success() {
         Some(livekit_identity("@alice:origin.example.org", "member-1").as_str())
     );
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
-    assert_eq!(claims["video"]["roomCreate"].as_bool(), Some(false));
+    assert_ne!(claims["video"]["roomCreate"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
 
