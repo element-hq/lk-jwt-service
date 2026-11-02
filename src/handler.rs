@@ -57,9 +57,10 @@ pub fn get_join_token(
     let grants = VideoGrants {
         room_join: true,
         room_create: false,
-        can_publish,
-        can_subscribe: true,
-        can_update_own_metadata: true,
+        can_publish: Some(can_publish),
+        can_publish_data: Some(can_publish),
+        can_subscribe: Some(true),
+        can_update_own_metadata: Some(true),
         hidden: false,
         room: room.0.clone(),
         ..Default::default()
