@@ -267,6 +267,8 @@ fn new_handler_with(
         default_auth(),
         full_access.iter().map(|s| s.to_string()).collect(),
         Default::default(),
+        false,
+        false,
         Duration::ZERO, // sanity check interval disabled
         HashMap::new(),
         store,
@@ -280,6 +282,16 @@ const LIVEKIT_URL: &str = "wss://lk.local";
 /// Creates a Handler configured for testing /get_token, with example.com as
 /// the only full-access homeserver.
 fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+    new_get_token_handler_with(deps, false, false)
+}
+
+/// Like new_get_token_handler, but with a configurable
+/// can_update_own_metadata and can_publish_data flags.
+fn new_get_token_handler_with(
+    deps: HandlerTestDeps,
+    can_update_own_metadata: bool,
+    can_publish_data: bool,
+) -> Arc<Handler> {
     Handler::new(
         LiveKitAuth {
             key: "key".into(),
@@ -288,6 +300,8 @@ fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
         },
         vec!["example.com".into()],
         Default::default(),
+        can_update_own_metadata,
+        can_publish_data,
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -298,7 +312,17 @@ fn new_get_token_handler(deps: HandlerTestDeps) -> Arc<Handler> {
 /// Creates a Handler configured for testing the /get_token C-S requests,
 /// running as the application service of example.com. Unless `deps` mocks
 /// `is_joined`, every user counts as joined.
-fn new_get_token_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handler> {
+fn new_get_token_cs_handler(deps: HandlerTestDeps) -> Arc<Handler> {
+    new_get_token_cs_handler_with(deps, false, false)
+}
+
+/// Like new_get_token_cs_handler, but with a configurable
+/// can_update_own_metadata and can_publish_data flags.
+fn new_get_token_cs_handler_with(
+    mut deps: HandlerTestDeps,
+    can_update_own_metadata: bool,
+    can_publish_data: bool,
+) -> Arc<Handler> {
     if deps.is_joined_fn.is_none() {
         deps.is_joined_fn = is_joined_ok(true);
     }
@@ -315,6 +339,8 @@ fn new_get_token_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handler> {
             hs_server_name: "example.com".into(),
             ..Default::default()
         },
+        can_update_own_metadata,
+        can_publish_data,
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -328,6 +354,8 @@ fn new_delegate_delayed_leave_handler(deps: HandlerTestDeps) -> Arc<Handler> {
         default_auth(),
         vec!["example.com".into()],
         Default::default(),
+        false,
+        false,
         Duration::ZERO,
         HashMap::from([(
             "example.com".to_owned(),
@@ -355,6 +383,8 @@ fn new_delegation_app_service_handler(mut deps: HandlerTestDeps) -> Arc<Handler>
             hs_server_name: "example.com".into(),
             ..Default::default()
         },
+        false,
+        false,
         Duration::ZERO,
         HashMap::from([
             (
@@ -391,6 +421,8 @@ fn new_delegate_delayed_leave_cs_handler(mut deps: HandlerTestDeps) -> Arc<Handl
             hs_server_name: "example.com".into(),
             ..Default::default()
         },
+        false,
+        false,
         Duration::ZERO,
         HashMap::from([(
             "example.com".to_owned(),
@@ -551,6 +583,8 @@ fn new_get_token_ss_handler(deps: HandlerTestDeps) -> Arc<Handler> {
             hs_server_name: "example.com".into(),
             ..Default::default()
         },
+        false,
+        false,
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -693,6 +727,8 @@ async fn test_is_full_access_user() {
         },
         vec!["example.com".into(), "another.example.com".into()],
         Default::default(),
+        false,
+        false,
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -729,6 +765,8 @@ async fn test_get_join_token() {
         &LiveKitRoomAlias("testRoom".into()),
         &LiveKitIdentity("testIdentity@example.com".into()),
         true,
+        false,
+        false,
     )
     .expect("unexpected error");
     assert!(!token_string.is_empty(), "expected token to be non-empty");
@@ -744,10 +782,69 @@ async fn test_get_join_token() {
         serde_json::Value::Bool(true),
         "canPublish must reflect the passed-in flag"
     );
-    assert_eq!(
+    assert_ne!(
         claims["video"]["hidden"],
+        serde_json::Value::Bool(true),
+        "hidden must not be true"
+    );
+    assert_eq!(
+        claims["video"]["canUpdateOwnMetadata"],
         serde_json::Value::Bool(false),
-        "hidden must be false"
+        "canUpdateOwnMetadata must reflect the passed-in flag"
+    );
+    assert_eq!(
+        claims["video"]["canPublishData"],
+        serde_json::Value::Bool(false),
+        "canPublishData must reflect the passed-in flag"
+    );
+}
+
+#[tokio::test]
+async fn test_get_join_token_can_publish_data() {
+    for (can_publish, can_publish_data, want) in [
+        (true, true, true),
+        (false, true, false),
+        (true, false, false),
+        (false, false, false),
+    ] {
+        let token_string = get_join_token(
+            "testKey",
+            "testSecret",
+            &LiveKitRoomAlias("testRoom".into()),
+            &LiveKitIdentity("testIdentity@example.com".into()),
+            can_publish,
+            false,
+            can_publish_data,
+        )
+        .expect("unexpected error");
+
+        let claims = parse_jwt_claims(&token_string, "testSecret");
+        assert_eq!(
+            claims["video"]["canPublishData"],
+            serde_json::Value::Bool(want),
+            "canPublishData for can_publish={can_publish}, can_publish_data={can_publish_data}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_get_join_token_can_update_own_metadata() {
+    let token_string = get_join_token(
+        "testKey",
+        "testSecret",
+        &LiveKitRoomAlias("testRoom".into()),
+        &LiveKitIdentity("testIdentity@example.com".into()),
+        true,
+        true,
+        false,
+    )
+    .expect("unexpected error");
+
+    let claims = parse_jwt_claims(&token_string, "testSecret");
+    assert_eq!(
+        claims["video"]["canUpdateOwnMetadata"],
+        serde_json::Value::Bool(true),
+        "canUpdateOwnMetadata must reflect the passed-in flag"
     );
 }
 
@@ -759,14 +856,21 @@ async fn test_get_join_token_can_publish_false() {
         &LiveKitRoomAlias("testRoom".into()),
         &LiveKitIdentity("testIdentity@example.com".into()),
         false,
+        false,
+        false,
     )
     .expect("unexpected error");
 
     let claims = parse_jwt_claims(&token_string, "testSecret");
-    assert_ne!(
+    assert_eq!(
         claims["video"]["canPublish"],
-        serde_json::Value::Bool(true),
+        serde_json::Value::Bool(false),
         "canPublish must reflect the passed-in flag"
+    );
+    assert_eq!(
+        claims["video"]["canPublishData"],
+        serde_json::Value::Bool(false),
+        "canPublishData must reflect the passed-in flag"
     );
 }
 
@@ -895,6 +999,8 @@ async fn test_handler_close_timeout() {
         default_auth(),
         vec!["*".into()],
         Default::default(),
+        false,
+        false,
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -1108,6 +1214,8 @@ fn new_sfu_webhook_test_handler(key: &str, secret: &str) -> (Arc<Handler>, LoopR
         },
         vec![],
         Default::default(),
+        false,
+        false,
         Duration::ZERO,
         HashMap::new(),
         None,
@@ -2004,10 +2112,79 @@ async fn test_handle_get_token_success() {
     );
     assert_eq!(
         claims["video"]["canUpdateOwnMetadata"],
-        serde_json::Value::Bool(true),
+        serde_json::Value::Bool(false),
         "canUpdateOwnMetadata"
     );
     handler.close().await;
+}
+
+/// Verifies that the handler's can_update_own_metadata setting is reflected in
+/// the canUpdateOwnMetadata claim of the JWT minted by POST /get_token.
+#[tokio::test]
+async fn test_handle_get_token_can_update_own_metadata() {
+    const CLAIMED_USER_ID: &str = "@alice:example.com";
+
+    for can_update_own_metadata in [false, true] {
+        let deps = HandlerTestDeps {
+            exchange_openid_userinfo_fn: exchange_openid_userinfo_ok(CLAIMED_USER_ID),
+            create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+            ..Default::default()
+        };
+        let handler = new_get_token_handler_with(deps, can_update_own_metadata, false);
+
+        let body = marshal_sfu_request(|r| {
+            r.openid_token.matrix_server_name = "example.com".into();
+            r.member.claimed_user_id = CLAIMED_USER_ID.into();
+        });
+        let resp = send_request(&handler, post_json("/get_token", body)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "status");
+
+        let body = body_bytes(resp).await;
+        let sfu_response: SfuResponse =
+            serde_json::from_slice(&body).expect("failed to decode response body");
+        let claims = parse_jwt_claims(&sfu_response.jwt, &handler.livekit_auth.secret);
+        assert_eq!(
+            claims["video"]["canUpdateOwnMetadata"],
+            serde_json::Value::Bool(can_update_own_metadata),
+            "canUpdateOwnMetadata"
+        );
+        handler.close().await;
+    }
+}
+
+/// Verifies that the handler's can_publish_data setting is reflected in the
+/// canPublishData claim of the JWT minted by POST /get_token for a user who
+/// may publish.
+#[tokio::test]
+async fn test_handle_get_token_can_publish_data() {
+    const CLAIMED_USER_ID: &str = "@alice:example.com";
+
+    for can_publish_data in [false, true] {
+        let deps = HandlerTestDeps {
+            exchange_openid_userinfo_fn: exchange_openid_userinfo_ok(CLAIMED_USER_ID),
+            create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+            ..Default::default()
+        };
+        let handler = new_get_token_handler_with(deps, false, can_publish_data);
+
+        let body = marshal_sfu_request(|r| {
+            r.openid_token.matrix_server_name = "example.com".into();
+            r.member.claimed_user_id = CLAIMED_USER_ID.into();
+        });
+        let resp = send_request(&handler, post_json("/get_token", body)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "status");
+
+        let body = body_bytes(resp).await;
+        let sfu_response: SfuResponse =
+            serde_json::from_slice(&body).expect("failed to decode response body");
+        let claims = parse_jwt_claims(&sfu_response.jwt, &handler.livekit_auth.secret);
+        assert_eq!(
+            claims["video"]["canPublishData"],
+            serde_json::Value::Bool(can_publish_data),
+            "canPublishData"
+        );
+        handler.close().await;
+    }
 }
 
 /// Verifies that a mismatch between the OpenID-validated sub and the
@@ -2265,6 +2442,8 @@ async fn test_process_sfu_request() {
             },
             vec!["example.com".into()],
             Default::default(),
+            false,
+            false,
             Duration::ZERO,
             HashMap::new(),
             None,
@@ -2606,10 +2785,74 @@ async fn test_handle_get_token_cs_success() {
         );
 
         let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
-        assert_eq!(
+        assert_ne!(
             claims["video"]["hidden"],
-            serde_json::Value::Bool(false),
-            "{path}: hidden must be false"
+            serde_json::Value::Bool(true),
+            "hidden must not be true"
+        );
+        handler.close().await;
+    }
+}
+
+/// The handler's can_update_own_metadata setting is reflected in the
+/// canUpdateOwnMetadata claim of the minted JWT.
+#[tokio::test]
+async fn test_handle_get_token_cs_can_update_own_metadata() {
+    for can_update_own_metadata in [false, true] {
+        let deps = HandlerTestDeps {
+            resolve_cs_api_url_fn: Some(Box::new(|_| {
+                Ok(CsApiUrl("https://matrix.example.com".into()))
+            })),
+            is_joined_fn: is_joined_ok(true),
+            create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+            ..Default::default()
+        };
+        let handler = new_get_token_cs_handler_with(deps, can_update_own_metadata, false);
+
+        let body = marshal_get_token_cs_request(|_| {});
+        let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "status");
+
+        let body = body_bytes(resp).await;
+        let response: GetTokenCsResponse =
+            serde_json::from_slice(&body).expect("failed to decode response body");
+        let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
+        assert_eq!(
+            claims["video"]["canUpdateOwnMetadata"],
+            serde_json::Value::Bool(can_update_own_metadata),
+            "canUpdateOwnMetadata"
+        );
+        handler.close().await;
+    }
+}
+
+/// The handler's can_publish_data setting is reflected in the canPublishData
+/// claim of the minted JWT, since local users may always publish.
+#[tokio::test]
+async fn test_handle_get_token_cs_can_publish_data() {
+    for can_publish_data in [false, true] {
+        let deps = HandlerTestDeps {
+            resolve_cs_api_url_fn: Some(Box::new(|_| {
+                Ok(CsApiUrl("https://matrix.example.com".into()))
+            })),
+            is_joined_fn: is_joined_ok(true),
+            create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+            ..Default::default()
+        };
+        let handler = new_get_token_cs_handler_with(deps, false, can_publish_data);
+
+        let body = marshal_get_token_cs_request(|_| {});
+        let resp = send_request(&handler, post_get_token_cs_request(body, GET_TOKEN_CS_MXID)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "status");
+
+        let body = body_bytes(resp).await;
+        let response: GetTokenCsResponse =
+            serde_json::from_slice(&body).expect("failed to decode response body");
+        let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
+        assert_eq!(
+            claims["video"]["canPublishData"],
+            serde_json::Value::Bool(can_publish_data),
+            "canPublishData"
         );
         handler.close().await;
     }
@@ -3227,6 +3470,8 @@ async fn test_process_get_token_cs_request() {
                 hs_server_name: "example.com".into(),
                 ..Default::default()
             },
+            false,
+            false,
             Duration::ZERO,
             HashMap::new(),
             None,
@@ -3790,6 +4035,8 @@ async fn test_process_get_token_ss_request() {
                     .map(|s| s.to_string())
                     .collect(),
             },
+            false,
+            false,
             Duration::ZERO,
             HashMap::new(),
             None,
@@ -3918,6 +4165,8 @@ async fn test_handle_sfu_get_success() {
         },
         vec![MATRIX_SERVER_NAME.into()],
         Default::default(),
+        false,
+        false,
         Duration::ZERO,
         HashMap::new(),
         Some(new_in_memory_store()),
@@ -4076,6 +4325,8 @@ async fn test_process_legacy_sfu_request() {
             },
             vec!["example.com".into()],
             Default::default(),
+            false,
+            false,
             Duration::ZERO,
             HashMap::new(),
             Some(new_in_memory_store()),
@@ -5064,6 +5315,8 @@ async fn test_process_delegate_delayed_leave_cs_checks_membership_with_other_ful
             hs_server_name: "example.com".into(),
             ..Default::default()
         },
+        false,
+        false,
         Duration::ZERO,
         HashMap::from([(
             "example.com".to_owned(),
@@ -5205,6 +5458,8 @@ fn new_membership_handler(
         } else {
             Default::default()
         },
+        false,
+        false,
         Duration::ZERO,
         HashMap::from([
             (

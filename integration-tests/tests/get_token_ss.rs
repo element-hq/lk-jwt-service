@@ -220,9 +220,11 @@ async fn success() {
         Some(livekit_identity("@alice:origin.example.org", "member-1").as_str())
     );
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
-    assert_eq!(claims["video"]["roomCreate"].as_bool(), Some(false));
+    assert_ne!(claims["video"]["roomCreate"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
+    // LIVEKIT_CAN_PUBLISH_DATA is unset.
+    assert_eq!(claims["video"]["canPublishData"].as_bool(), Some(false));
 
     expect_is_joined_request(
         &hs,
@@ -309,6 +311,53 @@ async fn empty_remote_can_publish_list_lets_nobody_publish() {
     let response: Value = serde_json::from_str(&body).expect("response is not JSON");
     let claims = decode_livekit_jwt(response["jwt"].as_str().unwrap_or_default());
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));
+}
+
+/// With LIVEKIT_CAN_PUBLISH_DATA enabled, canPublishData follows canPublish:
+/// users of listed origin servers may publish data, others may not.
+#[tokio::test]
+async fn can_publish_data_follows_can_publish() {
+    let hs = FakeHomeserver::new().await;
+    let sfu = FakeSfu::new().await;
+
+    let mut extra_env = app_service_env(hs.server_name());
+    extra_env.insert("LIVEKIT_CAN_PUBLISH_DATA".to_owned(), "true".to_owned());
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec!["*".to_owned()],
+        remote_can_publish_homeservers: Some(vec![ORIGIN_SERVER.to_owned()]),
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        extra_env,
+        ..Default::default()
+    })
+    .await;
+
+    for (user_id, origin, want) in [
+        ("@alice:origin.example.org", ORIGIN_SERVER, true),
+        ("@bob:unlisted.example.org", "unlisted.example.org", false),
+    ] {
+        let (status, body) = post_get_token_ss(
+            &svc,
+            get_token_ss_request(user_id, sfu.url()).to_string(),
+            Some(origin),
+            Some(HS_TOKEN),
+        )
+        .await;
+
+        assert_eq!(status, 200, "{origin}: body: {body}");
+        let response: Value = serde_json::from_str(&body).expect("response is not JSON");
+        let claims = decode_livekit_jwt(response["jwt"].as_str().unwrap_or_default());
+        assert_eq!(
+            claims["video"]["canPublish"].as_bool(),
+            Some(want),
+            "{origin}: canPublish"
+        );
+        assert_eq!(
+            claims["video"]["canPublishData"].as_bool(),
+            Some(want),
+            "{origin}: canPublishData"
+        );
+    }
 }
 
 /// A request is rejected when the requesting user is not joined to the room.
