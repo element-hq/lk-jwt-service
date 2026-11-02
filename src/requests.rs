@@ -3,10 +3,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 // Please see LICENSE files in the repository root for full details.
 
-//! HTTP request / response bodies and their validation.
+//! HTTP endpoint paths, request / response bodies and their validation.
 
 use serde::{Deserialize, Serialize};
 use tracing::error;
+
+/// The path of the `/rtc/livekit/get_token` C-S endpoint.
+pub const GET_TOKEN_CS_PATH: &str = "/_matrix/client/v1/rtc/livekit/get_token";
+/// The MSC4195 unstable path of the `/rtc/livekit/get_token` C-S endpoint.
+pub const GET_TOKEN_CS_UNSTABLE_PATH: &str =
+    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token";
+
+/// The path of the `/rtc/livekit/get_token` S-S endpoint.
+pub const GET_TOKEN_SS_PATH: &str = "/_matrix/federation/v1/rtc/livekit/get_token";
+/// The MSC4195 unstable path of the `/rtc/livekit/get_token` S-S endpoint.
+pub const GET_TOKEN_SS_UNSTABLE_PATH: &str =
+    "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token";
+
+/// The path of the `/rtc/livekit/delegate_delayed_leave` C-S endpoint.
+pub const DELEGATE_DELAYED_LEAVE_CS_PATH: &str =
+    "/_matrix/client/v1/rtc/livekit/delegate_delayed_leave";
+/// The MSC4195 unstable path of the `/rtc/livekit/delegate_delayed_leave` C-S
+/// endpoint.
+pub const DELEGATE_DELAYED_LEAVE_CS_UNSTABLE_PATH: &str =
+    "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/delegate_delayed_leave";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MatrixRtcMemberType {

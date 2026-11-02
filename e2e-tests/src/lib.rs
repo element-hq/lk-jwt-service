@@ -485,7 +485,7 @@ pub async fn get_livekit_token(
 ) -> String {
     let resp = reqwest::Client::new()
         .post(format!(
-            "{cs_api_url}/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+            "{cs_api_url}/_matrix/client/v1/rtc/livekit/get_token"
         ))
         .bearer_auth(&user.access_token)
         .json(&serde_json::json!({

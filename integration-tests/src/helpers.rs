@@ -275,8 +275,7 @@ pub fn expect_no_fed_proxy_requests(hs: &FakeHomeserver) {
 }
 
 /// The `/get_token` S-S path from MSC4195.
-const GET_TOKEN_SS_PATH: &str =
-    "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token";
+const GET_TOKEN_SS_PATH: &str = "/_matrix/federation/v1/rtc/livekit/get_token";
 
 /// Assert that exactly one /fed_proxy request targeting `destination` has
 /// been recorded with the specified parameters.

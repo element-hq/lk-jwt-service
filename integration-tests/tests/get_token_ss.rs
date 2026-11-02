@@ -15,8 +15,7 @@ const AS_TOKEN: &str = "as_token";
 const HS_TOKEN: &str = "hs_token";
 const ORIGIN_SERVER: &str = "origin.example.org";
 
-const GET_TOKEN_SS_PATH: &str =
-    "/_matrix/federation/unstable/io.element.msc4195/rtc/livekit/get_token";
+const GET_TOKEN_SS_PATH: &str = "/_matrix/federation/v1/rtc/livekit/get_token";
 
 /// App-service configuration as extra_env.
 fn app_service_env(hs_server_name: &str) -> HashMap<String, String> {
