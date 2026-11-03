@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use lk_jwt_service::config::{bind_addresses, parse_config};
+use lk_jwt_service::config::{BindAddresses, bind_addresses, parse_config};
 use lk_jwt_service::handler::Handler;
 use lk_jwt_service::helper::{LiveKitAuth, RealDeps};
 use lk_jwt_service::store::{Store, new_redis_store};
@@ -130,22 +130,37 @@ async fn main() {
         "Starting service"
     );
 
-    let mut listener = None;
-    for bind_addr in bind_addresses(&config.lk_jwt_bind) {
-        match tokio::net::TcpListener::bind(&bind_addr).await {
-            Ok(bound) => {
-                listener = Some(bound);
-                break;
-            }
-            Err(err) => warn!(bind_addr, err = %err, "Failed to bind"),
-        }
-    }
-    let Some(listener) = listener else {
-        eprintln!("Failed to bind {}", config.lk_jwt_bind);
-        std::process::exit(1);
-    };
     let router = handler.prepare_router();
-    if let Err(err) = axum::serve(listener, router).await {
+    let served = match bind_addresses(&config.lk_jwt_bind) {
+        BindAddresses::Unix(path) => {
+            let _ = std::fs::remove_file(&path);
+            match tokio::net::UnixListener::bind(&path) {
+                Ok(listener) => axum::serve(listener, router).await,
+                Err(err) => {
+                    eprintln!("Failed to bind {}: {err}", path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+        BindAddresses::Tcp(addrs) => {
+            let mut listener = None;
+            for bind_addr in addrs {
+                match tokio::net::TcpListener::bind(&bind_addr).await {
+                    Ok(bound) => {
+                        listener = Some(bound);
+                        break;
+                    }
+                    Err(err) => warn!(bind_addr, err = %err, "Failed to bind"),
+                }
+            }
+            let Some(listener) = listener else {
+                eprintln!("Failed to bind {}", config.lk_jwt_bind);
+                std::process::exit(1);
+            };
+            axum::serve(listener, router).await
+        }
+    };
+    if let Err(err) = served {
         eprintln!("{err}");
         std::process::exit(1);
     }

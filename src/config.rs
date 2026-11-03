@@ -6,6 +6,7 @@
 //! Environment-driven configuration parsing.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use rust_yaml::{Value, Yaml};
@@ -344,13 +345,23 @@ pub fn parse_config() -> Result<Config, String> {
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum BindAddresses {
+    Tcp(Vec<String>),
+    Unix(PathBuf),
+}
+
 /// Expands a bind address into the socket addresses to try, in order. A bare
 /// ":port" means "all interfaces": the IPv6 wildcard is tried first (dual
-/// stack on most systems) with the IPv4 wildcard as fallback.
-pub fn bind_addresses(lk_jwt_bind: &str) -> Vec<String> {
+/// stack on most systems) with the IPv4 wildcard as fallback. A value starting
+/// with "/" is the path of a unix socket.
+pub fn bind_addresses(lk_jwt_bind: &str) -> BindAddresses {
+    if lk_jwt_bind.starts_with('/') {
+        return BindAddresses::Unix(PathBuf::from(lk_jwt_bind));
+    }
     match lk_jwt_bind.strip_prefix(':') {
-        Some(port) => vec![format!("[::]:{port}"), format!("0.0.0.0:{port}")],
-        None => vec![lk_jwt_bind.to_owned()],
+        Some(port) => BindAddresses::Tcp(vec![format!("[::]:{port}"), format!("0.0.0.0:{port}")]),
+        None => BindAddresses::Tcp(vec![lk_jwt_bind.to_owned()]),
     }
 }
 
@@ -1156,8 +1167,14 @@ mod tests {
 
     #[test]
     fn test_bind_addresses() {
-        assert_eq!(bind_addresses(":8080"), vec!["[::]:8080", "0.0.0.0:8080"]);
-        assert_eq!(bind_addresses("127.0.0.1:9090"), vec!["127.0.0.1:9090"]);
-        assert_eq!(bind_addresses("[::1]:9090"), vec!["[::1]:9090"]);
+        let tcp =
+            |addrs: &[&str]| BindAddresses::Tcp(addrs.iter().map(|a| a.to_string()).collect());
+        assert_eq!(bind_addresses(":8080"), tcp(&["[::]:8080", "0.0.0.0:8080"]));
+        assert_eq!(bind_addresses("127.0.0.1:9090"), tcp(&["127.0.0.1:9090"]));
+        assert_eq!(bind_addresses("[::1]:9090"), tcp(&["[::1]:9090"]));
+        assert_eq!(
+            bind_addresses("/run/lk-jwt-service.sock"),
+            BindAddresses::Unix(PathBuf::from("/run/lk-jwt-service.sock"))
+        );
     }
 }
