@@ -85,7 +85,6 @@ async fn main() {
         config.full_access_homeservers.clone(),
         config.app_service_config.clone(),
         config.can_update_own_metadata,
-        config.can_publish_data,
         config.sanity_check_interval,
         config.cs_api_url_overrides.clone(),
         store,
@@ -126,7 +125,6 @@ async fn main() {
         SkipVerifyTLS = config.skip_verify_tls,
         SanityCheckInterval = %sanity_check_interval_display,
         CanUpdateOwnMetadata = config.can_update_own_metadata,
-        CanPublishData = config.can_publish_data,
         "Starting service"
     );
 

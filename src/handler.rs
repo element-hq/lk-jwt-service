@@ -56,14 +56,12 @@ pub fn get_join_token(
     identity: &LiveKitIdentity,
     can_publish: bool,
     can_update_own_metadata: bool,
-    can_publish_data: bool,
 ) -> Result<String, String> {
     let grants = VideoGrants {
         room_join: true,
         room_create: false,
         can_publish: Some(can_publish),
-        // Set explicitly since LiveKit falls back to canPublish when unset.
-        can_publish_data: Some(can_publish_data && can_publish),
+        can_publish_data: Some(can_publish),
         can_subscribe: Some(true),
         can_update_own_metadata: Some(can_update_own_metadata),
         hidden: false,
@@ -191,9 +189,6 @@ pub struct Handler {
     verifies_legacy_membership: bool,
     /// Whether issued tokens grant the canUpdateOwnMetadata permission.
     can_update_own_metadata: bool,
-    /// Whether issued tokens grant the canPublishData permission to
-    /// participants who may publish.
-    can_publish_data: bool,
     /// The period between room-worker sanity checks. Zero disables the sanity
     /// check.
     sanity_check_interval: Duration,
@@ -219,7 +214,6 @@ impl Handler {
         full_access_homeservers: Vec<String>,
         app_service_config: AppServiceConfig,
         can_update_own_metadata: bool,
-        can_publish_data: bool,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
@@ -230,7 +224,6 @@ impl Handler {
             full_access_homeservers,
             app_service_config,
             can_update_own_metadata,
-            can_publish_data,
             sanity_check_interval,
             cs_api_url_overrides,
             store,
@@ -249,7 +242,6 @@ impl Handler {
         full_access_homeservers: Vec<String>,
         app_service_config: AppServiceConfig,
         can_update_own_metadata: bool,
-        can_publish_data: bool,
         sanity_check_interval: Duration,
         cs_api_url_overrides: HashMap<String, CsApiUrl>,
         store: Option<Arc<dyn Store>>,
@@ -276,7 +268,6 @@ impl Handler {
             app_service_config,
             verifies_legacy_membership,
             can_update_own_metadata,
-            can_publish_data,
             sanity_check_interval,
             cs_api_url_overrides: Arc::new(cs_api_url_overrides),
             cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
@@ -850,7 +841,6 @@ impl Handler {
             lk_identity,
             can_publish,
             self.can_update_own_metadata,
-            self.can_publish_data,
         )
         .map_err(|err| {
             error!(matrix_id, err = %err, "Handler: error getting LiveKit token");

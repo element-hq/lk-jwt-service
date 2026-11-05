@@ -37,9 +37,6 @@ pub struct Config {
     /// Whether issued tokens grant participants the right to update their own
     /// metadata.
     pub can_update_own_metadata: bool,
-    /// Whether issued tokens grant participants who may publish media the
-    /// right to publish data, too.
-    pub can_publish_data: bool,
 }
 
 /// Configuration options used for running as an application service.
@@ -282,10 +279,6 @@ pub fn parse_config() -> Result<Config, String> {
         .trim()
         .eq_ignore_ascii_case("true");
 
-    let can_publish_data = env_var("LIVEKIT_CAN_PUBLISH_DATA")
-        .trim()
-        .eq_ignore_ascii_case("true");
-
     let mut sanity_check_interval = Duration::ZERO;
     let sanity_check_raw = env_var("LIVEKIT_SANITY_CHECK_INTERVAL_SECONDS");
     if !sanity_check_raw.is_empty() {
@@ -341,7 +334,6 @@ pub fn parse_config() -> Result<Config, String> {
         redis_url: redis_url_string,
         app_service_config,
         can_update_own_metadata,
-        can_publish_data,
     })
 }
 
@@ -842,7 +834,6 @@ mod tests {
                     redis_url: String::new(),
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
-                    can_publish_data: false,
                 }),
                 want_err_msg: "",
             },
@@ -872,7 +863,6 @@ mod tests {
                     ("LIVEKIT_HS_TOKEN", "hs_token_env_ahb8eiwae0viey7gee4ieNg"),
                     ("LIVEKIT_HS_SERVER_NAME", "example.com"),
                     ("LIVEKIT_CAN_UPDATE_OWN_METADATA", "true"),
-                    ("LIVEKIT_CAN_PUBLISH_DATA", "true"),
                 ],
                 want_config: Some(Config {
                     key: "test_key".into(),
@@ -894,7 +884,6 @@ mod tests {
                         ..Default::default()
                     },
                     can_update_own_metadata: true,
-                    can_publish_data: true,
                 }),
                 want_err_msg: "",
             },
@@ -919,7 +908,6 @@ mod tests {
                     redis_url: String::new(),
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
-                    can_publish_data: false,
                 }),
                 want_err_msg: "",
             },
@@ -944,32 +932,6 @@ mod tests {
                     redis_url: String::new(),
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
-                    can_publish_data: false,
-                }),
-                want_err_msg: "",
-            },
-            Case {
-                name: "Can publish data only enabled by true",
-                env: vec![
-                    ("LIVEKIT_KEY", "test_key"),
-                    ("LIVEKIT_SECRET", "test_secret"),
-                    ("LIVEKIT_URL", "wss://test.livekit.cloud"),
-                    ("LIVEKIT_FULL_ACCESS_HOMESERVERS", "*"),
-                    ("LIVEKIT_CAN_PUBLISH_DATA", "yes"),
-                ],
-                want_config: Some(Config {
-                    key: "test_key".into(),
-                    secret: "test_secret".into(),
-                    lk_url: "wss://test.livekit.cloud".into(),
-                    skip_verify_tls: false,
-                    full_access_homeservers: vec!["*".into()],
-                    lk_jwt_bind: ":8080".into(),
-                    sanity_check_interval: Duration::ZERO,
-                    cs_api_url_overrides: HashMap::new(),
-                    redis_url: String::new(),
-                    app_service_config: Default::default(),
-                    can_update_own_metadata: false,
-                    can_publish_data: false,
                 }),
                 want_err_msg: "",
             },
@@ -1050,7 +1012,6 @@ mod tests {
                     redis_url: String::new(),
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
-                    can_publish_data: false,
                 }),
                 want_err_msg: "",
             },
@@ -1087,7 +1048,6 @@ mod tests {
                     redis_url: "redis://localhost:6379".to_owned(),
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
-                    can_publish_data: false,
                 }),
                 want_err_msg: "",
             },
@@ -1116,7 +1076,6 @@ mod tests {
                         .to_owned(),
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
-                    can_publish_data: false,
                 }),
                 want_err_msg: "",
             },
