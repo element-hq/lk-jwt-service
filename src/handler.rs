@@ -61,6 +61,7 @@ pub fn get_join_token(
         room_join: true,
         room_create: false,
         can_publish: Some(can_publish),
+        // Set explicitly since LiveKit falls back to canPublish when unset.
         can_publish_data: Some(can_publish),
         can_subscribe: Some(true),
         can_update_own_metadata: Some(can_update_own_metadata),
