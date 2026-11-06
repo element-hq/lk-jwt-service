@@ -22,8 +22,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::delayed_event_manager::{AppServiceIdentity, DELAYED_EVENTS_ENDPOINT, DelayEventAction};
 use crate::requests::{
-    GET_TOKEN_SS_PATH, GET_TOKEN_SS_UNSTABLE_PATH, GetTokenSsRequest, GetTokenSsResponse,
-    OpenIdTokenType,
+    GET_TOKEN_SS_PATH, GET_TOKEN_SS_UNSTABLE_PATH, GetTokenCsRequest, GetTokenSsRequest,
+    GetTokenSsResponse, OpenIdTokenType,
 };
 use crate::retry::{Classify, ErrorClass};
 
@@ -202,6 +202,33 @@ fn marshal_strings(ss: &[&str]) -> Vec<u8> {
 fn sha256_unpadded_base64(data: &[u8]) -> String {
     let hash = Sha256::digest(data);
     STANDARD_NO_PAD.encode(hash)
+}
+
+/// The stable slot ID of room-wide `m.call` application instances.
+pub const M_CALL_ROOM_SLOT_ID: &str = "m.call#room";
+
+/// The unstable slot ID of room-wide `m.call` application instances used by earlier
+/// implementations of MSC4196.
+pub const M_CALL_ROOM_SLOT_ID_UNSTABLE: &str = "m.call#ROOM";
+
+/// If the input is the unstable slot ID of room-wide `m.call` applications, maps it
+/// to the stable identifier. Otherwise, returns the input unchanged.
+pub fn map_to_stable_m_call_slot_id(slot_id: &str) -> &str {
+    if slot_id == M_CALL_ROOM_SLOT_ID_UNSTABLE {
+        M_CALL_ROOM_SLOT_ID
+    } else {
+        slot_id
+    }
+}
+
+/// If the input is the stable slot ID of room-wide `m.call` applications, maps it
+/// to the unstable identifier. Otherwise, returns the input unchanged.
+pub fn map_to_unstable_m_call_slot_id(slot_id: &str) -> &str {
+    if slot_id == M_CALL_ROOM_SLOT_ID {
+        M_CALL_ROOM_SLOT_ID_UNSTABLE
+    } else {
+        slot_id
+    }
 }
 
 /// Returns the deterministic LiveKit room alias for a given
@@ -1066,15 +1093,17 @@ pub trait Deps: Send + Sync {
         Ok((status, body))
     }
 
-    /// Relays a `/rtc/livekit/get_token` S-S request to `destination` via
-    /// this homeserver's federation proxy.
+    /// Relays the `/rtc/livekit/get_token` C-S request `req` of the local
+    /// user `user_id` to the homeserver it names in `server_name` as an S-S
+    /// request via this homeserver's federation proxy.
     async fn request_get_token_via_federation(
         &self,
         own_cs_api_url: &CsApiUrl,
         as_token: &str,
-        destination: &str,
-        req: &GetTokenSsRequest,
+        user_id: &str,
+        req: &GetTokenCsRequest,
     ) -> Result<GetTokenSsResponse, FederationTokenError> {
+        let destination = req.server_name.as_str();
         let mut endpoint = url::Url::parse(own_cs_api_url.as_str()).map_err(|e| {
             FederationTokenError::Other(format!("invalid client-server API URL: {e}"))
         })?;
@@ -1095,6 +1124,14 @@ pub trait Deps: Send + Sync {
                 "fed_proxy",
             ]);
 
+        let ss_req = |slot_id: &str| GetTokenSsRequest {
+            user_id: user_id.to_owned(),
+            url: req.url.clone(),
+            room_id: req.room_id.clone(),
+            slot_id: slot_id.to_owned(),
+            member_id: req.member_id.clone(),
+        };
+
         let client = http_client(self.skip_verify_tls());
         match post_via_fed_proxy(
             client,
@@ -1102,7 +1139,9 @@ pub trait Deps: Send + Sync {
             as_token,
             destination,
             GET_TOKEN_SS_PATH,
-            req,
+            // Map to the stable slot ID for m.call when calling the
+            // stable endpoint.
+            &ss_req(map_to_stable_m_call_slot_id(&req.slot_id)),
         )
         .await
         {
@@ -1123,7 +1162,10 @@ pub trait Deps: Send + Sync {
                     as_token,
                     destination,
                     GET_TOKEN_SS_UNSTABLE_PATH,
-                    req,
+                    // Map to the unstable slot ID for m.call when calling the
+                    // unstable endpoint which is what local clients that still
+                    // use the unstable endpoint would do.
+                    &ss_req(map_to_unstable_m_call_slot_id(&req.slot_id)),
                 )
                 .await
             }
@@ -1554,6 +1596,55 @@ mod tests {
             !alias.0.contains('='),
             "alias contains padding '=': {alias}"
         );
+    }
+
+    /// The alias is a plain hash. Mapping has to be applied by the caller.
+    #[test]
+    fn test_livekit_room_alias_for_does_not_map_m_call_slot_ids() {
+        let room = "!room:example.com";
+        assert_ne!(
+            livekit_room_alias_for(room, M_CALL_ROOM_SLOT_ID_UNSTABLE),
+            livekit_room_alias_for(room, M_CALL_ROOM_SLOT_ID),
+            "the room alias should be mapped by callers"
+        );
+    }
+
+    #[test]
+    fn test_map_to_stable_m_call_slot_id() {
+        assert_eq!(map_to_stable_m_call_slot_id("m.call#ROOM"), "m.call#room");
+        assert_eq!(map_to_stable_m_call_slot_id("m.call#room"), "m.call#room");
+        for other in [
+            "m.call#Room",
+            "m.call#room ",
+            "m.call#ROOM#",
+            "m.other#ROOM",
+            "ROOM",
+        ] {
+            assert_eq!(
+                map_to_stable_m_call_slot_id(other),
+                other,
+                "{other:?} was mapped"
+            );
+        }
+    }
+
+    #[test]
+    fn test_map_to_unstable_m_call_slot_id() {
+        assert_eq!(map_to_unstable_m_call_slot_id("m.call#room"), "m.call#ROOM");
+        assert_eq!(map_to_unstable_m_call_slot_id("m.call#ROOM"), "m.call#ROOM");
+        for other in [
+            "m.call#Room",
+            "m.call#room ",
+            "m.call#ROOM#",
+            "m.other#ROOM",
+            "ROOM",
+        ] {
+            assert_eq!(
+                map_to_unstable_m_call_slot_id(other),
+                other,
+                "{other:?} was mapped"
+            );
+        }
     }
 
     // ── legacy_livekit_identity_for ───────────────────────────────────────────
@@ -3391,7 +3482,22 @@ mod tests {
     /// A homeserver stub serving the MSC4512 /fed_proxy endpoint.
     struct FedProxyServer {
         server: TestHttpServer,
+        /// The relayed S-S paths, in request order.
         paths: Arc<Mutex<Vec<String>>>,
+        /// The relayed S-S request bodies, in request order.
+        bodies: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl FedProxyServer {
+        /// The `slot_id` of each relayed request body, in request order.
+        fn slot_ids(&self) -> Vec<String> {
+            self.bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|body| body["slot_id"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        }
     }
 
     /// Spawn a homeserver stub serving the MSC4512 /fed_proxy endpoint. `respond`
@@ -3400,37 +3506,46 @@ mod tests {
         respond: impl Fn(&str) -> (u16, serde_json::Value) + Clone + Send + Sync + 'static,
     ) -> FedProxyServer {
         let paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let paths_clone = paths.clone();
+        let bodies_clone = bodies.clone();
         let router = Router::new().route(
             "/_matrix/client/unstable/io.element.msc4512/appservice/fed_proxy",
-            any(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            any(move |axum::Json(mut body): axum::Json<serde_json::Value>| {
                 let paths = paths_clone.clone();
+                let bodies = bodies_clone.clone();
                 let respond = respond.clone();
                 async move {
                     let path = body["path"].as_str().unwrap_or_default().to_owned();
                     let (status, content) = respond(&path);
                     paths.lock().unwrap().push(path);
+                    bodies.lock().unwrap().push(body["body"].take());
                     axum::Json(serde_json::json!({ "status": status, "content": content }))
                 }
             }),
         );
         let server = spawn_http_server(router).await;
-        FedProxyServer { server, paths }
+        FedProxyServer {
+            server,
+            paths,
+            bodies,
+        }
     }
 
     async fn request_get_token_via(
         fed_proxy: &FedProxyServer,
+        slot_id: &str,
     ) -> Result<GetTokenSsResponse, FederationTokenError> {
         RealDeps::default()
             .request_get_token_via_federation(
                 &CsApiUrl(fed_proxy.server.url.clone()),
                 "as_token",
-                "remote.example.org",
-                &GetTokenSsRequest {
+                "@alice:example.com",
+                &GetTokenCsRequest {
+                    server_name: "remote.example.org".into(),
                     url: "wss://livekit.remote.example.org".into(),
-                    user_id: "@alice:example.com".into(),
                     room_id: "!room:example.com".into(),
-                    slot_id: "m.call#ROOM".into(),
+                    slot_id: slot_id.into(),
                     member_id: "member".into(),
                 },
             )
@@ -3438,20 +3553,36 @@ mod tests {
     }
 
     /// The stable S-S endpoint is tried first and the unstable one is left
-    /// alone when the destination recognises it.
+    /// alone when the destination recognises it. The S-S body carries the
+    /// C-S request's fields plus the user ID, with the slot ID of room-wide
+    /// `m.call` applications in its stable form.
     #[tokio::test]
     async fn test_request_get_token_via_federation_uses_stable_endpoint() {
-        let fed_proxy =
-            spawn_fed_proxy_server(|_| (200, serde_json::json!({ "jwt": "remote-jwt" }))).await;
+        for slot_id in [M_CALL_ROOM_SLOT_ID, M_CALL_ROOM_SLOT_ID_UNSTABLE] {
+            let fed_proxy =
+                spawn_fed_proxy_server(|_| (200, serde_json::json!({ "jwt": "remote-jwt" }))).await;
 
-        let resp = request_get_token_via(&fed_proxy)
-            .await
-            .expect("unexpected error");
-        assert_eq!(resp.jwt, "remote-jwt");
-        assert_eq!(
-            *fed_proxy.paths.lock().unwrap(),
-            vec![GET_TOKEN_SS_PATH.to_owned()]
-        );
+            let resp = request_get_token_via(&fed_proxy, slot_id)
+                .await
+                .expect("unexpected error");
+            assert_eq!(resp.jwt, "remote-jwt", "{slot_id}");
+            assert_eq!(
+                *fed_proxy.paths.lock().unwrap(),
+                vec![GET_TOKEN_SS_PATH.to_owned()],
+                "{slot_id}"
+            );
+            assert_eq!(
+                *fed_proxy.bodies.lock().unwrap(),
+                vec![serde_json::json!({
+                    "user_id": "@alice:example.com",
+                    "url": "wss://livekit.remote.example.org",
+                    "room_id": "!room:example.com",
+                    "slot_id": M_CALL_ROOM_SLOT_ID,
+                    "member_id": "member",
+                })],
+                "{slot_id}"
+            );
+        }
     }
 
     /// A destination that doesn't recognise the stable S-S endpoint is retried
@@ -3474,7 +3605,7 @@ mod tests {
             })
             .await;
 
-            let resp = request_get_token_via(&fed_proxy)
+            let resp = request_get_token_via(&fed_proxy, M_CALL_ROOM_SLOT_ID)
                 .await
                 .unwrap_or_else(|e| panic!("{content}: unexpected error: {e}"));
             assert_eq!(resp.jwt, "remote-jwt", "{content}");
@@ -3486,7 +3617,65 @@ mod tests {
                 ],
                 "{content}"
             );
+            assert_eq!(
+                fed_proxy.slot_ids(),
+                vec![
+                    // The stable request uses the slot ID as passed in.
+                    M_CALL_ROOM_SLOT_ID.to_owned(),
+                    // The fallback carries the legacy spelling.
+                    M_CALL_ROOM_SLOT_ID_UNSTABLE.to_owned()
+                ],
+                "{content}"
+            );
         }
+    }
+
+    /// The unstable slot ID of room-wide `m.call` applications is mapped on
+    /// both attempts, to the stable one for the stable endpoint and back for
+    /// the retry on the unstable one.
+    #[tokio::test]
+    async fn test_request_get_token_via_federation_fallback_maps_unstable_m_call_slot_id() {
+        let fed_proxy = spawn_fed_proxy_server(|path| {
+            if path == GET_TOKEN_SS_PATH {
+                (404, serde_json::json!({ "errcode": "M_UNRECOGNIZED" }))
+            } else {
+                (200, serde_json::json!({ "jwt": "remote-jwt" }))
+            }
+        })
+        .await;
+
+        request_get_token_via(&fed_proxy, M_CALL_ROOM_SLOT_ID_UNSTABLE)
+            .await
+            .expect("unexpected error");
+        assert_eq!(
+            fed_proxy.slot_ids(),
+            vec![
+                M_CALL_ROOM_SLOT_ID.to_owned(),
+                M_CALL_ROOM_SLOT_ID_UNSTABLE.to_owned()
+            ]
+        );
+    }
+
+    /// Slots other than the room-wide `m.call` one are relayed unchanged on
+    /// both attempts.
+    #[tokio::test]
+    async fn test_request_get_token_via_federation_relays_other_slots_unchanged() {
+        let fed_proxy = spawn_fed_proxy_server(|path| {
+            if path == GET_TOKEN_SS_PATH {
+                (404, serde_json::json!({ "errcode": "M_UNRECOGNIZED" }))
+            } else {
+                (200, serde_json::json!({ "jwt": "remote-jwt" }))
+            }
+        })
+        .await;
+
+        request_get_token_via(&fed_proxy, "m.call#standup")
+            .await
+            .expect("unexpected error");
+        assert_eq!(
+            fed_proxy.slot_ids(),
+            vec!["m.call#standup".to_owned(), "m.call#standup".to_owned()]
+        );
     }
 
     /// Errors other than an unrecognised endpoint are not retried.
@@ -3500,7 +3689,7 @@ mod tests {
         })
         .await;
 
-        let err = request_get_token_via(&fed_proxy)
+        let err = request_get_token_via(&fed_proxy, M_CALL_ROOM_SLOT_ID)
             .await
             .expect_err("expected the destination error to surface");
         match err {

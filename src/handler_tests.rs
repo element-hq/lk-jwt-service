@@ -44,7 +44,7 @@ type GetDelayedEventDelayFn =
 type IsJoinedFn =
     Box<dyn Fn(&CsApiUrl, &str, JoinedSubject<'_>) -> Result<bool, String> + Send + Sync>;
 type RequestGetTokenViaFederationFn = Box<
-    dyn Fn(&CsApiUrl, &str, &GetTokenSsRequest) -> Result<GetTokenSsResponse, FederationTokenError>
+    dyn Fn(&CsApiUrl, &str, &GetTokenCsRequest) -> Result<GetTokenSsResponse, FederationTokenError>
         + Send
         + Sync,
 >;
@@ -176,11 +176,11 @@ impl Deps for HandlerTestDeps {
         &self,
         own_cs_api_url: &CsApiUrl,
         _as_token: &str,
-        destination: &str,
-        req: &GetTokenSsRequest,
+        _user_id: &str,
+        req: &GetTokenCsRequest,
     ) -> Result<GetTokenSsResponse, FederationTokenError> {
         match &self.request_get_token_via_federation_fn {
-            Some(f) => f(own_cs_api_url, destination, req),
+            Some(f) => f(own_cs_api_url, &req.server_name, req),
             None => panic!("request_get_token_via_federation not mocked in HandlerTestDeps"),
         }
     }
@@ -2794,6 +2794,48 @@ async fn test_handle_get_token_cs_success() {
     }
 }
 
+/// Both spellings of the `m.call` room slot mint a token for the same LiveKit
+/// room, which is the one the legacy `/sfu/get` endpoint uses too.
+#[tokio::test]
+async fn test_handle_get_token_cs_m_call_room_slot_spellings() {
+    const MATRIX_ROOM: &str = "!room:example.com";
+    let want_room = livekit_room_alias_for(MATRIX_ROOM, crate::helper::M_CALL_ROOM_SLOT_ID).0;
+
+    for slot_id in ["m.call#room", "m.call#ROOM"] {
+        let deps = HandlerTestDeps {
+            resolve_cs_api_url_fn: Some(Box::new(|_| {
+                Ok(CsApiUrl("https://matrix.example.com".into()))
+            })),
+            is_joined_fn: is_joined_ok(true),
+            create_livekit_room_fn: Some(Box::new(|_, _, _| Ok(()))),
+            ..Default::default()
+        };
+        let handler = new_get_token_cs_handler(deps);
+
+        let body = marshal_get_token_cs_request(|r| {
+            r.room_id = MATRIX_ROOM.into();
+            r.slot_id = slot_id.into();
+        });
+        let resp = send_request(
+            &handler,
+            post_get_token_cs_request_to(GET_TOKEN_CS_PATH, body, GET_TOKEN_CS_MXID),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{slot_id}: status");
+
+        let body = body_bytes(resp).await;
+        let response: GetTokenCsResponse =
+            serde_json::from_slice(&body).expect("failed to decode response body");
+        let claims = parse_jwt_claims(&response.jwt, &handler.livekit_auth.secret);
+        assert_eq!(
+            claims["video"]["room"],
+            serde_json::Value::String(want_room.clone()),
+            "{slot_id}: room"
+        );
+        handler.close().await;
+    }
+}
+
 /// The handler's can_update_own_metadata setting is reflected in the
 /// canUpdateOwnMetadata claim of the minted JWT.
 #[tokio::test]
@@ -4139,7 +4181,7 @@ async fn test_handle_sfu_get_missing_params() {
 /// Verifies the full-access happy-path POST /sfu/get: a valid request
 /// produces a 200 SfuResponse, create_livekit_room is invoked, and the JWT's
 /// sub/room claims encode the legacy (pre-Matrix-2.0) identity scheme
-/// (`<sub>:<device>` for sub, hashed (room, "m.call#ROOM") for room).
+/// (`<sub>:<device>` for sub, hashed (room, "m.call#room") for room).
 #[tokio::test]
 async fn test_handle_sfu_get_success() {
     const MATRIX_SERVER_NAME: &str = "example.com";
@@ -4199,7 +4241,7 @@ async fn test_handle_sfu_get_success() {
     let claims = parse_jwt_claims(&sfu_response.jwt, &handler.livekit_auth.secret);
     let want_sub = format!("{CLAIMED_USER_SUB}:{DEVICE_ID}");
     assert_eq!(claims["sub"], serde_json::Value::String(want_sub), "sub");
-    let want_room = livekit_room_alias_for(MATRIX_ROOM, "m.call#ROOM").0;
+    let want_room = livekit_room_alias_for(MATRIX_ROOM, "m.call#room").0;
     assert_eq!(
         claims["video"]["room"],
         serde_json::Value::String(want_room),

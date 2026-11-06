@@ -7,13 +7,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use lk_jwt_service_integration_tests::{
-    APP_SERVICE_AS_TOKEN, FakeHomeserver, FakeRedis, FakeSfu, FakeUser, LIVEKIT_KEY, Service,
-    ServiceConfig, app_service_env, decode_livekit_jwt, expect_delayed_event_request,
-    expect_delayed_event_request_count, expect_is_joined_request, expect_job_not_persisted,
-    expect_job_persisted, expect_matrix_error, expect_no_delayed_event_request,
-    expect_no_delayed_event_requests, expect_no_is_joined_requests, expect_no_user_info_lookups,
-    expect_user_info_lookup, legacy_livekit_identity, livekit_room_alias, send_sfu_webhook,
-    wait_for_delayed_event_request, wait_for_delayed_event_request_count, wait_for_job_removed,
+    APP_SERVICE_AS_TOKEN, FakeHomeserver, FakeRedis, FakeSfu, FakeUser, LIVEKIT_KEY,
+    M_CALL_ROOM_SLOT_ID, M_CALL_ROOM_SLOT_ID_UNSTABLE, Service, ServiceConfig, app_service_env,
+    decode_livekit_jwt, expect_delayed_event_request, expect_delayed_event_request_count,
+    expect_is_joined_request, expect_job_not_persisted, expect_job_persisted, expect_matrix_error,
+    expect_no_delayed_event_request, expect_no_delayed_event_requests,
+    expect_no_is_joined_requests, expect_no_user_info_lookups, expect_user_info_lookup,
+    legacy_livekit_identity, livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request,
+    wait_for_delayed_event_request_count, wait_for_job_removed,
 };
 use serde_json::{Value, json};
 
@@ -1405,4 +1406,53 @@ async fn app_service_with_other_full_access_homeserver_does_not_ask() {
 
     assert_eq!(status, 200, "body: {body}");
     expect_no_is_joined_requests(&hs);
+}
+
+/// Both slot IDs of room-wide `m.call` application instances, the stable
+/// `m.call#room` and the unstable `m.call#ROOM`, are granted the same LiveKit
+/// room.
+#[tokio::test]
+async fn m_call_room_slot_ids_share_a_room() {
+    // Set up the homeserver and SFU.
+    let hs = FakeHomeserver::new().await;
+    let user = hs.new_user("alice");
+    let sfu = FakeSfu::new().await;
+
+    // Start the service.
+    let svc = Service::start(ServiceConfig {
+        full_access_homeservers: vec![hs.server_name().to_owned()],
+        cs_api_url_overrides: hs.cs_api_url_override(),
+        livekit_url: Some(sfu.url().to_owned()),
+        ..Default::default()
+    })
+    .await;
+
+    let want_room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
+    for slot_id in [M_CALL_ROOM_SLOT_ID, M_CALL_ROOM_SLOT_ID_UNSTABLE] {
+        // Post a valid /get_token request for the slot.
+        let mut request = get_token_request(&hs, &user);
+        request["slot_id"] = json!(slot_id);
+        let (status, body) = post_get_token(&svc, request.to_string()).await;
+
+        // The request should succeed.
+        assert_eq!(status, 200, "{slot_id}: body: {body}");
+
+        // The JWT should grant the room derived from the stable slot ID.
+        let response: Value = serde_json::from_str(&body).expect("response is not JSON");
+        let claims = decode_livekit_jwt(response["jwt"].as_str().unwrap_or_default());
+        assert_eq!(
+            claims["video"]["room"].as_str(),
+            Some(want_room.as_str()),
+            "{slot_id}: room"
+        );
+    }
+
+    // The service should have created that one room on the SFU, once per
+    // request.
+    let rooms = sfu.create_room_requests();
+    assert_eq!(rooms.len(), 2, "expected one room creation per request");
+    assert!(
+        rooms.iter().all(|r| r.name == want_room),
+        "expected every room creation to target the stable room, got {rooms:?}"
+    );
 }

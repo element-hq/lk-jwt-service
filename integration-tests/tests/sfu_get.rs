@@ -7,12 +7,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use lk_jwt_service_integration_tests::{
-    APP_SERVICE_AS_TOKEN, FakeHomeserver, FakeRedis, FakeSfu, FakeUser, LIVEKIT_KEY, Service,
-    ServiceConfig, app_service_env, decode_livekit_jwt, expect_delayed_event_request,
-    expect_delayed_event_request_count, expect_is_joined_request, expect_job_not_persisted,
-    expect_job_persisted, expect_matrix_error, expect_no_delayed_event_request,
-    expect_no_delayed_event_requests, expect_no_is_joined_requests, expect_no_user_info_lookups,
-    expect_user_info_lookup, livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request,
+    APP_SERVICE_AS_TOKEN, FakeHomeserver, FakeRedis, FakeSfu, FakeUser, LIVEKIT_KEY,
+    M_CALL_ROOM_SLOT_ID, Service, ServiceConfig, app_service_env, decode_livekit_jwt,
+    expect_delayed_event_request, expect_delayed_event_request_count, expect_is_joined_request,
+    expect_job_not_persisted, expect_job_persisted, expect_matrix_error,
+    expect_no_delayed_event_request, expect_no_delayed_event_requests,
+    expect_no_is_joined_requests, expect_no_user_info_lookups, expect_user_info_lookup,
+    livekit_room_alias, send_sfu_webhook, wait_for_delayed_event_request,
     wait_for_delayed_event_request_count, wait_for_job_removed,
 };
 use serde_json::{Value, json};
@@ -385,7 +386,7 @@ async fn aborts_and_sends_when_connection_is_never_established() {
     expect_user_info_lookup(&hs, &user.openid_token);
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -417,7 +418,7 @@ async fn connects_via_participant_lookup_when_already_present() {
     .await;
 
     // The participant is already on the SFU before the request even arrives.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     sfu.set_participant_present(&room, &identity);
 
@@ -487,7 +488,7 @@ async fn aborts_when_connection_is_aborted_before_being_established() {
     expect_user_info_lookup(&hs, &user.openid_token);
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -536,7 +537,7 @@ async fn aborts_and_sends_when_connection_is_aborted_after_being_established() {
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -592,7 +593,7 @@ async fn aborts_and_sends_when_connection_is_disconnected() {
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -643,7 +644,7 @@ async fn aborts_and_sends_when_participant_goes_missing_undetected() {
     .await;
 
     // The participant is already on the SFU before the request arrives.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     sfu.set_participant_present(&room, &identity);
 
@@ -707,7 +708,7 @@ async fn restarts_the_delayed_event_repeatedly() {
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -771,7 +772,7 @@ async fn aborts_when_delayed_event_is_gone() {
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -826,7 +827,7 @@ async fn completes_when_delayed_event_already_sent() {
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -885,7 +886,7 @@ async fn job_replacement_only_affects_latest_job() {
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -969,11 +970,11 @@ async fn independent_jobs_do_not_cross_talk() {
     assert_eq!(status, 200, "body: {body}");
 
     // Both jobs should be persisted.
-    let alice_room = livekit_room_alias("!room-a:example.com", "m.call#ROOM");
+    let alice_room = livekit_room_alias("!room-a:example.com", M_CALL_ROOM_SLOT_ID);
     let alice_identity = format!("{}:DEVICE", alice.user_id);
     expect_job_persisted(&redis, &alice_room, &alice_identity);
 
-    let bob_room = livekit_room_alias("!room-b:example.com", "m.call#ROOM");
+    let bob_room = livekit_room_alias("!room-b:example.com", M_CALL_ROOM_SLOT_ID);
     let bob_identity = format!("{}:DEVICE", bob.user_id);
     expect_job_persisted(&redis, &bob_room, &bob_identity);
 
@@ -1055,7 +1056,7 @@ async fn job_survives_a_service_restart() {
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 
@@ -1126,7 +1127,7 @@ async fn expired_jobs_are_purged_on_restart() {
     assert_eq!(status, 200, "body: {body}");
 
     // The job should be persisted.
-    let room = livekit_room_alias("!room:example.com", "m.call#ROOM");
+    let room = livekit_room_alias("!room:example.com", M_CALL_ROOM_SLOT_ID);
     let identity = format!("{}:DEVICE", user.user_id);
     expect_job_persisted(&redis, &room, &identity);
 

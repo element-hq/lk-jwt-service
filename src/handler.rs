@@ -34,8 +34,8 @@ use crate::delayed_event_manager::{
 use crate::helper::new_unique_id;
 use crate::helper::{
     CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, JoinedSubject, LiveKitAuth,
-    LiveKitIdentity, LiveKitRoomAlias, UniqueId, legacy_livekit_identity_for, livekit_identity_for,
-    livekit_room_alias_for, matrix_server_name,
+    LiveKitIdentity, LiveKitRoomAlias, M_CALL_ROOM_SLOT_ID, UniqueId, legacy_livekit_identity_for,
+    livekit_identity_for, livekit_room_alias_for, map_to_stable_m_call_slot_id, matrix_server_name,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::requests::AppservicePingTriggerRequest;
@@ -1007,7 +1007,7 @@ impl Handler {
             .await?;
 
         let lk_identity = LiveKitIdentity(format!("{matrix_id}:{}", req.device_id));
-        let slot_id = "m.call#ROOM";
+        let slot_id = M_CALL_ROOM_SLOT_ID;
         let lk_room_alias = livekit_room_alias_for(&req.room, slot_id);
 
         let token = self.get_join_token_or_internal_error(
@@ -1088,7 +1088,8 @@ impl Handler {
 
         let lk_identity =
             legacy_livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
-        let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+        let lk_room_alias =
+            livekit_room_alias_for(&req.room_id, map_to_stable_m_call_slot_id(&req.slot_id));
 
         let token = self.get_join_token_or_internal_error(
             &lk_room_alias,
@@ -1182,7 +1183,8 @@ impl Handler {
 
         if is_local {
             let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
-            let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+            let lk_room_alias =
+                livekit_room_alias_for(&req.room_id, map_to_stable_m_call_slot_id(&req.slot_id));
 
             let token = self.get_join_token_or_internal_error(
                 &lk_room_alias,
@@ -1209,20 +1211,13 @@ impl Handler {
             )
             .await?;
 
-            let ss_req = GetTokenSsRequest {
-                user_id: mxid_header.to_owned(),
-                url: req.url,
-                room_id: req.room_id,
-                slot_id: req.slot_id,
-                member_id: req.member_id,
-            };
             let resp = self
                 .deps
                 .request_get_token_via_federation(
                     &cs_api_url,
                     &self.app_service_config.as_token,
-                    target_server_name,
-                    &ss_req,
+                    mxid_header,
+                    &req,
                 )
                 .await
                 .map_err(|err| {
@@ -1232,7 +1227,7 @@ impl Handler {
                 })?;
 
             info!(matrix_id = %mxid_header, destination = %target_server_name,
-                matrix_room = %ss_req.room_id, matrix_rtc_slot = %ss_req.slot_id,
+                matrix_room = %req.room_id, matrix_rtc_slot = %req.slot_id,
                 "Handler: relayed SFU access token via federation proxy (app-service)");
 
             Ok(GetTokenCsResponse { jwt: resp.jwt })
@@ -1276,7 +1271,8 @@ impl Handler {
         self.require_matching_lk_url(&req.url, "get_token_ss")?;
 
         let lk_identity = livekit_identity_for(&req.user_id, &req.member_id);
-        let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+        let lk_room_alias =
+            livekit_room_alias_for(&req.room_id, map_to_stable_m_call_slot_id(&req.slot_id));
 
         // Federated participants may publish unless the operator restricts
         // remote publishing to other homeservers.
@@ -1327,7 +1323,8 @@ impl Handler {
 
         let lk_identity =
             legacy_livekit_identity_for(&matrix_id, &req.member.claimed_device_id, &req.member.id);
-        let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+        let lk_room_alias =
+            livekit_room_alias_for(&req.room_id, map_to_stable_m_call_slot_id(&req.slot_id));
 
         // Verify that the Client-Server API can be resolved and prime the
         // cache.
@@ -1371,7 +1368,8 @@ impl Handler {
         })?;
 
         let lk_identity = livekit_identity_for(mxid_header, &req.member_id);
-        let lk_room_alias = livekit_room_alias_for(&req.room_id, &req.slot_id);
+        let lk_room_alias =
+            livekit_room_alias_for(&req.room_id, map_to_stable_m_call_slot_id(&req.slot_id));
 
         let cs_api_url = self
             .resolve_cs_api_url_or_bad_request(&self.app_service_config.hs_server_name)

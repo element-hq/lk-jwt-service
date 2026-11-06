@@ -4,10 +4,11 @@
 // Please see LICENSE files in the repository root for full details.
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LIVEKIT_B_SFU_ADDR, LIVEKIT_B_URL, MatrixUser,
-    SYNAPSE_A_CS_API_URL, SYNAPSE_A_SERVER_NAME, SYNAPSE_B_CS_API_URL, SYNAPSE_B_SERVER_NAME,
-    assert_stack_is_up, attempt_publish_track, create_and_join_room, get_livekit_token,
-    join_room_via, register_user, verify_livekit_token_is_usable,
+    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LIVEKIT_B_SFU_ADDR, LIVEKIT_B_URL, LiveKitParticipant,
+    M_CALL_ROOM_SLOT_ID, M_CALL_ROOM_SLOT_ID_UNSTABLE, MatrixUser, SYNAPSE_A_CS_API_URL,
+    SYNAPSE_A_SERVER_NAME, SYNAPSE_B_CS_API_URL, SYNAPSE_B_SERVER_NAME, assert_stack_is_up,
+    attempt_publish_track, create_and_join_room, get_livekit_token, join_room_via, register_user,
+    verify_livekit_token_is_usable,
 };
 
 /// Low-level POST to `/rtc/livekit/get_token` through `cs_api_url` as `user`,
@@ -22,11 +23,12 @@ async fn request_get_token(
     server_name: Option<&str>,
     livekit_url: &str,
     room_id: &str,
+    slot_id: &str,
     member_id: &str,
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let mut json = serde_json::json!({
         "room_id": room_id,
-        "slot_id": "m.call#ROOM",
+        "slot_id": slot_id,
         "url": livekit_url,
         "member_id": member_id,
     });
@@ -57,6 +59,7 @@ async fn get_relayed_livekit_token(
     target_server_name: &str,
     livekit_url: &str,
     room_id: &str,
+    slot_id: &str,
     member_id: &str,
 ) -> String {
     let (status, body) = request_get_token(
@@ -65,6 +68,7 @@ async fn get_relayed_livekit_token(
         Some(target_server_name),
         livekit_url,
         room_id,
+        slot_id,
         member_id,
     )
     .await;
@@ -141,6 +145,7 @@ async fn get_token_remote_sfu_succeeds() {
         SYNAPSE_A_SERVER_NAME,
         LIVEKIT_A_URL,
         &room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
         "e2e-member",
     )
     .await;
@@ -186,6 +191,7 @@ async fn get_token_remote_sfu_cannot_publish() {
         SYNAPSE_A_SERVER_NAME,
         LIVEKIT_A_URL,
         &room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
         "e2e-member-bob",
     )
     .await;
@@ -239,6 +245,7 @@ async fn get_token_remote_sfu_can_publish_by_default() {
         SYNAPSE_B_SERVER_NAME,
         LIVEKIT_B_URL,
         &room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
         "e2e-member-alice",
     )
     .await;
@@ -267,6 +274,7 @@ async fn get_token_rejects_non_member() {
         None,
         LIVEKIT_A_URL,
         &room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
         "e2e-member",
     )
     .await;
@@ -296,6 +304,7 @@ async fn get_token_rejects_when_remote_server_is_not_joined() {
         Some(SYNAPSE_A_SERVER_NAME),
         LIVEKIT_A_URL,
         &room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
         "e2e-member",
     )
     .await;
@@ -306,4 +315,112 @@ async fn get_token_rejects_when_remote_server_is_not_joined() {
         "expected the local homeserver to reject the request, got {status}: {body}"
     );
     assert_eq!(body["errcode"].as_str(), Some("M_FORBIDDEN"));
+}
+
+/// The stable and unstable slot ID for room-wide `m.call` apps admit to the same LiveKit room
+/// for two local users.
+#[tokio::test]
+async fn get_token_m_call_room_slot_stable_and_unstable_share_a_room() {
+    assert_stack_is_up();
+
+    // Alice creates (and thus joins) a room, Bob joins it too, both on hs A.
+    let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &alice).await;
+    let bob = register_user(SYNAPSE_A_CS_API_URL, "bob", "e2e-test-password").await;
+    join_room_via(SYNAPSE_A_CS_API_URL, &bob, &room_id, SYNAPSE_A_SERVER_NAME).await;
+
+    // Alice is on a client that already uses the MSC4196 spelling, Bob on one
+    // that still uses the legacy spelling.
+    let alice_jwt = get_livekit_token(
+        SYNAPSE_A_CS_API_URL,
+        &alice,
+        LIVEKIT_A_URL,
+        &room_id,
+        M_CALL_ROOM_SLOT_ID,
+        "e2e-member-alice",
+    )
+    .await;
+    let bob_jwt = get_livekit_token(
+        SYNAPSE_A_CS_API_URL,
+        &bob,
+        LIVEKIT_A_URL,
+        &room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
+        "e2e-member-bob",
+    )
+    .await;
+
+    // Both users land in the same room. Bob, joining second, sees Alice already there.
+    let alice_participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &alice_jwt).await;
+    let bob_participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &bob_jwt).await;
+    assert_eq!(
+        bob_participant.join_info.room_name, alice_participant.join_info.room_name,
+        "expected both spellings to map to the same LiveKit room"
+    );
+    assert!(
+        bob_participant
+            .join_info
+            .other_participant_identities
+            .contains(&alice_participant.join_info.identity),
+        "expected bob to find alice in the room, got {:?}",
+        bob_participant.join_info.other_participant_identities
+    );
+    bob_participant.disconnect().await;
+    alice_participant.disconnect().await;
+}
+
+/// The stable and unstable slot ID for room-wide `m.call` apps admit to the same LiveKit room
+/// for two users on different servers.
+#[tokio::test]
+async fn get_token_remote_sfu_m_call_room_slot_stable_and_unstable_share_a_room() {
+    assert_stack_is_up();
+
+    // Alice creates (and thus joins) a room on hs A and requests a token
+    // locally first, which creates the LiveKit room on hs A's SFU. Her
+    // client still uses the unstable slot ID.
+    let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &alice).await;
+    let alice_jwt = get_livekit_token(
+        SYNAPSE_A_CS_API_URL,
+        &alice,
+        LIVEKIT_A_URL,
+        &room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
+        "e2e-member-alice",
+    )
+    .await;
+
+    // Bob, on hs B, joins the room and requests a token for hs A's SFU
+    // through his own homeserver, using the stable slot ID. hs B relays
+    // the request to hs A's service via the federation proxy.
+    let bob = register_user(SYNAPSE_B_CS_API_URL, "bob", "e2e-test-password").await;
+    join_room_via(SYNAPSE_B_CS_API_URL, &bob, &room_id, SYNAPSE_A_SERVER_NAME).await;
+    let bob_jwt = get_relayed_livekit_token(
+        SYNAPSE_B_CS_API_URL,
+        &bob,
+        SYNAPSE_A_SERVER_NAME,
+        LIVEKIT_A_URL,
+        &room_id,
+        M_CALL_ROOM_SLOT_ID,
+        "e2e-member-bob",
+    )
+    .await;
+
+    // Both users land in the same room. Bob, joining second, sees Alice already there.
+    let alice_participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &alice_jwt).await;
+    let bob_participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &bob_jwt).await;
+    assert_eq!(
+        bob_participant.join_info.room_name, alice_participant.join_info.room_name,
+        "expected both spellings to map to the same LiveKit room"
+    );
+    assert!(
+        bob_participant
+            .join_info
+            .other_participant_identities
+            .contains(&alice_participant.join_info.identity),
+        "expected bob to find alice in the room, got {:?}",
+        bob_participant.join_info.other_participant_identities
+    );
+    bob_participant.disconnect().await;
+    alice_participant.disconnect().await;
 }
