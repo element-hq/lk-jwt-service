@@ -25,6 +25,13 @@ pub const STACK_RUNNING_ENV: &str = "LK_JWT_E2E_STACK_RUNNING";
 /// (in docker/app-service-a.yaml and docker/app-service-b.yaml).
 pub const APPSERVICE_ID: &str = "lk-jwt-service";
 
+/// The stable slot ID of room-wide `m.call` application instances.
+pub const M_CALL_ROOM_SLOT_ID: &str = "m.call#room";
+
+/// The unstable slot ID of room-wide `m.call` application instances used by
+/// earlier implementations of MSC4196.
+pub const M_CALL_ROOM_SLOT_ID_UNSTABLE: &str = "m.call#ROOM";
+
 // ── Stack A ──────────────────────────────────────────────────────────────────
 
 /// Stack A's Synapse client-server API, published to the host.
@@ -268,22 +275,36 @@ pub async fn verify_livekit_token_is_usable(sfu_addr: &str, access_token: &str) 
 /// The connection is kept alive by a background task that drains incoming
 /// signalling messages and sends the protocol-level pings the SFU expects.
 pub struct LiveKitParticipant {
+    /// What the SFU told us about the room on admission.
+    pub join_info: LiveKitJoinInfo,
     /// Signals the background task to leave the room. Taken by
     /// [`LiveKitParticipant::disconnect`].
     leave_tx: Option<tokio::sync::oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
 
+/// The relevant parts of the SFU's JoinResponse.
+#[derive(Debug, Clone)]
+pub struct LiveKitJoinInfo {
+    /// The LiveKit room name.
+    pub room_name: String,
+    /// Our own LiveKit participant identity.
+    pub identity: String,
+    /// The identities of the participants already in the room when we joined.
+    pub other_participant_identities: Vec<String>,
+}
+
 /// Connects to the SFU at `sfu_addr` with the given access token and waits
 /// for the JoinResponse — the point at which the SFU has admitted the
 /// participant — returning the still-open signalling socket alongside the
-/// ping interval it carried.
+/// ping interval it carried and what it said about the room.
 async fn connect_and_join(
     sfu_addr: &str,
     access_token: &str,
 ) -> (
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Duration,
+    LiveKitJoinInfo,
 ) {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
@@ -298,7 +319,7 @@ async fn connect_and_join(
         .unwrap_or_else(|e| panic!("failed to connect to the LiveKit SFU: {e}"));
 
     let read_deadline = Duration::from_secs(10);
-    let ping_interval = loop {
+    let (ping_interval, join_info) = loop {
         let msg = tokio::time::timeout(read_deadline, socket.next())
             .await
             .unwrap_or_else(|_| panic!("timed out waiting for a JoinResponse from the SFU"))
@@ -316,15 +337,29 @@ async fn connect_and_join(
         let response = <livekit_protocol::SignalResponse as prost::Message>::decode(&bytes[..])
             .unwrap_or_else(|e| panic!("failed to decode SignalResponse: {e}"));
         if let Some(livekit_protocol::signal_response::Message::Join(join)) = response.message {
-            assert!(
-                join.room.is_some(),
-                "expected the JoinResponse to carry room info"
+            let room = join
+                .room
+                .expect("expected the JoinResponse to carry room info");
+            let participant = join
+                .participant
+                .expect("expected the JoinResponse to carry our participant info");
+            let join_info = LiveKitJoinInfo {
+                room_name: room.name,
+                identity: participant.identity,
+                other_participant_identities: join
+                    .other_participants
+                    .into_iter()
+                    .map(|p| p.identity)
+                    .collect(),
+            };
+            break (
+                Duration::from_secs(join.ping_interval.max(1) as u64),
+                join_info,
             );
-            break Duration::from_secs(join.ping_interval.max(1) as u64);
         }
     };
 
-    (socket, ping_interval)
+    (socket, ping_interval, join_info)
 }
 
 impl LiveKitParticipant {
@@ -334,7 +369,7 @@ impl LiveKitParticipant {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::Message;
 
-        let (mut socket, ping_interval) = connect_and_join(sfu_addr, access_token).await;
+        let (mut socket, ping_interval, join_info) = connect_and_join(sfu_addr, access_token).await;
 
         let (leave_tx, mut leave_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -388,6 +423,7 @@ impl LiveKitParticipant {
         });
 
         LiveKitParticipant {
+            join_info,
             leave_tx: Some(leave_tx),
             task,
         }
@@ -422,7 +458,7 @@ pub async fn attempt_publish_track(sfu_addr: &str, access_token: &str) -> bool {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let (mut socket, _) = connect_and_join(sfu_addr, access_token).await;
+    let (mut socket, _, _) = connect_and_join(sfu_addr, access_token).await;
 
     let cid = format!("e2e-track-{}", uuid::Uuid::new_v4());
     let add_track = livekit_protocol::SignalRequest {

@@ -311,6 +311,13 @@ pub fn expect_fed_proxy_request(
     );
 }
 
+/// The stable slot ID of room-wide `m.call` application instances.
+pub const M_CALL_ROOM_SLOT_ID: &str = "m.call#room";
+
+/// The unstable slot ID of room-wide `m.call` application instances used by
+/// earlier implementations of MSC4196.
+pub const M_CALL_ROOM_SLOT_ID_UNSTABLE: &str = "m.call#ROOM";
+
 pub fn livekit_room_alias(matrix_room: &str, slot_id: &str) -> String {
     let marshalled =
         serde_json::to_vec(&[matrix_room, slot_id]).expect("string arrays always serialize");
