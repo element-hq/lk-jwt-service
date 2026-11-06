@@ -222,9 +222,8 @@ async fn success() {
     assert_eq!(claims["video"]["roomJoin"].as_bool(), Some(true));
     assert_ne!(claims["video"]["roomCreate"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(true));
+    assert_eq!(claims["video"]["canPublishData"].as_bool(), Some(true));
     assert_eq!(claims["video"]["canSubscribe"].as_bool(), Some(true));
-    // LIVEKIT_CAN_PUBLISH_DATA is unset.
-    assert_eq!(claims["video"]["canPublishData"].as_bool(), Some(false));
 
     expect_is_joined_request(
         &hs,
@@ -313,21 +312,19 @@ async fn empty_remote_can_publish_list_lets_nobody_publish() {
     assert_eq!(claims["video"]["canPublish"].as_bool(), Some(false));
 }
 
-/// With LIVEKIT_CAN_PUBLISH_DATA enabled, canPublishData follows canPublish:
-/// users of listed origin servers may publish data, others may not.
+/// canPublishData follows canPublish. Users of listed origin servers may
+/// publish data, others may not.
 #[tokio::test]
 async fn can_publish_data_follows_can_publish() {
     let hs = FakeHomeserver::new().await;
     let sfu = FakeSfu::new().await;
 
-    let mut extra_env = app_service_env(hs.server_name());
-    extra_env.insert("LIVEKIT_CAN_PUBLISH_DATA".to_owned(), "true".to_owned());
     let svc = Service::start(ServiceConfig {
         full_access_homeservers: vec!["*".to_owned()],
         remote_can_publish_homeservers: Some(vec![ORIGIN_SERVER.to_owned()]),
         cs_api_url_overrides: hs.cs_api_url_override(),
         livekit_url: Some(sfu.url().to_owned()),
-        extra_env,
+        extra_env: app_service_env(hs.server_name()),
         ..Default::default()
     })
     .await;
