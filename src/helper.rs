@@ -221,16 +221,6 @@ pub fn map_to_stable_m_call_slot_id(slot_id: &str) -> &str {
     }
 }
 
-/// If the input is the stable slot ID of room-wide `m.call` applications, maps it
-/// to the unstable identifier. Otherwise, returns the input unchanged.
-pub fn map_to_unstable_m_call_slot_id(slot_id: &str) -> &str {
-    if slot_id == M_CALL_ROOM_SLOT_ID {
-        M_CALL_ROOM_SLOT_ID_UNSTABLE
-    } else {
-        slot_id
-    }
-}
-
 /// Returns the deterministic LiveKit room alias for a given
 /// (Matrix room ID, MatrixRTC slot) pair.
 pub fn livekit_room_alias_for(matrix_room: &str, matrix_rtc_slot: &str) -> LiveKitRoomAlias {
@@ -1124,11 +1114,14 @@ pub trait Deps: Send + Sync {
                 "fed_proxy",
             ]);
 
-        let ss_req = |slot_id: &str| GetTokenSsRequest {
+        let ss_req = GetTokenSsRequest {
             user_id: user_id.to_owned(),
             url: req.url.clone(),
             room_id: req.room_id.clone(),
-            slot_id: slot_id.to_owned(),
+            // We pass on the slot ID unchanged to the remote. This ensures that
+            // our user gets the same treatment as a local user would get for the
+            // same slot ID.
+            slot_id: req.slot_id.clone(),
             member_id: req.member_id.clone(),
         };
 
@@ -1139,9 +1132,7 @@ pub trait Deps: Send + Sync {
             as_token,
             destination,
             GET_TOKEN_SS_PATH,
-            // Map to the stable slot ID for m.call when calling the
-            // stable endpoint.
-            &ss_req(map_to_stable_m_call_slot_id(&req.slot_id)),
+            &ss_req,
         )
         .await
         {
@@ -1162,10 +1153,7 @@ pub trait Deps: Send + Sync {
                     as_token,
                     destination,
                     GET_TOKEN_SS_UNSTABLE_PATH,
-                    // Map to the unstable slot ID for m.call when calling the
-                    // unstable endpoint which is what local clients that still
-                    // use the unstable endpoint would do.
-                    &ss_req(map_to_unstable_m_call_slot_id(&req.slot_id)),
+                    &ss_req,
                 )
                 .await
             }
@@ -1622,25 +1610,6 @@ mod tests {
         ] {
             assert_eq!(
                 map_to_stable_m_call_slot_id(other),
-                other,
-                "{other:?} was mapped"
-            );
-        }
-    }
-
-    #[test]
-    fn test_map_to_unstable_m_call_slot_id() {
-        assert_eq!(map_to_unstable_m_call_slot_id("m.call#room"), "m.call#ROOM");
-        assert_eq!(map_to_unstable_m_call_slot_id("m.call#ROOM"), "m.call#ROOM");
-        for other in [
-            "m.call#Room",
-            "m.call#room ",
-            "m.call#ROOM#",
-            "m.other#ROOM",
-            "ROOM",
-        ] {
-            assert_eq!(
-                map_to_unstable_m_call_slot_id(other),
                 other,
                 "{other:?} was mapped"
             );
@@ -3554,8 +3523,8 @@ mod tests {
 
     /// The stable S-S endpoint is tried first and the unstable one is left
     /// alone when the destination recognises it. The S-S body carries the
-    /// C-S request's fields plus the user ID, with the slot ID of room-wide
-    /// `m.call` applications in its stable form.
+    /// C-S request's fields plus the user ID, with the slot ID exactly as the
+    /// client sent it.
     #[tokio::test]
     async fn test_request_get_token_via_federation_uses_stable_endpoint() {
         for slot_id in [M_CALL_ROOM_SLOT_ID, M_CALL_ROOM_SLOT_ID_UNSTABLE] {
@@ -3577,7 +3546,7 @@ mod tests {
                     "user_id": "@alice:example.com",
                     "url": "wss://livekit.remote.example.org",
                     "room_id": "!room:example.com",
-                    "slot_id": M_CALL_ROOM_SLOT_ID,
+                    "slot_id": slot_id,
                     "member_id": "member",
                 })],
                 "{slot_id}"
@@ -3620,62 +3589,43 @@ mod tests {
             assert_eq!(
                 fed_proxy.slot_ids(),
                 vec![
-                    // The stable request uses the slot ID as passed in.
                     M_CALL_ROOM_SLOT_ID.to_owned(),
-                    // The fallback carries the legacy spelling.
-                    M_CALL_ROOM_SLOT_ID_UNSTABLE.to_owned()
+                    M_CALL_ROOM_SLOT_ID.to_owned()
                 ],
                 "{content}"
             );
         }
     }
 
-    /// The unstable slot ID of room-wide `m.call` applications is mapped on
-    /// both attempts, to the stable one for the stable endpoint and back for
-    /// the retry on the unstable one.
+    /// The slot ID is relayed unchanged on both attempts, whether it is the
+    /// stable or unstable spelling of the room-wide `m.call` slot or any
+    /// other slot. How a slot ID maps onto a LiveKit room is the
+    /// destination's business.
     #[tokio::test]
-    async fn test_request_get_token_via_federation_fallback_maps_unstable_m_call_slot_id() {
-        let fed_proxy = spawn_fed_proxy_server(|path| {
-            if path == GET_TOKEN_SS_PATH {
-                (404, serde_json::json!({ "errcode": "M_UNRECOGNIZED" }))
-            } else {
-                (200, serde_json::json!({ "jwt": "remote-jwt" }))
-            }
-        })
-        .await;
+    async fn test_request_get_token_via_federation_relays_slot_id_unchanged() {
+        for slot_id in [
+            M_CALL_ROOM_SLOT_ID,
+            M_CALL_ROOM_SLOT_ID_UNSTABLE,
+            "m.call#standup",
+        ] {
+            let fed_proxy = spawn_fed_proxy_server(|path| {
+                if path == GET_TOKEN_SS_PATH {
+                    (404, serde_json::json!({ "errcode": "M_UNRECOGNIZED" }))
+                } else {
+                    (200, serde_json::json!({ "jwt": "remote-jwt" }))
+                }
+            })
+            .await;
 
-        request_get_token_via(&fed_proxy, M_CALL_ROOM_SLOT_ID_UNSTABLE)
-            .await
-            .expect("unexpected error");
-        assert_eq!(
-            fed_proxy.slot_ids(),
-            vec![
-                M_CALL_ROOM_SLOT_ID.to_owned(),
-                M_CALL_ROOM_SLOT_ID_UNSTABLE.to_owned()
-            ]
-        );
-    }
-
-    /// Slots other than the room-wide `m.call` one are relayed unchanged on
-    /// both attempts.
-    #[tokio::test]
-    async fn test_request_get_token_via_federation_relays_other_slots_unchanged() {
-        let fed_proxy = spawn_fed_proxy_server(|path| {
-            if path == GET_TOKEN_SS_PATH {
-                (404, serde_json::json!({ "errcode": "M_UNRECOGNIZED" }))
-            } else {
-                (200, serde_json::json!({ "jwt": "remote-jwt" }))
-            }
-        })
-        .await;
-
-        request_get_token_via(&fed_proxy, "m.call#standup")
-            .await
-            .expect("unexpected error");
-        assert_eq!(
-            fed_proxy.slot_ids(),
-            vec!["m.call#standup".to_owned(), "m.call#standup".to_owned()]
-        );
+            request_get_token_via(&fed_proxy, slot_id)
+                .await
+                .expect("unexpected error");
+            assert_eq!(
+                fed_proxy.slot_ids(),
+                vec![slot_id.to_owned(), slot_id.to_owned()],
+                "{slot_id}"
+            );
+        }
     }
 
     /// Errors other than an unrecognised endpoint are not retried.
