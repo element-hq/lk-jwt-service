@@ -14,9 +14,22 @@ the connection between Matrix Clients and the LiveKit SFU is mediated by the hom
 Homeservers can integrate lk-jwt-service as an application service to serve the
 LiveKit-related endpoints without adopting LiveKit as a dependency in the codebase.
 
-Alternatively, the service also still supports the deprecated standalone mode
-from prior versions of the MSC where clients interacted with lk-jwt-service instances
-directly.
+For backwards compatibility, the service also supports the deprecated endpoints
+from prior versions of the MSC. These endpoints are the only ones served when
+lk-jwt-service is running in standalone mode, that is, _not_ as an application
+service.
+
+> [!CAUTION]
+> Not running as an application service is deprecated and support for it will be removed
+> in future versions. It is strongly recommended to operate the service as an application
+> service.
+
+> [!CAUTION]
+> Fronting more than one homeserver via `LIVEKIT_FULL_ACCESS_HOMESERVERS` is deprecated
+> and will be removed in future versions. This setting only affects the legacy endpoints.
+> It is strongly [recommended](#-room-membership-on-the-standalone-endpoints) to only put
+> the one homeserver that lk-jwt-service was set up as an application service for into
+> `LIVEKIT_FULL_ACCESS_HOMESERVERS`.
 
 Regardless of the above and as outlined in the
 [Element Call Self-Hosting Guide](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md),
