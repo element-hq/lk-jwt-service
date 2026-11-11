@@ -38,7 +38,7 @@ pub struct MatrixRtcMemberType {
     pub claimed_device_id: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct OpenIdTokenType {
     #[serde(default)]
     pub access_token: String,
@@ -48,6 +48,23 @@ pub struct OpenIdTokenType {
     pub matrix_server_name: String,
     #[serde(default)]
     pub expires_in: i64,
+}
+
+impl std::fmt::Debug for OpenIdTokenType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let access_token = if self.access_token.is_empty() {
+            ""
+        } else {
+            // Redact the access token so that we don't leak it in logs.
+            "<redacted>"
+        };
+        f.debug_struct("OpenIdTokenType")
+            .field("access_token", &access_token)
+            .field("token_type", &self.token_type)
+            .field("matrix_server_name", &self.matrix_server_name)
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Deprecated: LegacySfuRequest is the request body for /sfu/get, the
@@ -349,7 +366,6 @@ impl SfuRequest {
         if self.openid_token.access_token.is_empty()
             || self.openid_token.matrix_server_name.is_empty()
         {
-            error!(openid_token = ?self.openid_token, "Handler -> SfuRequest: Missing OpenID token parameters");
             return Err(MatrixErrorResponse {
                 status: 400,
                 errcode: "M_BAD_JSON".into(),
@@ -451,6 +467,48 @@ mod tests {
             assert!(result.is_err(), "{name}: expected validation error");
             assert_validation_error(result, "M_BAD_JSON");
         }
+    }
+
+    /// Verify that the access token never appears in the Debug output of
+    /// an OpenID token or a request.
+    #[test]
+    fn test_openid_token_debug_redacts_access_token() {
+        let token = OpenIdTokenType {
+            access_token: "super-secret-token".into(),
+            token_type: "Bearer".into(),
+            matrix_server_name: "example.com".into(),
+            expires_in: 3600,
+        };
+        let debug = format!("{token:?}");
+        assert!(
+            !debug.contains("super-secret-token"),
+            "token leaked: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "unexpected Debug output: {debug}"
+        );
+        assert!(
+            debug.contains("example.com"),
+            "unexpected Debug output: {debug}"
+        );
+
+        let empty = OpenIdTokenType::default();
+        let debug = format!("{empty:?}");
+        assert!(
+            debug.contains(r#"access_token: """#),
+            "unexpected Debug output: {debug}"
+        );
+
+        let req = SfuRequest {
+            openid_token: token,
+            ..Default::default()
+        };
+        let debug = format!("{req:?}");
+        assert!(
+            !debug.contains("super-secret-token"),
+            "token leaked: {debug}"
+        );
     }
 
     /// Verifies the Display (Error) string of MatrixErrorResponse.
