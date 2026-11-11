@@ -5,12 +5,12 @@
 
 use lk_jwt_service_e2e_tests::{
     AUTH_SERVICE_A_URL, AUTH_SERVICE_B_URL, LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LIVEKIT_B_SFU_ADDR,
-    MatrixUser, SYNAPSE_A_CS_API_URL, SYNAPSE_A_SERVER_NAME, SYNAPSE_B_CS_API_URL,
-    assert_stack_is_up, create_and_join_room, get_livekit_token, join_room_via, register_user,
-    request_openid_token, verify_livekit_token_is_usable,
+    LiveKitParticipant, M_CALL_ROOM_SLOT_ID, M_CALL_ROOM_SLOT_ID_UNSTABLE, MatrixUser,
+    SYNAPSE_A_CS_API_URL, SYNAPSE_A_SERVER_NAME, SYNAPSE_B_CS_API_URL, assert_stack_is_up,
+    create_and_join_room, get_livekit_token, join_room_via, register_user, request_openid_token,
+    verify_livekit_token_is_usable,
 };
 
-const SLOT_ID: &str = "m.call#ROOM";
 const MEMBER_ID: &str = "e2e-member";
 const DEVICE_ID: &str = "e2e-device";
 
@@ -58,12 +58,31 @@ async fn sfu_get(
 }
 
 /// Calls the standalone `/get_token` on `service_url` as `user` (of the
-/// homeserver behind `cs_api_url`) for `room_id`.
+/// homeserver behind `cs_api_url`) for `room_id` and the unstable slot ID
+/// for `m.call`.
 async fn get_token(
     service_url: &str,
     cs_api_url: &str,
     user: &MatrixUser,
     room_id: &str,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    get_token_for_slot(
+        service_url,
+        cs_api_url,
+        user,
+        room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
+    )
+    .await
+}
+
+/// Like [`get_token`], but for the given `slot_id`.
+async fn get_token_for_slot(
+    service_url: &str,
+    cs_api_url: &str,
+    user: &MatrixUser,
+    room_id: &str,
+    slot_id: &str,
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let openid_token = request_openid_token(cs_api_url, user).await;
     post_standalone(
@@ -71,7 +90,7 @@ async fn get_token(
         "/get_token",
         serde_json::json!({
             "room_id": room_id,
-            "slot_id": SLOT_ID,
+            "slot_id": slot_id,
             "openid_token": openid_token,
             "member": {
                 "id": MEMBER_ID,
@@ -99,7 +118,7 @@ async fn delegate_delayed_leave(
         "/delegate_delayed_leave",
         serde_json::json!({
             "room_id": room_id,
-            "slot_id": SLOT_ID,
+            "slot_id": M_CALL_ROOM_SLOT_ID_UNSTABLE,
             "openid_token": openid_token,
             "member": {
                 "id": MEMBER_ID,
@@ -237,6 +256,76 @@ async fn membership_get_token_serves_member() {
     verify_livekit_token_is_usable(LIVEKIT_A_SFU_ADDR, &jwt).await;
 }
 
+/// `/sfu/get`, which predates slots, and `/get_token` with either the stable or
+/// the unstable slot ID for `m.call` all admit to the same LiveKit room.
+#[tokio::test]
+async fn membership_sfu_get_and_get_token_slot_spellings_share_a_room() {
+    assert_stack_is_up();
+
+    // Alice creates (and thus joins) a room, Bob and Carol join it too.
+    let alice = register_user(SYNAPSE_A_CS_API_URL, "alice", "e2e-test-password").await;
+    let room_id = create_and_join_room(SYNAPSE_A_CS_API_URL, &alice).await;
+    let bob = register_user(SYNAPSE_A_CS_API_URL, "bob", "e2e-test-password").await;
+    join_room_via(SYNAPSE_A_CS_API_URL, &bob, &room_id, SYNAPSE_A_SERVER_NAME).await;
+    let carol = register_user(SYNAPSE_A_CS_API_URL, "carol", "e2e-test-password").await;
+    join_room_via(
+        SYNAPSE_A_CS_API_URL,
+        &carol,
+        &room_id,
+        SYNAPSE_A_SERVER_NAME,
+    )
+    .await;
+
+    // Alice is on a client that only knows `/sfu/get`, Bob on one that uses
+    // the stable slot ID and Carol on one that uses the unstable slot ID.
+    let (status, body) = sfu_get(AUTH_SERVICE_A_URL, SYNAPSE_A_CS_API_URL, &alice, &room_id).await;
+    let alice_jwt = expect_jwt(status, &body);
+    let (status, body) = get_token_for_slot(
+        AUTH_SERVICE_A_URL,
+        SYNAPSE_A_CS_API_URL,
+        &bob,
+        &room_id,
+        M_CALL_ROOM_SLOT_ID,
+    )
+    .await;
+    let bob_jwt = expect_jwt(status, &body);
+    let (status, body) = get_token_for_slot(
+        AUTH_SERVICE_A_URL,
+        SYNAPSE_A_CS_API_URL,
+        &carol,
+        &room_id,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
+    )
+    .await;
+    let carol_jwt = expect_jwt(status, &body);
+
+    // All three users land in the same room. Carol, joining last, sees the other two already there.
+    let alice_participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &alice_jwt).await;
+    let bob_participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &bob_jwt).await;
+    let carol_participant = LiveKitParticipant::connect(LIVEKIT_A_SFU_ADDR, &carol_jwt).await;
+    assert_eq!(
+        bob_participant.join_info.room_name, alice_participant.join_info.room_name,
+        "expected /get_token with the MSC4196 spelling to share /sfu/get's LiveKit room"
+    );
+    assert_eq!(
+        carol_participant.join_info.room_name, alice_participant.join_info.room_name,
+        "expected /get_token with the legacy spelling to share /sfu/get's LiveKit room"
+    );
+    for (name, participant) in [("alice", &alice_participant), ("bob", &bob_participant)] {
+        assert!(
+            carol_participant
+                .join_info
+                .other_participant_identities
+                .contains(&participant.join_info.identity),
+            "expected carol to find {name} in the room, got {:?}",
+            carol_participant.join_info.other_participant_identities
+        );
+    }
+    carol_participant.disconnect().await;
+    bob_participant.disconnect().await;
+    alice_participant.disconnect().await;
+}
+
 /// A valid OpenID token alone is not enough for `/get_token`: a user who is
 /// not in the room is refused.
 #[tokio::test]
@@ -269,7 +358,7 @@ async fn membership_get_token_serves_joined_remote_user() {
         &alice,
         LIVEKIT_A_URL,
         &room_id,
-        SLOT_ID,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
         "e2e-member-alice",
     )
     .await;

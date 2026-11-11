@@ -6,8 +6,9 @@
 use std::time::{Duration, Instant};
 
 use lk_jwt_service_e2e_tests::{
-    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LiveKitParticipant, SYNAPSE_A_CS_API_URL,
-    assert_stack_is_up, create_and_join_room, get_livekit_token, register_user,
+    LIVEKIT_A_SFU_ADDR, LIVEKIT_A_URL, LiveKitParticipant, M_CALL_ROOM_SLOT_ID_UNSTABLE,
+    SYNAPSE_A_CS_API_URL, assert_stack_is_up, create_and_join_room, get_livekit_token,
+    register_user,
 };
 
 /// Schedules a delayed `m.room.message` in `room_id` (MSC4140) and returns
@@ -213,7 +214,6 @@ async fn delegate_delayed_leave_cs_succeeds() {
     // Long enough that the service's send after the hang-up (below) has a
     // comfortable budget before the homeserver's own countdown would fire.
     const DELAY_MS: u64 = 10_000;
-    const SLOT_ID: &str = "m.call#ROOM";
     const MEMBER_ID: &str = "e2e-member";
     const MESSAGE_BODY: &str = "e2e-delegate-delayed-leave-proof";
 
@@ -240,7 +240,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
         &user,
         LIVEKIT_A_URL,
         &room_id,
-        SLOT_ID,
+        M_CALL_ROOM_SLOT_ID_UNSTABLE,
         MEMBER_ID,
     )
     .await;
@@ -257,7 +257,7 @@ async fn delegate_delayed_leave_cs_succeeds() {
         .json(&serde_json::json!({
             "url": LIVEKIT_A_URL,
             "room_id": room_id,
-            "slot_id": SLOT_ID,
+            "slot_id": M_CALL_ROOM_SLOT_ID_UNSTABLE,
             "member_id": MEMBER_ID,
             "delay_id": delay_id,
         }))
