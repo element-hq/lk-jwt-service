@@ -655,7 +655,8 @@ pub trait Deps: Send + Sync {
             .send()
             .await
             .map_err(|e| {
-                let msg = error_chain(&e);
+                // Strip the URL from the logged error as it contains the access token.
+                let msg = error_chain(&e.without_url());
                 error!(err = %msg, "OpenIDUserInfo: Failed to look up user info");
                 format!("failed to look up user info: {msg}")
             })?;
@@ -666,10 +667,10 @@ pub trait Deps: Send + Sync {
                 "failed to look up user info: http status code {status}"
             ));
         }
-        let info: UserInfo = resp
-            .json()
-            .await
-            .map_err(|e| format!("failed to look up user info: {e}"))?;
+        let info: UserInfo = resp.json().await.map_err(|e| {
+            // Strip the URL from the logged error as it contains the access token.
+            format!("failed to look up user info: {}", e.without_url())
+        })?;
         Ok(info)
     }
 
