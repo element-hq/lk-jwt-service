@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use rand::Rng;
+use resolvematrix::server::MatrixResolver;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -142,6 +143,9 @@ pub struct TtlCache<V> {
 /// A TTL cache for resolved Client-Server API URLs.
 pub type CsApiUrlCache = TtlCache<CsApiUrl>;
 
+/// Upper bound on cached Client-Server API URLs.
+pub const CS_API_URL_CACHE_MAX_ENTRIES: usize = 10_000;
+
 impl<V> Default for TtlCache<V> {
     fn default() -> Self {
         Self {
@@ -156,9 +160,7 @@ impl<V: Clone> TtlCache<V> {
         Self::default()
     }
 
-    /// A cache that holds at most `max_entries` live entries. Inserts beyond
-    /// the bound first purge expired entries and are dropped when the cache
-    /// is still full.
+    /// A cache that holds at most `max_entries` entries.
     pub fn with_max_entries(max_entries: usize) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
@@ -175,6 +177,9 @@ impl<V: Clone> TtlCache<V> {
         }
     }
 
+    /// Upserts an entry in the cache. If insertion is required and the cache is full, expired
+    /// entries are purged. If the cache is still full afterwards, the entry closest to expiry
+    /// is evicted.
     pub fn set(&self, server_name: &str, value: V, ttl: Duration) {
         let now = Instant::now();
         let mut entries = self.entries.write().unwrap();
@@ -183,8 +188,13 @@ impl<V: Clone> TtlCache<V> {
             && !entries.contains_key(server_name)
         {
             entries.retain(|_, (_, expires_at)| now <= *expires_at);
-            if entries.len() >= max {
-                return;
+            if entries.len() >= max
+                && let Some(oldest) = entries
+                    .iter()
+                    .min_by_key(|(_, (_, expires_at))| *expires_at)
+                    .map(|(key, _)| key.clone())
+            {
+                entries.remove(&oldest);
             }
         }
         entries.insert(server_name.to_owned(), (value, now + ttl));
@@ -601,6 +611,11 @@ pub trait Deps: Send + Sync {
         false
     }
 
+    /// The federation resolver, if one was set up.
+    fn federation_client(&self) -> Option<&FederationClient> {
+        None
+    }
+
     /// Constructs a LiveKit room service client.
     fn new_room_service_client(
         &self,
@@ -664,6 +679,17 @@ pub trait Deps: Send + Sync {
         resolve_cs_api_url_via(self, server_name, overrides, cache).await
     }
 
+    /// Locates the federation API of `server_name` following the server
+    /// discovery rules of the Server-Server API. Requests to the returned base
+    /// URL must go through the returned client. Fails when no resolver was
+    /// set up.
+    async fn resolve_ss_api_url(&self, server_name: &str) -> Result<FederationTarget, String> {
+        match self.federation_client() {
+            Some(federation) => federation.resolve(server_name).await,
+            None => Err("federation resolution is not configured".into()),
+        }
+    }
+
     /// Validates an OpenID token against its homeserver's federation API and
     /// returns the user info (notably the `sub` — the Matrix user ID).
     async fn exchange_openid_userinfo(&self, token: &OpenIdTokenType) -> Result<UserInfo, String> {
@@ -671,11 +697,18 @@ pub trait Deps: Send + Sync {
             return Err("missing parameters in openid token".into());
         }
 
-        let base =
-            resolve_federation_base_url(&token.matrix_server_name, self.skip_verify_tls()).await;
+        let target = self
+            .resolve_ss_api_url(&token.matrix_server_name)
+            .await
+            .map_err(|e| {
+                error!(server_name = %token.matrix_server_name, err = %e,
+                    "OpenIDUserInfo: Failed to resolve server name");
+                format!("failed to resolve {}: {e}", token.matrix_server_name)
+            })?;
 
-        let url = format!("{base}/_matrix/federation/v1/openid/userinfo");
-        let resp = http_client(self.skip_verify_tls())
+        let url = format!("{}/_matrix/federation/v1/openid/userinfo", target.base_url);
+        let resp = target
+            .client
             .get(&url)
             .query(&[("access_token", token.access_token.as_str())])
             .timeout(Duration::from_secs(30))
@@ -1254,12 +1287,28 @@ async fn post_via_fed_proxy<B: Serialize + ?Sized, R: DeserializeOwned>(
 pub struct RealDeps {
     /// Whether outbound TLS connections skip certificate verification
     /// (LIVEKIT_INSECURE_SKIP_VERIFY_TLS).
-    pub skip_verify_tls: bool,
+    skip_verify_tls: bool,
+    /// Client for resolving Server-Server API URLs and issuing Server-Server
+    /// requests.
+    federation_client: Option<FederationClient>,
+}
+
+impl RealDeps {
+    pub fn new(skip_verify_tls: bool) -> Result<Self, String> {
+        Ok(Self {
+            skip_verify_tls,
+            federation_client: Some(FederationClient::new(skip_verify_tls)?),
+        })
+    }
 }
 
 impl Deps for RealDeps {
     fn skip_verify_tls(&self) -> bool {
         self.skip_verify_tls
+    }
+
+    fn federation_client(&self) -> Option<&FederationClient> {
+        self.federation_client.as_ref()
     }
 }
 
@@ -1319,82 +1368,102 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// How long resolved federation base URLs are cached.
-const FEDERATION_BASE_URL_TTL: Duration = Duration::from_secs(60 * 60);
+/// How long resolved federation destinations are cached.
+const FEDERATION_RESOLUTION_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Resolves the federation base URL for a Matrix server name: an explicit
-/// port is used verbatim; otherwise .well-known/matrix/server delegation is
-/// attempted, falling back to the default federation port 8448. Resolved
-/// URLs are cached, so token verification does not pay an extra well-known
-/// round trip per request.
-async fn resolve_federation_base_url(server_name: &str, skip_verify_tls: bool) -> String {
-    // Bounded because server names arrive in unauthenticated requests.
-    static CACHE: std::sync::LazyLock<TtlCache<String>> =
-        std::sync::LazyLock::new(|| TtlCache::with_max_entries(10_000));
-    let well_known_url = format!("https://{server_name}/.well-known/matrix/server");
-    resolve_federation_base_url_with(server_name, skip_verify_tls, &CACHE, &well_known_url).await
+/// Upper bound on cached federation destinations.
+const SS_API_URL_CACHE_MAX_ENTRIES: usize = 10_000;
+
+/// A remote homeserver's federation API as given by its URL and the HTTP
+/// client that must be used to access it.
+///
+/// Access to the federation API must go through the HTTP client. For SRV records
+/// the Server-Server API requires connecting to the SRV target while keeping the
+/// server name as TLS SNI and `Host` header (which is what the certificate is
+/// validated against). `base_url`, therefore, names the server name, and `client`
+/// is routed through the resolver's cache so that its DNS lookup of that name
+/// yields the SRV target's address rather than the server name's A/AAAA records.
+#[derive(Clone)]
+pub struct FederationTarget {
+    /// Scheme, host and port of the federation API, where the host is the
+    /// server name (or its delegated hostname) rather than the SRV target.
+    pub base_url: String,
+    /// The client to use for `base_url`. It routes `base_url`'s host to the
+    /// resolved destination for as long as the resolution is cached.
+    pub client: reqwest::Client,
 }
 
-async fn resolve_federation_base_url_with(
-    server_name: &str,
-    skip_verify_tls: bool,
-    cache: &TtlCache<String>,
-    well_known_url: &str,
-) -> String {
-    if has_explicit_port(server_name) {
-        return format!("https://{server_name}");
-    }
-
-    if let Some(base) = cache.get(server_name) {
-        return base;
-    }
-
-    #[derive(Deserialize)]
-    struct WellKnownServer {
-        #[serde(rename = "m.server", default)]
-        server: String,
-    }
-
-    let fallback = format!("https://{server_name}:8448");
-    let resp = match http_client(skip_verify_tls)
-        .get(well_known_url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        // Transport errors are not cached — the next request retries.
-        Err(_) => return fallback,
-    };
-
-    let mut base = fallback;
-    if resp.status().is_success()
-        && let Ok(parsed) = resp.json::<WellKnownServer>().await
-        && !parsed.server.is_empty()
-    {
-        let delegated = if has_explicit_port(&parsed.server) {
-            parsed.server
-        } else {
-            format!("{}:8448", parsed.server)
-        };
-        base = format!("https://{delegated}");
-    }
-    // The server answered definitively (delegation or no well-known record),
-    // so the result is cacheable.
-    cache.set(server_name, base.clone(), FEDERATION_BASE_URL_TTL);
-    base
+/// A client for accessing the federation API on a homeserver.
+///
+/// Requests must be made by first calling [`FederationClient::resolve`] and
+/// then using the returned [`FederationTarget`].
+pub struct FederationClient {
+    /// Resolver for the federation base URL.
+    resolver: Arc<MatrixResolver>,
+    /// Routes the hostnames of resolved server names to their destination.
+    client: reqwest::Client,
 }
 
-/// Reports whether a Matrix server name carries an explicit port
-/// (host:port, or [ipv6]:port).
-fn has_explicit_port(server_name: &str) -> bool {
-    if let Some(rest) = server_name.strip_prefix('[') {
-        // IPv6 literal: a port only exists after the closing bracket.
-        return rest
-            .rsplit_once(']')
-            .is_some_and(|(_, after)| after.starts_with(':'));
+impl FederationClient {
+    pub fn new(skip_verify_tls: bool) -> Result<Self, String> {
+        let resolver = Arc::new(
+            MatrixResolver::builder()
+                .cache_ttl(FEDERATION_RESOLUTION_TTL)
+                .dangerous_tls_accept_invalid_certs(skip_verify_tls)
+                .build()
+                .map_err(|e| format!("failed to build server name resolver: {e}"))?,
+        );
+        let client = resolver
+            .create_client_with_builder(
+                reqwest::Client::builder().tls_danger_accept_invalid_certs(skip_verify_tls),
+            )
+            .map_err(|e| format!("failed to build federation HTTP client: {e}"))?;
+        Ok(Self { resolver, client })
     }
-    server_name.contains(':')
+
+    /// Resolves `server_name` into the federation API URL and the client to
+    /// reach it with.
+    pub async fn resolve(&self, server_name: &str) -> Result<FederationTarget, String> {
+        let resolution = self
+            .resolver
+            .resolve_server(server_name)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.bound_cache();
+        let base_url = resolution.base_url();
+        debug!(server_name, step = %resolution.resolution_step, %base_url,
+            "FederationClient: resolved server name");
+        Ok(FederationTarget {
+            base_url,
+            client: self.client.clone(),
+        })
+    }
+
+    /// Purges expired entries and evicts the entries closest to expiry once
+    /// the resolution cache exceeds [`SS_API_URL_CACHE_MAX_ENTRIES`].
+    fn bound_cache(&self) {
+        let mut entries = self.resolver.get_all_cache_entries();
+        if entries.len() <= SS_API_URL_CACHE_MAX_ENTRIES {
+            return;
+        }
+        let excess = entries.len() - SS_API_URL_CACHE_MAX_ENTRIES;
+        debug!(
+            excess,
+            "FederationClient: resolution cache exceeded its bound"
+        );
+        // All entries share one TTL, so expiry order is insertion order.
+        entries.sort_unstable_by_key(|(_, entry)| entry.expires_at);
+        // The resolver only drops expired entries when they are looked up, so
+        // purge all of them while the copy is at hand. If that is not enough,
+        // the oldest live entries follow.
+        let now = SystemTime::now();
+        let expired = entries.partition_point(|(_, entry)| entry.expires_at <= now);
+        // Evicted one by one rather than by clearing the cache as that would also drop the
+        // host-to-destination mapping of every other entry.
+        for (server_name, _) in entries.iter().take(expired.max(excess)) {
+            self.resolver.remove_cache_entry(server_name);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1752,130 +1821,80 @@ mod tests {
 
     // ── TtlCache ──────────────────────────────────────────────────────────────
 
-    /// A bounded cache purges expired entries before dropping inserts.
+    /// A bounded cache purges expired entries and then evicts the entry
+    /// closest to expiry to make room.
     #[test]
     fn test_ttl_cache_max_entries() {
         let cache: TtlCache<String> = TtlCache::with_max_entries(2);
-        cache.set("a", "1".into(), Duration::from_secs(60));
+        cache.set("a", "1".into(), Duration::from_secs(30));
         cache.set("b", "2".into(), Duration::from_secs(60));
 
-        // At the bound: a new key is dropped, an existing key still updates.
-        cache.set("c", "3".into(), Duration::from_secs(60));
-        assert_eq!(
-            cache.get("c"),
-            None,
-            "insert beyond the bound must be dropped"
-        );
-        cache.set("a", "1b".into(), Duration::from_secs(60));
+        // Updating an existing key at the bound evicts nothing.
+        cache.set("a", "1b".into(), Duration::from_secs(30));
         assert_eq!(cache.get("a"), Some("1b".into()));
+        assert_eq!(cache.get("b"), Some("2".into()));
 
-        // Expired entries make room.
-        cache.set("a", "1c".into(), Duration::ZERO);
+        // A new key at the bound evicts the entry closest to expiry.
+        cache.set("c", "3".into(), Duration::from_secs(60));
+        assert_eq!(cache.get("a"), None, "oldest entry must be evicted");
+        assert_eq!(cache.get("b"), Some("2".into()));
+        assert_eq!(cache.get("c"), Some("3".into()));
+
+        // Expired entries are purged before live ones are evicted.
         cache.set("b", "2c".into(), Duration::ZERO);
         std::thread::sleep(Duration::from_millis(10));
-        cache.set("c", "3".into(), Duration::from_secs(60));
-        assert_eq!(cache.get("c"), Some("3".into()));
+        cache.set("d", "4".into(), Duration::from_secs(60));
+        assert_eq!(cache.get("b"), None, "expired entry must be purged");
+        assert_eq!(cache.get("c"), Some("3".into()), "live entry must survive");
+        assert_eq!(cache.get("d"), Some("4".into()));
     }
 
-    // ── resolve_federation_base_url ───────────────────────────────────────────
+    // ── FederationClient ──────────────────────────────────────────────────────
 
-    async fn spawn_counting_well_known_server(
-        response_status: http::StatusCode,
-        response_body: &'static str,
-    ) -> (TestHttpServer, Arc<AtomicU32>) {
-        let hits = Arc::new(AtomicU32::new(0));
-        let hits_clone = hits.clone();
-        let router = Router::new().route(
-            "/{*path}",
-            any(move || {
-                let hits = hits_clone.clone();
-                async move {
-                    hits.fetch_add(1, Ordering::SeqCst);
-                    (response_status, response_body)
-                }
-            }),
-        );
-        let server = spawn_http_server(router).await;
-        (server, hits)
-    }
-
-    /// A well-known delegation is followed and cached: the second resolution
-    /// does not fetch again.
+    /// IP literals resolve to themselves, with the given port or 8448 as the
+    /// default, without any network lookups.
     #[tokio::test]
-    async fn test_resolve_federation_base_url_caches_delegation() {
-        let (server, hits) = spawn_counting_well_known_server(
-            http::StatusCode::OK,
-            r#"{"m.server": "fed.example.com:1234"}"#,
-        )
-        .await;
-        let cache: TtlCache<String> = TtlCache::new();
-        let well_known_url = format!("{}/.well-known/matrix/server", server.url);
-
-        for _ in 0..2 {
-            let base =
-                resolve_federation_base_url_with("example.com", false, &cache, &well_known_url)
-                    .await;
-            assert_eq!(base, "https://fed.example.com:1234");
+    async fn test_federation_client_resolves_ip_literals() {
+        let federation = FederationClient::new(false).expect("failed to build");
+        for (server_name, expected) in [
+            ("127.0.0.1:1234", "https://127.0.0.1:1234"),
+            ("127.0.0.1", "https://127.0.0.1:8448"),
+            ("[::1]:8449", "https://[::1]:8449"),
+            ("[::1]", "https://[::1]:8448"),
+        ] {
+            assert_eq!(
+                federation.resolve(server_name).await.unwrap().base_url,
+                expected,
+                "resolve({server_name:?})"
+            );
         }
+    }
+
+    /// An explicit port skips discovery. Host and port are used verbatim.
+    #[tokio::test]
+    async fn test_federation_client_resolves_explicit_port() {
+        let federation = FederationClient::new(false).expect("failed to build");
         assert_eq!(
-            hits.load(Ordering::SeqCst),
-            1,
-            "expected the resolution to be cached"
+            federation
+                .resolve("example.com:8449")
+                .await
+                .unwrap()
+                .base_url,
+            "https://example.com:8449"
         );
     }
 
-    /// A definitive "no well-known record" answer resolves to port 8448 and
-    /// is cached too.
+    /// Without a configured federation resolver, token verification fails.
     #[tokio::test]
-    async fn test_resolve_federation_base_url_caches_fallback() {
-        let (server, hits) =
-            spawn_counting_well_known_server(http::StatusCode::NOT_FOUND, "").await;
-        let cache: TtlCache<String> = TtlCache::new();
-        let well_known_url = format!("{}/.well-known/matrix/server", server.url);
-
-        for _ in 0..2 {
-            let base =
-                resolve_federation_base_url_with("example.com", false, &cache, &well_known_url)
-                    .await;
-            assert_eq!(base, "https://example.com:8448");
-        }
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            1,
-            "expected the fallback to be cached"
-        );
-    }
-
-    /// Transport errors are not cached; the next resolution retries.
-    #[tokio::test]
-    async fn test_resolve_federation_base_url_transport_error_not_cached() {
-        let (server, _hits) = spawn_counting_well_known_server(http::StatusCode::OK, "{}").await;
-        let well_known_url = format!("{}/.well-known/matrix/server", server.url);
-        drop(server); // provoke connection errors
-
-        let cache: TtlCache<String> = TtlCache::new();
-        let base =
-            resolve_federation_base_url_with("example.com", false, &cache, &well_known_url).await;
-        assert_eq!(base, "https://example.com:8448");
-        assert_eq!(
-            cache.get("example.com"),
-            None,
-            "transport errors must not be cached"
-        );
-    }
-
-    /// An explicit port bypasses well-known resolution and the cache.
-    #[tokio::test]
-    async fn test_resolve_federation_base_url_explicit_port() {
-        let cache: TtlCache<String> = TtlCache::new();
-        let base = resolve_federation_base_url_with(
-            "example.com:8449",
-            false,
-            &cache,
-            "http://127.0.0.1:1/.well-known/matrix/server",
-        )
-        .await;
-        assert_eq!(base, "https://example.com:8449");
+    async fn test_exchange_openid_userinfo_unconfigured() {
+        RealDeps::default()
+            .exchange_openid_userinfo(&OpenIdTokenType {
+                access_token: "token".into(),
+                matrix_server_name: "example.com".into(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("expected an error");
     }
 
     // ── execute_delayed_event_action ──────────────────────────────────────────
@@ -3007,16 +3026,15 @@ mod tests {
         *server_name.lock().unwrap() = matrix_server_name.clone();
 
         // skip_verify_tls is required for the self-signed test server.
-        let info = RealDeps {
-            skip_verify_tls: true,
-        }
-        .exchange_openid_userinfo(&OpenIdTokenType {
-            access_token: ACCESS_TOKEN.into(),
-            matrix_server_name: matrix_server_name.clone(),
-            ..Default::default()
-        })
-        .await
-        .expect("unexpected error");
+        let info = RealDeps::new(true)
+            .expect("failed to build deps")
+            .exchange_openid_userinfo(&OpenIdTokenType {
+                access_token: ACCESS_TOKEN.into(),
+                matrix_server_name: matrix_server_name.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect("unexpected error");
         assert_eq!(info.sub, format!("@alice:{matrix_server_name}"));
     }
 
@@ -3394,6 +3412,7 @@ mod tests {
         // With skip_verify_tls, the call must succeed.
         let client = RealDeps {
             skip_verify_tls: true,
+            ..Default::default()
         }
         .new_room_service_client(&lk_url, "devkey", "secret");
         let info = client
