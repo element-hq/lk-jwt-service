@@ -33,9 +33,10 @@ use crate::delayed_event_manager::{
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::helper::new_unique_id;
 use crate::helper::{
-    CsApiUrl, CsApiUrlCache, Deps, FederationTokenError, JoinedSubject, LiveKitAuth,
-    LiveKitIdentity, LiveKitRoomAlias, M_CALL_ROOM_SLOT_ID, UniqueId, legacy_livekit_identity_for,
-    livekit_identity_for, livekit_room_alias_for, map_to_stable_m_call_slot_id, matrix_server_name,
+    CS_API_URL_CACHE_MAX_ENTRIES, CsApiUrl, CsApiUrlCache, Deps, FederationTokenError,
+    JoinedSubject, LiveKitAuth, LiveKitIdentity, LiveKitRoomAlias, M_CALL_ROOM_SLOT_ID, UniqueId,
+    legacy_livekit_identity_for, livekit_identity_for, livekit_room_alias_for,
+    map_to_stable_m_call_slot_id, matrix_server_name,
 };
 #[cfg(feature = "appservice-ping-trigger")]
 use crate::requests::AppservicePingTriggerRequest;
@@ -271,7 +272,9 @@ impl Handler {
             can_update_own_metadata,
             sanity_check_interval,
             cs_api_url_overrides: Arc::new(cs_api_url_overrides),
-            cs_api_url_cache: Arc::new(CsApiUrlCache::new()),
+            cs_api_url_cache: Arc::new(CsApiUrlCache::with_max_entries(
+                CS_API_URL_CACHE_MAX_ENTRIES,
+            )),
             store,
             deps,
             loop_done_tx,

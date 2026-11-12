@@ -142,6 +142,9 @@ pub struct TtlCache<V> {
 /// A TTL cache for resolved Client-Server API URLs.
 pub type CsApiUrlCache = TtlCache<CsApiUrl>;
 
+/// Upper bound on cached Client-Server API URLs.
+pub const CS_API_URL_CACHE_MAX_ENTRIES: usize = 10_000;
+
 impl<V> Default for TtlCache<V> {
     fn default() -> Self {
         Self {
@@ -156,9 +159,7 @@ impl<V: Clone> TtlCache<V> {
         Self::default()
     }
 
-    /// A cache that holds at most `max_entries` live entries. Inserts beyond
-    /// the bound first purge expired entries and are dropped when the cache
-    /// is still full.
+    /// A cache that holds at most `max_entries` entries.
     pub fn with_max_entries(max_entries: usize) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
@@ -175,6 +176,9 @@ impl<V: Clone> TtlCache<V> {
         }
     }
 
+    /// Upserts an entry in the cache. If insertion is required and the cache is full, expired
+    /// entries are purged. If the cache is still full afterwards, the entry closest to expiry
+    /// is evicted.
     pub fn set(&self, server_name: &str, value: V, ttl: Duration) {
         let now = Instant::now();
         let mut entries = self.entries.write().unwrap();
@@ -183,8 +187,13 @@ impl<V: Clone> TtlCache<V> {
             && !entries.contains_key(server_name)
         {
             entries.retain(|_, (_, expires_at)| now <= *expires_at);
-            if entries.len() >= max {
-                return;
+            if entries.len() >= max
+                && let Some(oldest) = entries
+                    .iter()
+                    .min_by_key(|(_, (_, expires_at))| *expires_at)
+                    .map(|(key, _)| key.clone())
+            {
+                entries.remove(&oldest);
             }
         }
         entries.insert(server_name.to_owned(), (value, now + ttl));
@@ -1752,29 +1761,32 @@ mod tests {
 
     // ── TtlCache ──────────────────────────────────────────────────────────────
 
-    /// A bounded cache purges expired entries before dropping inserts.
+    /// A bounded cache purges expired entries and then evicts the entry
+    /// closest to expiry to make room.
     #[test]
     fn test_ttl_cache_max_entries() {
         let cache: TtlCache<String> = TtlCache::with_max_entries(2);
-        cache.set("a", "1".into(), Duration::from_secs(60));
+        cache.set("a", "1".into(), Duration::from_secs(30));
         cache.set("b", "2".into(), Duration::from_secs(60));
 
-        // At the bound: a new key is dropped, an existing key still updates.
-        cache.set("c", "3".into(), Duration::from_secs(60));
-        assert_eq!(
-            cache.get("c"),
-            None,
-            "insert beyond the bound must be dropped"
-        );
-        cache.set("a", "1b".into(), Duration::from_secs(60));
+        // Updating an existing key at the bound evicts nothing.
+        cache.set("a", "1b".into(), Duration::from_secs(30));
         assert_eq!(cache.get("a"), Some("1b".into()));
+        assert_eq!(cache.get("b"), Some("2".into()));
 
-        // Expired entries make room.
-        cache.set("a", "1c".into(), Duration::ZERO);
+        // A new key at the bound evicts the entry closest to expiry.
+        cache.set("c", "3".into(), Duration::from_secs(60));
+        assert_eq!(cache.get("a"), None, "oldest entry must be evicted");
+        assert_eq!(cache.get("b"), Some("2".into()));
+        assert_eq!(cache.get("c"), Some("3".into()));
+
+        // Expired entries are purged before live ones are evicted.
         cache.set("b", "2c".into(), Duration::ZERO);
         std::thread::sleep(Duration::from_millis(10));
-        cache.set("c", "3".into(), Duration::from_secs(60));
-        assert_eq!(cache.get("c"), Some("3".into()));
+        cache.set("d", "4".into(), Duration::from_secs(60));
+        assert_eq!(cache.get("b"), None, "expired entry must be purged");
+        assert_eq!(cache.get("c"), Some("3".into()), "live entry must survive");
+        assert_eq!(cache.get("d"), Some("4".into()));
     }
 
     // ── resolve_federation_base_url ───────────────────────────────────────────
