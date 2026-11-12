@@ -63,6 +63,14 @@ async fn main() {
         );
     }
 
+    let deps = match RealDeps::new(config.skip_verify_tls) {
+        Ok(deps) => Arc::new(deps),
+        Err(err) => {
+            eprintln!("Could not initialise dependencies: {err}");
+            std::process::exit(1);
+        }
+    };
+
     let store: Option<Arc<dyn Store>> = if config.redis_url.is_empty() {
         warn!("LIVEKIT_REDIS_URL not set. Using in-memory store.");
         None
@@ -88,9 +96,7 @@ async fn main() {
         config.sanity_check_interval,
         config.cs_api_url_overrides.clone(),
         store,
-        Arc::new(RealDeps {
-            skip_verify_tls: config.skip_verify_tls,
-        }),
+        deps,
     );
 
     if handler.verifies_legacy_membership() {
