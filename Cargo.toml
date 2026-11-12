@@ -39,7 +39,7 @@ async-trait = "0.1"
 thiserror = "2"
 
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2", "query", "system-proxy"] }
-redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.32", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"] }
 
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.10"
@@ -64,3 +64,4 @@ temp-env = "0.3"
 http-body-util = "0.1"
 rcgen = "0.14"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
+tokio-rustls = { version = "0.26", default-features = false }

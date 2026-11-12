@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::config::RedisUrl;
 use crate::delayed_event_manager::{DelayedEventJobParams, JobKey};
 
 /// A stored job.
@@ -54,8 +55,8 @@ pub struct RedisStore {
 
 pub(crate) const REDIS_JOBS_HASH_KEY: &str = "lk-jwt:jobs";
 
-pub async fn new_redis_store(redis_url: &str) -> Result<Arc<dyn Store>, String> {
-    let client = redis::Client::open(redis_url)
+pub async fn new_redis_store(redis_url: &RedisUrl) -> Result<Arc<dyn Store>, String> {
+    let client = redis::Client::open(redis_url.expose())
         .map_err(|e| format!("store: invalid Redis URL {redis_url:?}: {e}"))?;
     let mut conn = client
         .get_connection_manager()
@@ -66,7 +67,7 @@ pub async fn new_redis_store(redis_url: &str) -> Result<Arc<dyn Store>, String> 
         .await
         .map_err(|e| format!("store: Redis ping failed: {e}"))?;
 
-    info!(addr = redis_url, "store: connected to Redis");
+    info!(addr = %redis_url, "store: connected to Redis");
     Ok(Arc::new(RedisStore { conn }))
 }
 
@@ -135,7 +136,9 @@ pub(crate) mod test_support {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{
+        AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+    };
     use tokio::sync::mpsc;
 
     use super::*;
@@ -278,10 +281,23 @@ pub(crate) mod test_support {
     }
 
     pub(crate) async fn spawn_mini_redis() -> MiniRedis {
+        spawn_mini_redis_with(|socket| async { Some(socket) }).await
+    }
+
+    /// Spawns a mini Redis whose accepted connections are first passed
+    /// through `wrap`, e.g. to perform a TLS handshake. Returning `None`
+    /// drops the connection.
+    async fn spawn_mini_redis_with<S, F, Fut>(wrap: F) -> MiniRedis
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        F: Fn(tokio::net::TcpStream) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<S>> + Send + 'static,
+    {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let state: Arc<Mutex<HashMap<String, HashMap<String, String>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let wrap = Arc::new(wrap);
 
         let handle = tokio::spawn(async move {
             loop {
@@ -289,8 +305,11 @@ pub(crate) mod test_support {
                     return;
                 };
                 let state = state.clone();
+                let wrap = wrap.clone();
                 tokio::spawn(async move {
-                    let _ = serve_connection(socket, state).await;
+                    if let Some(stream) = wrap(socket).await {
+                        let _ = serve_connection(stream, state).await;
+                    }
                 });
             }
         });
@@ -298,8 +317,46 @@ pub(crate) mod test_support {
         MiniRedis { addr, handle }
     }
 
-    async fn read_command(
-        reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    /// A [`MiniRedis`] that only speaks TLS, using a freshly generated
+    /// self-signed certificate for `localhost` and `127.0.0.1`. Clients must
+    /// trust `ca_pem`.
+    pub(crate) struct MiniRedisTls {
+        pub mini: MiniRedis,
+        pub ca_pem: String,
+    }
+
+    pub(crate) async fn spawn_mini_redis_tls() -> MiniRedisTls {
+        // Mirrors main.rs: multiple rustls crypto backends are compiled in, so
+        // the process-level provider must be picked explicitly.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let certified = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_owned(),
+            "127.0.0.1".to_owned(),
+        ])
+        .unwrap();
+        let ca_pem = certified.cert.pem();
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![certified.cert.der().clone()],
+                rustls::pki_types::PrivateKeyDer::try_from(certified.signing_key.serialize_der())
+                    .unwrap(),
+            )
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+        let mini = spawn_mini_redis_with(move |socket| {
+            let acceptor = acceptor.clone();
+            async move { acceptor.accept(socket).await.ok() }
+        })
+        .await;
+
+        MiniRedisTls { mini, ca_pem }
+    }
+
+    async fn read_command<R: AsyncRead + Unpin>(
+        reader: &mut BufReader<R>,
     ) -> std::io::Result<Option<Vec<String>>> {
         let mut line = String::new();
         if reader.read_line(&mut line).await? == 0 {
@@ -332,11 +389,11 @@ pub(crate) mod test_support {
         format!("${}\r\n{s}\r\n", s.len())
     }
 
-    async fn serve_connection(
-        socket: tokio::net::TcpStream,
+    async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
+        socket: S,
         state: Arc<Mutex<HashMap<String, HashMap<String, String>>>>,
     ) -> std::io::Result<()> {
-        let (read_half, mut write_half) = socket.into_split();
+        let (read_half, mut write_half) = tokio::io::split(socket);
         let mut reader = BufReader::new(read_half);
 
         while let Some(parts) = read_command(&mut reader).await? {
@@ -542,6 +599,43 @@ mod tests {
             store
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_redis_store_over_tls() {
+        run_store_tests(|| async {
+            let tls = spawn_mini_redis_tls().await;
+            // The server certificate is self-signed, so trust it explicitly
+            // instead of relying on the system trust store.
+            let client = redis::Client::build_with_tls(
+                format!("rediss://{}", tls.mini.addr),
+                redis::TlsCertificates {
+                    client_tls: None,
+                    root_cert: Some(tls.ca_pem.clone().into_bytes()),
+                },
+            )
+            .unwrap();
+            let conn = client.get_connection_manager().await.unwrap();
+            std::mem::forget(tls);
+            Arc::new(RedisStore::with_connection(conn)) as Arc<dyn Store>
+        })
+        .await;
+    }
+
+    #[test]
+    fn test_rediss_urls_are_accepted() {
+        // Fails without a TLS feature enabled on the redis crate.
+        redis::Client::open("rediss://localhost:6379").expect("rediss:// URL was rejected");
+    }
+
+    #[tokio::test]
+    async fn test_new_redis_store_error_redacts_password() {
+        let url: RedisUrl = "foo://:secret@localhost:6379".parse().unwrap();
+        let Err(err) = new_redis_store(&url).await else {
+            panic!("unsupported URL scheme should fail");
+        };
+        assert!(!err.contains("secret"), "password leaked: {err}");
+        assert!(err.contains("REDACTED"), "unexpected error: {err}");
     }
 
     #[tokio::test]
