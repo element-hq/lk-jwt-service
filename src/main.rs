@@ -63,17 +63,18 @@ async fn main() {
         );
     }
 
-    let store: Option<Arc<dyn Store>> = if config.redis_url.is_empty() {
-        warn!("LIVEKIT_REDIS_URL not set. Using in-memory store.");
-        None
-    } else {
-        match new_redis_store(&config.redis_url).await {
+    let store: Option<Arc<dyn Store>> = match &config.redis_url {
+        None => {
+            warn!("LIVEKIT_REDIS_URL not set. Using in-memory store.");
+            None
+        }
+        Some(redis_url) => match new_redis_store(redis_url).await {
             Ok(store) => Some(store),
             Err(err) => {
                 eprintln!("Could not connect Redis store: {err}");
                 std::process::exit(1);
             }
-        }
+        },
     };
 
     let handler = Handler::new(

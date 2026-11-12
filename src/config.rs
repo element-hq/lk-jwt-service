@@ -14,6 +14,46 @@ use tracing::{info, warn};
 
 use crate::helper::CsApiUrl;
 
+/// A Redis connection URL.
+#[derive(Clone, PartialEq)]
+pub struct RedisUrl(url::Url);
+
+impl RedisUrl {
+    /// Produces the full URL, including the password if there is one.
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::str::FromStr for RedisUrl {
+    type Err = url::ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        url::Url::parse(s).map(Self)
+    }
+}
+
+impl std::fmt::Display for RedisUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut redacted = self.0.clone();
+        // Strip the password from the URL if needed.
+        if redacted.password().is_some() {
+            // Only fails for URLs that cannot carry credentials, which
+            // therefore cannot have had a password to begin with.
+            let _ = redacted.set_password(Some("REDACTED"));
+        }
+        write!(f, "{redacted}")
+    }
+}
+
+impl std::fmt::Debug for RedisUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Reuse the `Display` implementation to strip the password from
+        // the URL if needed.
+        write!(f, "{:?}", self.to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub key: String,
@@ -31,7 +71,7 @@ pub struct Config {
     /// be preferred over .well-known resolution for the contained server names.
     pub cs_api_url_overrides: HashMap<String, CsApiUrl>,
     /// Connection URL for the Redis store.
-    pub redis_url: String,
+    pub redis_url: Option<RedisUrl>,
     /// Tokens used for authenticating requests to and from the homeserver.
     pub app_service_config: AppServiceConfig,
     /// Whether issued tokens grant participants the right to update their own
@@ -299,28 +339,26 @@ pub fn parse_config() -> Result<Config, String> {
 
     let app_service_config = read_app_service_config()?;
 
-    let mut redis_url_string = env_var("LIVEKIT_REDIS_URL");
+    let redis_url_string = env_var("LIVEKIT_REDIS_URL");
     let redis_password = env_var("LIVEKIT_REDIS_PASSWORD");
-    if redis_url_string.is_empty() {
+    let redis_url = if redis_url_string.is_empty() {
         if !redis_password.is_empty() {
             warn!(
                 "LIVEKIT_REDIS_PASSWORD was set without setting LIVEKIT_REDIS_URL. Continuing without Redis support"
             );
         }
+        None
     } else {
-        match url::Url::parse(&redis_url_string) {
-            Ok(mut parsed_url) => {
-                if !redis_password.is_empty() {
-                    let result = parsed_url.set_password(Some(&redis_password));
-                    if result.is_err() {
-                        return Err("LIVEKIT_REDIS_PASSWORD was set but couldn't be combined with LIVEKIT_REDIS_URL".into());
-                    }
-                }
-                redis_url_string = parsed_url.to_string()
-            }
-            Err(err) => return Err(format!("Could not parse LIVEKIT_REDIS_URL: {}", err)),
-        };
-    }
+        let mut parsed_url = url::Url::parse(&redis_url_string)
+            .map_err(|err| format!("Could not parse LIVEKIT_REDIS_URL: {err}"))?;
+        if !redis_password.is_empty() && parsed_url.set_password(Some(&redis_password)).is_err() {
+            return Err(
+                "LIVEKIT_REDIS_PASSWORD was set but couldn't be combined with LIVEKIT_REDIS_URL"
+                    .into(),
+            );
+        }
+        Some(RedisUrl(parsed_url))
+    };
 
     Ok(Config {
         key,
@@ -331,7 +369,7 @@ pub fn parse_config() -> Result<Config, String> {
         lk_jwt_bind,
         sanity_check_interval,
         cs_api_url_overrides,
-        redis_url: redis_url_string,
+        redis_url,
         app_service_config,
         can_update_own_metadata,
     })
@@ -831,7 +869,7 @@ mod tests {
                     lk_jwt_bind: ":8080".into(),
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
-                    redis_url: String::new(),
+                    redis_url: None,
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
                 }),
@@ -876,7 +914,11 @@ mod tests {
                         "matrix.com".to_owned(),
                         CsApiUrl("https://matrix-client.matrix.com".into()),
                     )]),
-                    redis_url: "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379".into(),
+                    redis_url: Some(
+                        "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379"
+                            .parse()
+                            .unwrap(),
+                    ),
                     app_service_config: AppServiceConfig {
                         as_token: "as_token_env_pheethiewixohp9eecheeGh".to_owned(),
                         hs_token: "hs_token_env_ahb8eiwae0viey7gee4ieNg".to_owned(),
@@ -905,7 +947,7 @@ mod tests {
                     lk_jwt_bind: ":9090".into(),
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
-                    redis_url: String::new(),
+                    redis_url: None,
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
                 }),
@@ -929,7 +971,7 @@ mod tests {
                     lk_jwt_bind: ":8080".into(),
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
-                    redis_url: String::new(),
+                    redis_url: None,
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
                 }),
@@ -1009,7 +1051,7 @@ mod tests {
                     lk_jwt_bind: ":8080".into(),
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
-                    redis_url: String::new(),
+                    redis_url: None,
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
                 }),
@@ -1045,7 +1087,7 @@ mod tests {
                     lk_jwt_bind: ":8080".into(),
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
-                    redis_url: "redis://localhost:6379".to_owned(),
+                    redis_url: Some("redis://localhost:6379".parse().unwrap()),
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
                 }),
@@ -1072,8 +1114,11 @@ mod tests {
                     lk_jwt_bind: ":8080".into(),
                     sanity_check_interval: Duration::ZERO,
                     cs_api_url_overrides: HashMap::new(),
-                    redis_url: "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379"
-                        .to_owned(),
+                    redis_url: Some(
+                        "redis://:redis_cred_ua5ahg7ahruek4sho6ateeFe@localhost:6379"
+                            .parse()
+                            .unwrap(),
+                    ),
                     app_service_config: Default::default(),
                     can_update_own_metadata: false,
                 }),
@@ -1122,6 +1167,50 @@ mod tests {
                 assert_eq!(Some(got), tc.want_config, "{}: config mismatch", tc.name);
             });
         }
+    }
+
+    #[test]
+    fn test_redis_url_redacts_password() {
+        for (input, want) in [
+            ("redis://localhost:6379", "redis://localhost:6379"),
+            (
+                "redis://:secret@localhost:6379",
+                "redis://:REDACTED@localhost:6379",
+            ),
+            (
+                "rediss://user:secret@localhost:6379/0",
+                "rediss://user:REDACTED@localhost:6379/0",
+            ),
+            ("redis://user@localhost:6379", "redis://user@localhost:6379"),
+        ] {
+            let url: RedisUrl = input.parse().unwrap();
+            assert_eq!(url.to_string(), want, "Display of {input:?}");
+            assert_eq!(
+                format!("{url:?}"),
+                format!("{want:?}"),
+                "Debug of {input:?}"
+            );
+            assert_eq!(url.expose(), input, "expose of {input:?}");
+        }
+
+        // The whole config must be safe to print as well.
+        let url: RedisUrl = "redis://:supersecret@localhost:6379".parse().unwrap();
+        let config = Config {
+            key: String::new(),
+            secret: String::new(),
+            lk_url: String::new(),
+            skip_verify_tls: false,
+            full_access_homeservers: vec![],
+            lk_jwt_bind: String::new(),
+            sanity_check_interval: Duration::ZERO,
+            cs_api_url_overrides: HashMap::new(),
+            redis_url: Some(url),
+            app_service_config: Default::default(),
+            can_update_own_metadata: false,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("supersecret"), "password leaked: {debug}");
+        assert!(debug.contains("REDACTED"), "unexpected Debug: {debug}");
     }
 
     #[test]
