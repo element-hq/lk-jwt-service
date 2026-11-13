@@ -1414,9 +1414,7 @@ impl FederationClient {
                 .map_err(|e| format!("failed to build server name resolver: {e}"))?,
         );
         let client = resolver
-            .create_client_with_builder(
-                reqwest::Client::builder().tls_danger_accept_invalid_certs(skip_verify_tls),
-            )
+            .create_client()
             .map_err(|e| format!("failed to build federation HTTP client: {e}"))?;
         Ok(Self { resolver, client })
     }
