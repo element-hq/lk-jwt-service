@@ -6,7 +6,35 @@ permissions:
   contents: write
 
 jobs:
+  check-version:
+    name: Check Cargo.toml version matches the tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - name: Compare versions
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag_version="${TAG#v}"
+          cargo_version="$(cargo pkgid -p lk-jwt-service | sed -E 's/.*[#@]//')"
+          echo "Tag version:        $tag_version"
+          echo "Cargo.toml version: $cargo_version"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::Tag $TAG does not match version $cargo_version in Cargo.toml. Bump the version in Cargo.toml (and Cargo.lock) before tagging."
+            exit 1
+          fi
+
   build:
+    needs: ["check-version"]
     strategy:
       matrix:
         include:
@@ -22,7 +50,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
