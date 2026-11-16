@@ -15,7 +15,7 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
             # Pin the C compiler to baseline x86-64, matching what the Rust x86_64
             # target assumes. This avoids inheriting defaults from Ubuntu's gcc.
             cflags: -march=x86-64
@@ -24,7 +24,7 @@ jobs:
             qemu_cpu: qemu64
           - target: aarch64-unknown-linux-musl
             arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             # Pin the C compiler to baseline ARMv8.0-A, matching what the Rust
             # aarch64 target assumes. This avoids inheriting defaults from Ubuntu's
             # gcc.

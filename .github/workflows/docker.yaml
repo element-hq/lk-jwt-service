@@ -24,12 +24,12 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
             qemu: qemu-x86_64
             # Baseline x86-64 (no SSSE3/SSE4/AVX).
             qemu_cpu: qemu64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             qemu: qemu-aarch64
             # ARMv8.0-A (no LSE atomics, no SVE, no v8.2 extensions).
             qemu_cpu: cortex-a53
@@ -109,7 +109,7 @@ jobs:
 
   merge:
     name: Merge on GHCR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: build
     permissions:
       contents: read
@@ -158,7 +158,7 @@ jobs:
 
   deploy:
     name: Publish on Element registry
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: merge
     if: github.event_name != 'pull_request'
     permissions:
