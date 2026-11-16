@@ -1,0 +1,65 @@
+name: Build static binaries
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & smoke test (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+            runner: ubuntu-latest
+            qemu: qemu-x86_64
+            # Baseline x86-64 (no SSSE3/SSE4/AVX).
+            qemu_cpu: qemu64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            qemu: qemu-aarch64
+            # ARMv8.0-A (no LSE atomics, no SVE, no v8.2 extensions).
+            qemu_cpu: cortex-a53
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+      BINARY: build/lk-jwt-service_linux_${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: mkdir build
+      - name: Build static binary
+        run: cargo build --release --locked --target "$TARGET"
+        env:
+          CC: musl-gcc
+      - run: cp "target/$TARGET/release/lk-jwt-service" "$BINARY"
+      - name: Smoke test
+        uses: $/.github/actions/smoke-test-binaries
+        with:
+          service: ${{ env.BINARY }}
+          healthcheck: target/${{ matrix.target }}/release/healthcheck
+          qemu: ${{ matrix.qemu }}
+          qemu-cpu: ${{ matrix.qemu_cpu }}
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: build/lk-jwt-service_linux_${{ matrix.arch }}
+          if-no-files-found: error

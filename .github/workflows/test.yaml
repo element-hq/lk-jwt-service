@@ -128,3 +128,9 @@ jobs:
           name: ess-helm-logs
           path: ess-helm-logs
           retention-days: 1
+
+  binaries:
+    name: Static binaries
+    permissions:
+      contents: read
+    uses: $/.github/workflows/binaries.yaml

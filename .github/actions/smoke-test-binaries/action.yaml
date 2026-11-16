@@ -1,0 +1,62 @@
+name: Smoke test binary
+description: >-
+  Starts a lk-jwt-service binary under QEMU user-mode emulation with a
+  baseline CPU model and probes it with the healthcheck binary.
+
+inputs:
+  service:
+    description: Path to the lk-jwt-service binary
+    required: true
+  healthcheck:
+    description: Path to the healthcheck binary, used as the probe
+    required: true
+  qemu:
+    description: QEMU user-mode emulator to run the binaries with
+    required: true
+  qemu-cpu:
+    description: QEMU CPU model to emulate
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install QEMU
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y qemu-user
+    - name: Run service and probe it
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        HEALTHCHECK: ${{ inputs.healthcheck }}
+        QEMU: ${{ inputs.qemu }}
+        QEMU_CPU: ${{ inputs.qemu-cpu }}
+      run: |
+        set -euo pipefail
+        export LIVEKIT_KEY=smoke LIVEKIT_SECRET=smoke \
+          LIVEKIT_URL=wss://livekit.invalid LIVEKIT_JWT_BIND=127.0.0.1:8099 \
+          LIVEKIT_FULL_ACCESS_HOMESERVERS=smoke.invalid
+        "$QEMU" -cpu "$QEMU_CPU" "$SERVICE" &
+        pid=$!
+        for _ in $(seq 1 30); do
+          probe=0
+          "$QEMU" -cpu "$QEMU_CPU" "$HEALTHCHECK" || probe=$?
+          if [ "$probe" -eq 0 ]; then
+            echo "service is healthy under $QEMU -cpu $QEMU_CPU"
+            kill "$pid"
+            exit 0
+          elif [ "$probe" -ge 128 ]; then
+            echo "healthcheck died with status $probe"
+            kill "$pid"
+            exit 1
+          fi
+          if ! kill -0 "$pid" 2>/dev/null; then
+            status=0
+            wait "$pid" || status=$?
+            echo "service exited with status $status before becoming healthy"
+            exit 1
+          fi
+          sleep 1
+        done
+        echo "service did not become healthy within 30s"
+        kill "$pid"
+        exit 1
