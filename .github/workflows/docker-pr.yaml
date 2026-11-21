@@ -1,4 +1,4 @@
-name: Trigger Docker for external PRs
+name: Trigger Docker publish on Element registry and Docker Hub
 on:
   pull_request:
     types:
