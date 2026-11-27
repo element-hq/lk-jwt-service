@@ -32,7 +32,7 @@ service.
 > `LIVEKIT_FULL_ACCESS_HOMESERVERS`.
 
 Regardless of the above and as outlined in the
-[Element Call Self-Hosting Guide](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md),
+[Element Call Self-Hosting Guide](https://github.com/element-hq/element-call/blob/livekit/docs/self_hosting.md),
 you’ll also need:
 
 - A [LiveKit SFU](https://github.com/livekit/livekit)
@@ -308,7 +308,7 @@ server {
 
 For proper MatrixRTC functionality, you need to configure your site's
 `.well-known/matrix/client`. See the
-[Element Call self-hosting guide](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md#matrixrtc-backend-announcement)
+[Element Call self-hosting guide](https://github.com/element-hq/element-call/blob/livekit/docs/self_hosting.md)
 for reference.
 
 The following key must be included in
