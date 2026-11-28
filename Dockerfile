@@ -29,6 +29,11 @@ RUN mkdir -p src/bin integration-tests/src e2e-tests/src xtask/src \
 
 COPY src ./src
 
+# Inject the version into the Cargo manifest if we're building from a release tag.
+ARG RELEASE_TAG=""
+COPY .github/scripts/inject-version.sh /tmp/inject-version.sh
+RUN if [ -n "$RELEASE_TAG" ]; then sh /tmp/inject-version.sh "$RELEASE_TAG"; fi
+
 # Docker preserves the source files' original mtimes, which predate the
 # stub build above, so cargo would otherwise consider them unchanged and
 # skip recompilation entirely.

@@ -61,6 +61,10 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          # If we're running on a tag, pass it down so that the Docker build can inject
+          # the version string into the Cargo manifest.
+          build-args: |
+            RELEASE_TAG=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           provenance: mode=max
           sbom: true
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
